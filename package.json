@@ -1,0 +1,15 @@
+{
+  "name": "amomessenger-bot-step0",
+  "version": "1.0.0",
+  "description": "Шаг 0: сервер, который принимает и логирует вебхуки от amoMessenger",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
