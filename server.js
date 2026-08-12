@@ -1,22 +1,12 @@
 // ============================================================
 // Сервер бота: приём вебхуков от amoMessenger + доступ к amoCRM
 // ============================================================
-// Доступ к amoCRM теперь работает через ДОЛГОСРОЧНЫЙ ТОКЕН
-// (взят на странице интеграции в amoCRM, кнопка "Сгенерировать
-// токен"), поэтому никакого обмена кодами (OAuth) не нужно.
+// Доступ к amoCRM работает через ДОЛГОСРОЧНЫЙ ТОКЕН (взят на
+// странице интеграции в amoCRM), без обмена кодами (OAuth).
 //
-// Обязательные переменные окружения (заданы в Render → Environment):
-//   AMOCRM_TOKEN            — долгосрочный токен из amoCRM
-//   AMOCRM_DOMAIN           — адрес аккаунта, например vashafirma.amocrm.ru
-//
-// Переменные для OAuth-приложения amoMessenger (нужны, чтобы бот
-// вообще смог установиться пользователем):
-//   AMOMESSENGER_CLIENT_ID     — Client ID вашего приложения (developers.amo.tm)
-//   AMOMESSENGER_CLIENT_SECRET — Client Secret вашего приложения
-//
-// В настройках приложения (developers.amo.tm → ваше приложение →
-// раздел "OAuth авторизация") нужно указать Redirect URL:
-//   https://amobot-cpck.onrender.com/amo_authorization
+// Обязательные переменные окружения (Render → Environment):
+//   AMOCRM_TOKEN  — долгосрочный токен из amoCRM
+//   AMOCRM_DOMAIN — адрес аккаунта, например vashafirma.amocrm.ru
 // ============================================================
 
 const express = require("express");
@@ -25,8 +15,20 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// Храним последние 20 полученных от amoMessenger запросов в памяти,
-// чтобы можно было посмотреть их прямо в браузере.
+// ------------------------------------------------------------------
+// НАСТРОЙКИ ИЗ ТЗ — если ID полей/типа задачи изменятся, править тут
+// ------------------------------------------------------------------
+const TASK_TYPE_ID = 2746005; // Тип задачи "Подтв. замер(и)"
+
+const FIELD_IDS = {
+  contractNumber: 412776, // № договора
+  measureDate: 175370,    // Дата замера
+  measureTime: 413828,    // Время замера
+  measureAddress: 175412, // Адрес замера
+  product: 172572,        // Продукт
+};
+
+// Храним последние 20 полученных от amoMessenger запросов в памяти.
 const lastRequests = [];
 const MAX_STORED = 20;
 
@@ -45,7 +47,7 @@ function storeRequest(req) {
 }
 
 // -----------------------------------------------------------
-// Небольшой помощник для обращений к amoCRM API.
+// Помощник для обращений к amoCRM API.
 // -----------------------------------------------------------
 async function amocrmRequest(pathAndQuery) {
   const domain = process.env.AMOCRM_DOMAIN;
@@ -62,6 +64,8 @@ async function amocrmRequest(pathAndQuery) {
     },
   });
 
+  if (response.status === 204) return null; // amoCRM отвечает так, если ничего не найдено
+
   const data = await response.json().catch(() => null);
 
   if (!response.ok) {
@@ -74,6 +78,151 @@ async function amocrmRequest(pathAndQuery) {
 }
 
 // -----------------------------------------------------------
+// Помощники для работы с датами по московскому времени (UTC+3).
+// -----------------------------------------------------------
+function moscowShiftedNow() {
+  return new Date(Date.now() + 3 * 3600 * 1000);
+}
+
+function startOfMoscowDay(daysOffset) {
+  const shifted = moscowShiftedNow();
+  shifted.setUTCDate(shifted.getUTCDate() + daysOffset);
+  shifted.setUTCHours(0, 0, 0, 0);
+  return Math.floor((shifted.getTime() - 3 * 3600 * 1000) / 1000);
+}
+
+function endOfMoscowDay(daysOffset) {
+  const shifted = moscowShiftedNow();
+  shifted.setUTCDate(shifted.getUTCDate() + daysOffset);
+  shifted.setUTCHours(23, 59, 59, 999);
+  return Math.floor((shifted.getTime() - 3 * 3600 * 1000) / 1000);
+}
+
+// Возвращает диапазон [from, to] в unix-времени согласно правилу из ТЗ:
+//  - до 18:00: с вчера 00:00 по сегодня 23:59
+//  - после 18:00: с вчера 00:00 по завтра 23:59
+// ВАЖНО: это моя интерпретация формулировки из ТЗ (там было указано
+// как два отдельных условия) — если логика должна быть другой, скажите,
+// поправим именно эту функцию.
+function getDateRange() {
+  const moscowHour = moscowShiftedNow().getUTCHours();
+  const from = startOfMoscowDay(-1);
+  const to = moscowHour < 18 ? endOfMoscowDay(0) : endOfMoscowDay(1);
+  return { from, to, moscowHour };
+}
+
+function formatFieldValue(value) {
+  // Если значение похоже на unix-таймстамп (дата/время из amoCRM) — форматируем.
+  if (typeof value === "number" && value > 1000000000) {
+    return new Date(value * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+  }
+  return value;
+}
+
+function getCustomFieldValue(entity, fieldId) {
+  if (!entity.custom_fields_values) return null;
+  const field = entity.custom_fields_values.find((f) => f.field_id === fieldId);
+  if (!field || !field.values || !field.values[0]) return null;
+  return formatFieldValue(field.values[0].value);
+}
+
+// -----------------------------------------------------------
+// Получить задачи нужного типа за нужный период.
+// -----------------------------------------------------------
+async function fetchMeasurementTasks() {
+  const { from, to } = getDateRange();
+  const data = await amocrmRequest(
+    `/api/v4/tasks?filter[task_type]=${TASK_TYPE_ID}&filter[complete_till][from]=${from}&filter[complete_till][to]=${to}&limit=250`
+  );
+  return (data && data._embedded && data._embedded.tasks) || [];
+}
+
+// -----------------------------------------------------------
+// Получить сделки по списку ID (плюс привязанные контакты).
+// -----------------------------------------------------------
+async function fetchLeadsByIds(ids) {
+  if (ids.length === 0) return [];
+  const idsQuery = ids.map((id) => `filter[id][]=${id}`).join("&");
+  const data = await amocrmRequest(`/api/v4/leads?${idsQuery}&with=contacts&limit=250`);
+  return (data && data._embedded && data._embedded.leads) || [];
+}
+
+// -----------------------------------------------------------
+// Получить имя и телефон контакта.
+// -----------------------------------------------------------
+async function fetchContactInfo(contactId) {
+  const contact = await amocrmRequest(`/api/v4/contacts/${contactId}`);
+  if (!contact) return { name: null, phones: [] };
+
+  const phones = [];
+  if (contact.custom_fields_values) {
+    const phoneField = contact.custom_fields_values.find((f) => f.field_code === "PHONE");
+    if (phoneField && phoneField.values) {
+      phoneField.values.forEach((v) => phones.push(v.value));
+    }
+  }
+  return { name: contact.name, phones };
+}
+
+// -----------------------------------------------------------
+// Собрать итоговый список замеров с нужными полями (п.6 ТЗ).
+// -----------------------------------------------------------
+async function buildMeasurementsList() {
+  const tasks = await fetchMeasurementTasks();
+
+  const leadIds = [
+    ...new Set(tasks.filter((t) => t.entity_type === "leads").map((t) => t.entity_id)),
+  ];
+
+  const leads = await fetchLeadsByIds(leadIds);
+
+  const results = [];
+  for (const lead of leads) {
+    let contactInfo = { name: null, phones: [] };
+    const embeddedContacts = (lead._embedded && lead._embedded.contacts) || [];
+    const mainContact = embeddedContacts.find((c) => c.is_main) || embeddedContacts[0];
+    if (mainContact) {
+      contactInfo = await fetchContactInfo(mainContact.id);
+    }
+
+    results.push({
+      lead_id: lead.id,
+      lead_link: `https://${process.env.AMOCRM_DOMAIN}/leads/detail/${lead.id}`,
+      contract_number: getCustomFieldValue(lead, FIELD_IDS.contractNumber),
+      measure_date: getCustomFieldValue(lead, FIELD_IDS.measureDate),
+      measure_time: getCustomFieldValue(lead, FIELD_IDS.measureTime),
+      measure_address: getCustomFieldValue(lead, FIELD_IDS.measureAddress),
+      product: getCustomFieldValue(lead, FIELD_IDS.product),
+      client_name: contactInfo.name,
+      client_phones: contactInfo.phones,
+    });
+  }
+
+  return results;
+}
+
+// -----------------------------------------------------------
+// Собрать текст сообщения бота (п.6 ТЗ: каждая сделка с новой
+// строки, значения полей в одну строку).
+// -----------------------------------------------------------
+function formatMessageText(measurements) {
+  return measurements
+    .map((m) => {
+      return [
+        `№ договора: ${m.contract_number ?? "—"}`,
+        `Дата замера: ${m.measure_date ?? "—"}`,
+        `Время замера: ${m.measure_time ?? "—"}`,
+        `Адрес замера: ${m.measure_address ?? "—"}`,
+        `Продукт: ${m.product ?? "—"}`,
+        `Имя клиента: ${m.client_name ?? "—"}`,
+        `Телефон: ${m.client_phones.join(", ") || "—"}`,
+        `Ссылка: ${m.lead_link}`,
+      ].join("; ");
+    })
+    .join("\n");
+}
+
+// -----------------------------------------------------------
 // Проверка, что сервер вообще жив.
 // -----------------------------------------------------------
 app.get("/", (req, res) => {
@@ -81,9 +230,7 @@ app.get("/", (req, res) => {
 });
 
 // -----------------------------------------------------------
-// Проверка связи с amoCRM: показывает название и ID аккаунта,
-// если токен и домен настроены верно.
-// Откройте в браузере: https://ваш-адрес.onrender.com/debug/amocrm-test
+// Проверка связи с amoCRM.
 // -----------------------------------------------------------
 app.get("/debug/amocrm-test", async (req, res) => {
   try {
@@ -96,144 +243,45 @@ app.get("/debug/amocrm-test", async (req, res) => {
     });
   } catch (err) {
     console.error("Ошибка проверки связи с amoCRM:", err.details || err.message);
-    res.status(500).json({
-      status: "Ошибка связи с amoCRM",
-      message: err.message,
-      details: err.details || null,
-    });
+    res.status(500).json({ status: "Ошибка связи с amoCRM", message: err.message, details: err.details || null });
   }
 });
 
 // -----------------------------------------------------------
-// Храним токен, который наше приложение получит после установки
-// пользователем через amoMessenger (OAuth). Пока храним в памяти —
-// после каждого перезапуска сервера на Render его нужно будет
-// получить заново (переустановкой приложения). Для боевой версии
-// это стоит сохранять в базу/файл, но для теста этого достаточно.
+// ГЛАВНАЯ ТЕСТОВАЯ СТРАНИЦА для пунктов 5-6 из ТЗ.
+// Откройте: https://ваш-адрес.onrender.com/debug/tasks-test
 // -----------------------------------------------------------
-let appToken = null; // { access_token, refresh_token, expires_at, user_uuid, company_uuid, client_uuid }
-
-// -----------------------------------------------------------
-// OAuth: сюда amo перенаправит пользователя после того, как он
-// разрешит установку приложения, передав параметр ?code=...
-// Redirect URL в настройках приложения должен быть:
-//   https://amobot-cpck.onrender.com/amo_authorization
-// -----------------------------------------------------------
-app.get("/amo_authorization", async (req, res) => {
-  const { code } = req.query;
-
-  if (!code) {
-    return res.status(400).send("Нет параметра code в запросе. Установка не удалась.");
-  }
-
-  const clientId = process.env.AMOMESSENGER_CLIENT_ID;
-  const clientSecret = process.env.AMOMESSENGER_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    return res
-      .status(500)
-      .send("На сервере не заданы AMOMESSENGER_CLIENT_ID / AMOMESSENGER_CLIENT_SECRET (Render → Environment).");
-  }
-
+app.get("/debug/tasks-test", async (req, res) => {
   try {
-    // Шаг 1. Меняем code на access_token
-    const tokenResponse = await fetch("https://id.amo.tm/oauth2/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        client_id: clientId,
-        client_secret: clientSecret,
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: "https://amobot-cpck.onrender.com/amo_authorization",
-      }),
+    const { from, to, moscowHour } = getDateRange();
+    const measurements = await buildMeasurementsList();
+    res.json({
+      status: "OK",
+      current_moscow_hour: moscowHour,
+      date_range: {
+        from: new Date(from * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" }),
+        to: new Date(to * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" }),
+      },
+      found_count: measurements.length,
+      measurements: measurements,
+      message_preview: formatMessageText(measurements),
     });
-
-    const tokenData = await tokenResponse.json();
-
-    if (!tokenResponse.ok) {
-      console.error("Ошибка обмена кода на токен:", tokenData);
-      return res.status(500).send(
-        `<pre>Ошибка при получении токена:\n${JSON.stringify(tokenData, null, 2)}</pre>`
-      );
-    }
-
-    // Шаг 2. Узнаём, кто установил приложение (user_uuid, company_uuid, client_uuid)
-    let context = {};
-    try {
-      const validateResponse = await fetch("https://id.amo.tm/oauth2/validate", {
-        headers: {
-          Authorization: `Bearer ${tokenData.access_token}`,
-          Accept: "application/json",
-        },
-      });
-      context = await validateResponse.json();
-    } catch (e) {
-      console.error("Не удалось получить контекст токена:", e.message);
-    }
-
-    // Сохраняем всё в памяти сервера
-    appToken = {
-      access_token: tokenData.access_token,
-      refresh_token: tokenData.refresh_token,
-      expires_at: Date.now() + (tokenData.expires_in || 0) * 1000,
-      user_uuid: context.user_uuid || null,
-      company_uuid: context.company_uuid || null,
-      client_uuid: context.client_uuid || null,
-    };
-
-    console.log("Приложение установлено, токен получен:", appToken);
-
-    res.send(`
-      <html>
-        <body style="font-family: sans-serif;">
-          <h3>Приложение успешно установлено ✅</h3>
-          <p>Access Token: ${tokenData.access_token}</p>
-          <p>Refresh Token: ${tokenData.refresh_token}</p>
-          <p>Истекает через: ${tokenData.expires_in} сек.</p>
-          <p>User Id: ${appToken.user_uuid}</p>
-          <p>Company Id: ${appToken.company_uuid}</p>
-          <p>Client Id: ${appToken.client_uuid}</p>
-          <p>Это окно можно закрыть.</p>
-          <script>setTimeout(function(){ window.close(); }, 15 * 1000);</script>
-        </body>
-      </html>
-    `);
   } catch (err) {
-    console.error("Ошибка при установке приложения:", err.message);
-    res.status(500).send(`<pre>Ошибка: ${err.message}</pre>`);
+    console.error("Ошибка построения списка замеров:", err.details || err.message);
+    res.status(500).json({ status: "Ошибка", message: err.message, details: err.details || null });
   }
 });
 
 // -----------------------------------------------------------
-// Посмотреть, какой токен сейчас сохранён (после установки
-// приложения). Откройте: https://ваш-адрес.onrender.com/debug/token
-// -----------------------------------------------------------
-app.get("/debug/token", (req, res) => {
-  if (!appToken) {
-    return res.json({ status: "Приложение ещё не установлено, токена нет." });
-  }
-  res.json(appToken);
-});
-
-// -----------------------------------------------------------
-// Сюда нужно указать URL вебхука в настройках бота amoMessenger
-// (developers.amo.tm).
-// Адрес: https://ваш-адрес-на-render.onrender.com/webhook/amomessenger
+// Вебхук от amoMessenger.
 // -----------------------------------------------------------
 app.post("/webhook/amomessenger", (req, res) => {
   console.log("=== Получен запрос от amoMessenger ===");
   console.log(JSON.stringify(req.body, null, 2));
-
   storeRequest(req);
-
   res.status(200).json({ ok: true, received: true });
 });
 
-// -----------------------------------------------------------
-// Открыв эту страницу, можно посмотреть последние запросы,
-// которые прислал amoMessenger.
-// -----------------------------------------------------------
 app.get("/debug/last", (req, res) => {
   res.json(lastRequests);
 });
