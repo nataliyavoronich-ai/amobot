@@ -111,19 +111,28 @@ function getDateRange() {
   return { from, to, moscowHour };
 }
 
-function formatFieldValue(value) {
+function formatFieldValue(value, dateOnly = false) {
   // Если значение похоже на unix-таймстамп (дата/время из amoCRM) — форматируем.
   if (typeof value === "number" && value > 1000000000) {
-    return new Date(value * 1000).toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
+    const d = new Date(value * 1000);
+    return dateOnly
+      ? d.toLocaleDateString("ru-RU", { timeZone: "Europe/Moscow" })
+      : d.toLocaleString("ru-RU", { timeZone: "Europe/Moscow" });
   }
   return value;
 }
 
-function getCustomFieldValue(entity, fieldId) {
+function getCustomFieldValue(entity, fieldId, dateOnly = false) {
   if (!entity.custom_fields_values) return null;
   const field = entity.custom_fields_values.find((f) => f.field_id === fieldId);
   if (!field || !field.values || !field.values[0]) return null;
-  return formatFieldValue(field.values[0].value);
+  return formatFieldValue(field.values[0].value, dateOnly);
+}
+
+// Аккуратно собирает адрес сделки без риска задвоить "/"
+function leadLink(leadId) {
+  const domain = (process.env.AMOCRM_DOMAIN || "").replace(/\/+$/, "");
+  return `https://${domain}/leads/detail/${leadId}`;
 }
 
 // -----------------------------------------------------------
@@ -187,9 +196,9 @@ async function buildMeasurementsList() {
 
     results.push({
       lead_id: lead.id,
-      lead_link: `https://${process.env.AMOCRM_DOMAIN}/leads/detail/${lead.id}`,
+      lead_link: leadLink(lead.id),
       contract_number: getCustomFieldValue(lead, FIELD_IDS.contractNumber),
-      measure_date: getCustomFieldValue(lead, FIELD_IDS.measureDate),
+      measure_date: getCustomFieldValue(lead, FIELD_IDS.measureDate, true),
       measure_time: getCustomFieldValue(lead, FIELD_IDS.measureTime),
       measure_address: getCustomFieldValue(lead, FIELD_IDS.measureAddress),
       product: getCustomFieldValue(lead, FIELD_IDS.product),
