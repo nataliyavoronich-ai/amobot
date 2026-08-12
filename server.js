@@ -10,10 +10,27 @@
 // ============================================================
 
 const express = require("express");
+const fs = require("fs");
+const path = require("path");
 const app = express();
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// Файл, куда сохраняем токен бота amoMessenger после установки.
+const AMOMESSENGER_TOKENS_FILE = path.join(__dirname, "amomessenger_tokens.json");
+
+function saveJsonFile(filePath, data) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function loadJsonFile(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (e) {
+    return null;
+  }
+}
 
 // ------------------------------------------------------------------
 // НАСТРОЙКИ ИЗ ТЗ — если ID полей/типа задачи изменятся, править тут
@@ -282,8 +299,79 @@ app.get("/debug/tasks-test", async (req, res) => {
 });
 
 // -----------------------------------------------------------
-// Вебхук от amoMessenger.
+// Установка бота amoMessenger: сюда придёт code после того,
+// как вы нажмёте кнопку установки бота в amoMessenger.
+// Обмен кода на токен идёт на id.amo.tm (это отдельная система
+// авторизации amoMessenger, не путать с amoCRM).
 // -----------------------------------------------------------
+app.get("/oauth/amomessenger/callback", async (req, res) => {
+  const { code } = req.query;
+
+  console.log("=== Запрос на установку бота amoMessenger ===");
+  console.log("code:", code);
+
+  if (!code) {
+    return res.status(400).send("Не хватает параметра code. Проверьте, что переход был сделан кнопкой установки бота.");
+  }
+
+  const CLIENT_ID = process.env.AMOMESSENGER_CLIENT_ID;
+  const CLIENT_SECRET = process.env.AMOMESSENGER_CLIENT_SECRET;
+  const REDIRECT_URI = process.env.AMOMESSENGER_REDIRECT_URI;
+
+  if (!CLIENT_ID || !CLIENT_SECRET || !REDIRECT_URI) {
+    return res
+      .status(500)
+      .send("На сервере не заданы AMOMESSENGER_CLIENT_ID / AMOMESSENGER_CLIENT_SECRET / AMOMESSENGER_REDIRECT_URI в Environment на Render.");
+  }
+
+  try {
+    const tokenResponse = await fetch("https://id.amo.tm/oauth2/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: "authorization_code",
+        code: code,
+        redirect_uri: REDIRECT_URI,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      console.log("Ошибка обмена кода на токен amoMessenger:", tokenData);
+      return res.status(500).send("amoMessenger отклонила обмен кода на токен. Подробности в логах сервера на Render.");
+    }
+
+    saveJsonFile(AMOMESSENGER_TOKENS_FILE, {
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      expires_in: tokenData.expires_in,
+      obtained_at: new Date().toISOString(),
+    });
+
+    console.log("Бот amoMessenger успешно установлен, токены сохранены.");
+    res.send("Готово! Бот amoMessenger успешно установлен. Можно закрыть эту страницу.");
+  } catch (err) {
+    console.error("Ошибка при установке бота amoMessenger:", err);
+    res.status(500).send("Произошла ошибка при установке. Подробности в логах сервера на Render.");
+  }
+});
+
+app.get("/debug/amomessenger-token", (req, res) => {
+  const tokens = loadJsonFile(AMOMESSENGER_TOKENS_FILE);
+  if (!tokens) {
+    return res.json({ status: "Токен ещё не сохранён. Установка бота ещё не выполнена." });
+  }
+  res.json({
+    status: "Токен найден",
+    access_token_preview: tokens.access_token ? tokens.access_token.slice(0, 15) + "..." : null,
+    obtained_at: tokens.obtained_at,
+  });
+});
+
+
 app.post("/webhook/amomessenger", (req, res) => {
   console.log("=== Получен запрос от amoMessenger ===");
   console.log(JSON.stringify(req.body, null, 2));
