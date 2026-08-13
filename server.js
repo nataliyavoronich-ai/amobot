@@ -7,22 +7,25 @@
 // Обязательные переменные окружения (Render → Environment):
 //   AMOCRM_TOKEN  — долгосрочный токен из amoCRM
 //   AMOCRM_DOMAIN — адрес аккаунта, например vashafirma.amocrm.ru
-//
-// Для RPA-виджета (боты в заявках) понадобится ещё:
-//   AMO_WIDGET_SECRET — секретный ключ приложения, которым подписываются
-//     вебхуки (secret_key из настроек приложения на developers.amo.tm).
-//     Пока не проверено на реальных вебхуках — уточните точное название
-//     параметра у ТП, если подпись не будет сходиться.
 // ============================================================
 
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const app = express();
 
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// -----------------------------------------------------------
+// ЛОВИМ АБСОЛЮТНО ВСЕ входящие запросы (любой путь, любой метод),
+// чтобы увидеть, что реально присылает виджет конструктора ботов.
+// Это временная мера для отладки — потом можно убрать.
+// -----------------------------------------------------------
+app.use((req, res, next) => {
+  storeRequest(req);
+  next();
+});
 
 // Файл, куда сохраняем токен бота amoMessenger после установки.
 const AMOMESSENGER_TOKENS_FILE = path.join(__dirname, "amomessenger_tokens.json");
@@ -51,27 +54,6 @@ const FIELD_IDS = {
   measureAddress: 175412, // Адрес замера
   product: 172572,        // Продукт
 };
-
-// Текст кнопок главного меню бота (п.3 ТЗ)
-const MAIN_MENU_BUTTONS = [
-  "Подтвердить замер",
-  "Провести замер",
-  "Загрузить фотоотчет",
-  "Внести правки",
-];
-
-// ВАЖНО: в присланной документации домен API бота указан по-разному —
-// то api.amo.tm, то api.amo.io. Здесь по умолчанию используется amo.tm
-// (по аналогии с id.amo.tm, который у нас уже рабочий). Если запросы
-// будут падать с ошибкой соединения/404 — переключите на api.amo.io
-// через переменную окружения AMO_BOT_API_BASE.
-const AMO_BOT_API_BASE = process.env.AMO_BOT_API_BASE || "https://api.amo.tm";
-
-// Сессии в памяти: какие замеры были показаны пользователю в рамках
-// конкретной заявки (request_id), чтобы при нажатии кнопки с номером
-// договора понять, о каком замере речь (п.7 ТЗ). Живёт, пока не
-// перезапустится сервер.
-const requestSessions = new Map();
 
 // Храним последние 20 полученных от amoMessenger запросов в памяти.
 const lastRequests = [];
@@ -277,22 +259,6 @@ function formatMessageText(measurements) {
 }
 
 // -----------------------------------------------------------
-// Текст с деталями ОДНОГО замера (п.7 ТЗ: каждое значение с новой строки).
-// -----------------------------------------------------------
-function formatMeasurementDetail(m) {
-  return [
-    `Дата замера: ${m.measure_date ?? "—"}`,
-    `Время замера: ${m.measure_time ?? "—"}`,
-    `Адрес замера: ${m.measure_address ?? "—"}`,
-    `Продукт: ${m.product ?? "—"}`,
-    `Имя клиента: ${m.client_name ?? "—"}`,
-    `№ телефона: ${m.client_phones.join(", ") || "—"}`,
-    `№ договора: ${m.contract_number ?? "—"}`,
-    `Ссылка на сделку: ${m.lead_link}`,
-  ].join("\n");
-}
-
-// -----------------------------------------------------------
 // Проверка, что сервер вообще жив.
 // -----------------------------------------------------------
 app.get("/", (req, res) => {
@@ -415,317 +381,6 @@ app.get("/debug/amomessenger-token", (req, res) => {
   });
 });
 
-
-// ============================================================
-// РАЗДЕЛ: RPA-ВИДЖЕТ ДЛЯ КОНСТРУКТОРА БОТА ("Боты в заявках")
-// ============================================================
-// Это ДРУГОЙ механизм, чем OAuth-приложение выше: сюда amo сама
-// передаёт управление, когда цепочка бота в конструкторе доходит
-// до нашего виджета. Виджет нужно зарегистрировать через чат ТП
-// (самостоятельная регистрация пока не работает по документации).
-//
-// СТАТУС: каркас. API отправки сообщений от бота и API возврата
-// управления в документации, присланной пользователем, не описаны —
-// как только появятся эти детали, здесь нужно будет дописать
-// реальную отправку кнопок и вызов "вернуть управление".
-// ============================================================
-
-// -----------------------------------------------------------
-// Проверка подписи запроса от amo (по алгоритму из документации):
-// 1. Берём все параметры, сортируем по названию ключа
-// 2. Исключаем сам параметр signature
-// 3. Склеиваем в строку вида key1value1key2value2...
-// 4. Считаем HMAC этой строки с секретом приложения
-// 5. Сравниваем со значением signature
-// ПРИМЕЧАНИЕ: алгоритм хеширования и точное имя секрета в документации
-// не уточнены до конца ("Из параметра signature определить алгоритм
-// шифрования") — здесь по умолчанию используется sha256. Если подписи
-// не будут совпадать на реальных запросах, это первое, что нужно
-// перепроверить у ТП.
-function verifyAmoSignature(params, secret) {
-  if (!params || !params.signature || !secret) return false;
-
-  const { signature, ...rest } = params;
-  const sortedKeys = Object.keys(rest).sort();
-  const baseString = sortedKeys.map((key) => `${key}${rest[key]}`).join("");
-
-  const expected = crypto.createHmac("sha256", secret).update(baseString).digest("hex");
-
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-  } catch (e) {
-    return false; // разная длина строк и т.п.
-  }
-}
-
-// -----------------------------------------------------------
-// Токен доступа к API бота amo — тот же, что сохранился при установке
-// приложения через /oauth/amomessenger/callback.
-// -----------------------------------------------------------
-function getAmoMessengerAccessToken() {
-  const tokens = loadJsonFile(AMOMESSENGER_TOKENS_FILE);
-  return tokens ? tokens.access_token : null;
-}
-
-// -----------------------------------------------------------
-// Отправить сообщение от имени бота (с кнопками или без).
-// buttonTexts — массив строк, каждая строка = текст одной кнопки.
-// -----------------------------------------------------------
-async function sendBotMessage({ botId, requestId, text, buttonTexts, receiverUserId }) {
-  const accessToken = getAmoMessengerAccessToken();
-  if (!accessToken) {
-    throw new Error("Нет сохранённого токена приложения amoMessenger — приложение не установлено");
-  }
-
-  const payload = {
-    text,
-    receiver: { user_id: receiverUserId },
-  };
-
-  if (buttonTexts && buttonTexts.length) {
-    payload.reply_markup = {
-      inline_keyboard: {
-        buttons: buttonTexts.map((t) => ({ text: t })),
-      },
-    };
-  }
-
-  const response = await fetch(
-    `${AMO_BOT_API_BASE}/v1.3/bots/${botId}/request/${requestId}/sendMessage`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    }
-  );
-
-  const data = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    console.error("Ошибка отправки сообщения ботом:", response.status, data);
-    throw new Error(`sendMessage вернул ошибку ${response.status}`);
-  }
-
-  return data;
-}
-
-// -----------------------------------------------------------
-// Вернуть управление обратно amo (return_code: "success" / "error").
-// ПРИМЕЧАНИЕ: в этой версии не вызывается автоматически — пока не
-// решено, в какой именно момент сценарий должен считаться завершённым
-// (дальше по ТЗ появятся ещё шаги). Функция готова, вызвать можно
-// в нужном месте по мере усложнения бота.
-// -----------------------------------------------------------
-async function returnControlToAmo({ botId, requestId, returnCode }) {
-  const accessToken = getAmoMessengerAccessToken();
-  if (!accessToken) {
-    throw new Error("Нет сохранённого токена приложения amoMessenger — приложение не установлено");
-  }
-
-  const response = await fetch(
-    `${AMO_BOT_API_BASE}/v1.3/bots/${botId}/request/${requestId}/returnControl`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ return_code: returnCode }),
-    }
-  );
-
-  if (!response.ok) {
-    const data = await response.json().catch(() => null);
-    console.error("Ошибка возврата управления:", response.status, data);
-    throw new Error(`returnControl вернул ошибку ${response.status}`);
-  }
-}
-
-// -----------------------------------------------------------
-// Достаём из тела вебхука всё нужное независимо от типа события
-// (rpa_bot_control_transferred / rpa_bot_income_message имеют
-// одинаковую структуру, только ключ в _embedded разный).
-// -----------------------------------------------------------
-function extractRpaEvent(body) {
-  const eventType = body && body.event_type;
-  if (!eventType || !body._embedded || !body._embedded[eventType]) {
-    return null;
-  }
-
-  const eventBody = body._embedded[eventType];
-  const embedded = eventBody._embedded || {};
-  const request = embedded.request || {};
-  const incomeMessage = embedded.income_message || {};
-
-  return {
-    eventType,
-    botId: eventBody.bot_id,
-    widgetId: eventBody.widget_id,
-    requestId: request.id,
-    receiverUserId: (incomeMessage.author && incomeMessage.author.user_id) || request.author_id,
-    incomingText: incomeMessage.text || null,
-  };
-}
-
-// -----------------------------------------------------------
-// Экран настроек виджета. Когда администратор добавляет виджет
-// в цепочку бота в конструкторе, amo делает iframe-запрос сюда —
-// нужно вернуть HTML интерфейса настроек. Пока это заглушка с
-// подключением JS SDK; сюда позже добавим селект для выбора поля
-// "Инженер" (как в исходном ТЗ), через amoSDK.elements().
-// -----------------------------------------------------------
-app.get("/widget/settings", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <script src="https://js.amo.tm/v1/sdk.js"></script>
-      </head>
-      <body style="font-family: sans-serif; padding: 10px;">
-        <p>Настройки виджета (в разработке).</p>
-        <script>
-          const amoSDK = window.AmoSDK();
-          // TODO: здесь будет селект для выбора поля "Инженер"
-          // и сохранение через amoSDK.setInputValues(...)
-        </script>
-      </body>
-    </html>
-  `);
-});
-
-// -----------------------------------------------------------
-// Вебхук RPA-виджета: сюда приходят и "передача управления"
-// (rpa_bot_control_transferred), и "входящее сообщение от
-// пользователя" (rpa_bot_income_message) — тип события смотрим
-// в поле event_type.
-// URL для регистрации виджета (сообщить в ТП):
-//   https://amobot-cpck.onrender.com/webhook/rpa
-// -----------------------------------------------------------
-app.post("/webhook/rpa", async (req, res) => {
-  console.log("=== RPA-виджет: получен запрос от amo ===");
-  console.log(JSON.stringify(req.body, null, 2));
-  storeRequest(req);
-
-  // Отвечаем amo сразу, чтобы не ждать наших запросов к amoCRM —
-  // вся дальнейшая работа с ботом идёт уже "в фоне" через API бота.
-  res.status(200).json({ ok: true });
-
-  const event = extractRpaEvent(req.body);
-  if (!event) {
-    console.log("Не удалось разобрать событие вебхука (неизвестная структура).");
-    return;
-  }
-
-  // Подпись пока только логируем, не блокируем обработку — чтобы
-  // сначала убедиться, что реальный формат подписи совпадает с тем,
-  // что описано в документации. Когда подтвердится — можно будет
-  // отклонять запросы с неверной подписью через return.
-  const secret = process.env.AMO_WIDGET_SECRET;
-  if (secret) {
-    console.log("Подпись запроса корректна?", verifyAmoSignature(req.body, secret));
-  }
-
-  const { eventType, botId, requestId, receiverUserId, incomingText } = event;
-
-  if (!botId || !requestId || !receiverUserId) {
-    console.log("В событии не хватает botId/requestId/receiverUserId — пропускаем.", event);
-    return;
-  }
-
-  try {
-    if (eventType === "rpa_bot_control_transferred") {
-      // п.3 ТЗ: показываем главное меню с 4 кнопками
-      await sendBotMessage({
-        botId,
-        requestId,
-        receiverUserId,
-        text: "Выберите задачу для выполнения",
-        buttonTexts: MAIN_MENU_BUTTONS,
-      });
-      return;
-    }
-
-    if (eventType !== "rpa_bot_income_message") {
-      console.log("Неизвестный тип события:", eventType);
-      return;
-    }
-
-    // Дальше — обработка входящих сообщений/нажатий кнопок
-    const session = requestSessions.get(requestId);
-
-    // Случай 1: пользователь нажал кнопку с номером договора из уже
-    // показанного списка замеров -> показываем детали (п.7 ТЗ)
-    if (session && session.measurements) {
-      const chosen = session.measurements.find(
-        (m) => String(m.contract_number) === String(incomingText)
-      );
-      if (chosen) {
-        await sendBotMessage({
-          botId,
-          requestId,
-          receiverUserId,
-          text: formatMeasurementDetail(chosen),
-        });
-        return;
-      }
-    }
-
-    // Случай 2: пользователь нажал "Подтвердить замер" (пп.4-6 ТЗ)
-    if (incomingText === "Подтвердить замер") {
-      const measurements = await buildMeasurementsList();
-
-      if (measurements.length === 0) {
-        await sendBotMessage({
-          botId,
-          requestId,
-          receiverUserId,
-          text: "На выбранный период замеров не найдено.",
-        });
-        return;
-      }
-
-      requestSessions.set(requestId, { measurements });
-
-      await sendBotMessage({
-        botId,
-        requestId,
-        receiverUserId,
-        text: formatMessageText(measurements),
-        buttonTexts: measurements.map((m) => String(m.contract_number ?? "—")),
-      });
-      return;
-    }
-
-    // Случай 3: остальные пункты меню — пока не реализованы по ТЗ
-    if (MAIN_MENU_BUTTONS.includes(incomingText)) {
-      await sendBotMessage({
-        botId,
-        requestId,
-        receiverUserId,
-        text: "Этот сценарий пока в разработке.",
-      });
-      return;
-    }
-
-    console.log("Сообщение не распознано как известная команда:", incomingText);
-  } catch (err) {
-    console.error("Ошибка обработки события бота:", err.message);
-    try {
-      await sendBotMessage({
-        botId,
-        requestId,
-        receiverUserId,
-        text: "Произошла ошибка при обработке запроса. Попробуйте ещё раз позже.",
-      });
-    } catch (e) {
-      console.error("Не удалось даже отправить сообщение об ошибке:", e.message);
-    }
-  }
-});
 
 app.post("/webhook/amomessenger", (req, res) => {
   console.log("=== Получен запрос от amoMessenger ===");
