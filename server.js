@@ -105,8 +105,62 @@ async function amocrmRequest(pathAndQuery) {
 }
 
 // -----------------------------------------------------------
-// Помощники для работы с датами по московскому времени (UTC+3).
+// Помощник для обращений к API amoMessenger (отправка сообщений,
+// возврат управления и т.д.) — используем токен, полученный после
+// установки бота через OAuth.
 // -----------------------------------------------------------
+async function amoMessengerRequest(method, pathAndQuery, body) {
+  const tokens = loadJsonFile(AMOMESSENGER_TOKENS_FILE);
+  if (!tokens || !tokens.access_token) {
+    throw new Error("Нет сохранённого токена amoMessenger — сначала нужно установить бота (OAuth).");
+  }
+
+  const response = await fetch(`https://api.amo.tm${pathAndQuery}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (response.status === 204) return null;
+
+  const data = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const err = new Error(`amoMessenger API ответила с ошибкой ${response.status}`);
+    err.details = data;
+    throw err;
+  }
+
+  return data;
+}
+
+function sendBotMessage(botId, requestId, text, buttonTexts, receiverUserId) {
+  const body = { text, receiver: { user_id: receiverUserId } };
+  if (buttonTexts && buttonTexts.length > 0) {
+    body.reply_markup = {
+      inline_keyboard: { buttons: buttonTexts.map((t) => ({ text: t })) },
+    };
+  }
+  return amoMessengerRequest("POST", `/v1.3/bots/${botId}/request/${requestId}/sendMessage`, body);
+}
+
+function returnControl(botId, requestId, returnCode) {
+  return amoMessengerRequest(
+    "POST",
+    `/v1.3/bots/${botId}/request/${requestId}/returnControl`,
+    { return_code: returnCode }
+  );
+}
+
+// Здесь временно храним, какие замеры показали конкретной заявке,
+// чтобы при нажатии кнопки понять, какой именно замер выбрали.
+// (Хранится в памяти сервера — обнулится при перезапуске.)
+const activeRequests = new Map(); // requestId -> { botId, measurements }
+
+
 function moscowShiftedNow() {
   return new Date(Date.now() + 3 * 3600 * 1000);
 }
@@ -266,15 +320,29 @@ app.get("/", (req, res) => {
 });
 
 // -----------------------------------------------------------
-// ВРЕМЕННЫЙ обработчик для теста виджета из кабинета разработчика
-// (запрос приходит с sheets.amo.tm как отправка формы в iframe).
-// Пока не знаем точный ожидаемый формат ответа — возвращаем и
-// простую HTML-страницу, и логируем всё, что пришло.
+// Настройки виджета (открывается как iframe при добавлении
+// виджета в конструктор бота). Нам не нужно ничего настраивать —
+// просто подтверждаем, что виджет готов к работе.
 // -----------------------------------------------------------
 app.post("/", (req, res) => {
-  console.log("=== POST на корень (тест виджета) ===");
+  console.log("=== Открыта настройка виджета (iframe) ===");
   console.log(JSON.stringify(req.body, null, 2));
-  res.send("<html><body>Виджет получил данные: " + JSON.stringify(req.body) + "</body></html>");
+  res.send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: sans-serif; padding: 16px;">
+  <p>Виджет «Отчёт инженеров» готов к работе. Дополнительных настроек не требуется.</p>
+  <script src="https://js.amo.tm/v1/sdk.js"></script>
+  <script>
+    try {
+      var amoSDK = window.AmoSDK();
+      amoSDK.setInputValues({ ready: 'true' });
+    } catch (e) {
+      console.error('SDK error', e);
+    }
+  </script>
+</body>
+</html>`);
 });
 
 // -----------------------------------------------------------
@@ -394,16 +462,112 @@ app.get("/debug/amomessenger-token", (req, res) => {
 });
 
 
-app.post("/webhook/amomessenger", (req, res) => {
-  console.log("=== Получен запрос от amoMessenger ===");
-  console.log(JSON.stringify(req.body, null, 2));
-  storeRequest(req);
-  res.status(200).json({ ok: true, received: true });
+// -----------------------------------------------------------
+// Вебхук от amoMessenger — сюда приходят все события, включая
+// главные для нас: "нам передали управление виджетом" и
+// "пользователь написал сообщение, пока управление у нас".
+// -----------------------------------------------------------
+app.post("/webhook/amomessenger", async (req, res) => {
+  const body = req.body;
+  const eventType = body.event_type;
+
+  console.log("=== Вебхук amoMessenger, событие:", eventType, "===");
+
+  try {
+    if (eventType === "rpa_bot_control_transferred") {
+      await handleControlTransferred(body);
+    } else if (eventType === "rpa_bot_income_message") {
+      await handleIncomeMessage(body);
+    }
+  } catch (err) {
+    console.error("Ошибка обработки вебхука:", err.details || err.message);
+  }
+
+  res.status(200).json({ ok: true });
 });
+
+// Нам передали управление — запрашиваем замеры в amoCRM и
+// показываем список с кнопками.
+async function handleControlTransferred(body) {
+  const payload = body._embedded.rpa_bot_control_transferred;
+  const botId = payload.bot_id;
+  const request = payload._embedded.request;
+  const requestId = request.id;
+  const receiverUserId = request.author_id;
+
+  const measurements = await buildMeasurementsList();
+
+  if (measurements.length === 0) {
+    await sendBotMessage(botId, requestId, "На сегодня замеров не найдено.", null, receiverUserId);
+    await returnControl(botId, requestId, "success");
+    return;
+  }
+
+  activeRequests.set(requestId, { botId, measurements });
+
+  const listText = formatMessageText(measurements);
+  const buttonTexts = measurements.map((m) => m.contract_number || String(m.lead_id));
+
+  await sendBotMessage(
+    botId,
+    requestId,
+    "Замеры на сегодня:\n\n" + listText + "\n\nВыберите замер:",
+    buttonTexts,
+    receiverUserId
+  );
+  // Управление НЕ возвращаем — ждём, какую кнопку нажмёт пользователь.
+}
+
+// Пользователь нажал одну из кнопок (пришло как обычное сообщение).
+async function handleIncomeMessage(body) {
+  const payload = body._embedded.rpa_bot_income_message;
+  const botId = payload.bot_id;
+  const request = payload._embedded.request;
+  const requestId = request.id;
+  const receiverUserId = request.author_id;
+  const messageText = (payload._embedded.income_message && payload._embedded.income_message.text) || "";
+
+  const session = activeRequests.get(requestId);
+  if (!session) {
+    // Мы не ждали сообщений по этой заявке — ничего не делаем.
+    return;
+  }
+
+  const chosen = session.measurements.find((m) => (m.contract_number || String(m.lead_id)) === messageText.trim());
+
+  if (!chosen) {
+    await sendBotMessage(
+      botId,
+      requestId,
+      "Не нашёл такой замер. Нажмите одну из кнопок выше.",
+      null,
+      receiverUserId
+    );
+    return; // управление оставляем себе, ждём повторную попытку
+  }
+
+  const detailText = [
+    `Дата замера: ${chosen.measure_date ?? "—"}`,
+    `Время замера: ${chosen.measure_time ?? "—"}`,
+    `Адрес замера: ${chosen.measure_address ?? "—"}`,
+    `Продукт: ${chosen.product ?? "—"}`,
+    `Имя клиента: ${chosen.client_name ?? "—"}`,
+    `Телефон: ${chosen.client_phones.join(", ") || "—"}`,
+    `№ договора: ${chosen.contract_number ?? "—"}`,
+    `Ссылка: ${chosen.lead_link}`,
+  ].join("\n");
+
+  await sendBotMessage(botId, requestId, detailText, null, receiverUserId);
+
+  activeRequests.delete(requestId);
+  await returnControl(botId, requestId, "success");
+}
 
 app.get("/debug/last", (req, res) => {
   res.json(lastRequests);
 });
+
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
