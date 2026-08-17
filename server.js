@@ -1091,22 +1091,275 @@ async function getTasksForLeadIds(
 // ПОЛУЧИТЬ ЗАДАЧИ ПОДТВЕРЖДЕНИЯ ЗАМЕРА
 // ============================================================
 
+// ============================================================
+// ПОЛУЧИТЬ ЗАДАЧИ "ПОДТВ. ЗАМЕР(И)"
+// ТОЛЬКО НЕЗАВЕРШЁННЫЕ
+// ============================================================
+//
+// Новый алгоритм:
+//
+// 1. НЕ загружаем все сделки аккаунта.
+// 2. Сразу запрашиваем только незавершённые задачи.
+// 3. Сразу ограничиваем тип задачи.
+// 4. Сразу ограничиваем период.
+// 5. Из найденных задач берём ID сделок.
+// 6. Получаем только эти сделки.
+// 7. Проверяем, что инженер = Марина Трафимова.
+//
+// Это значительно быстрее старого варианта.
+// ============================================================
+
 async function getMeasurementTasksForMarina() {
 
-  // ----------------------------------------------------------
-  // 1. Находим сделки Марины
-  // ----------------------------------------------------------
-
-  const leads =
-    await getMarinaLeads();
+  console.log(
+    "=========================================="
+  );
 
   console.log(
-    "Всего сделок Марины:",
-    leads.length
+    "БЫСТРЫЙ ПОИСК ЗАМЕРОВ"
+  );
+
+  console.log(
+    "Инженер:",
+    ENGINEER_NAME
+  );
+
+  console.log(
+    "Тип задачи:",
+    TASK_TYPE_ID
+  );
+
+  console.log(
+    "Статус задачи: НЕЗАВЕРШЁННАЯ"
+  );
+
+  // ----------------------------------------------------------
+  // Получаем нужный диапазон дат
+  // ----------------------------------------------------------
+
+  const range =
+    getTaskDateRange();
+
+  console.log(
+    "Диапазон:",
+    formatMoscowDate(range.from),
+    "->",
+    formatMoscowDate(range.to)
+  );
+
+  // ----------------------------------------------------------
+  // Получаем задачи
+  //
+  // ВАЖНО:
+  // filter[is_completed][]=0
+  // означает только незавершённые задачи.
+  //
+  // filter[task_type][]=2746005
+  // означает только "Подтв. замер(и)".
+  //
+  // filter[entity_type]=leads
+  // означает задачи, привязанные к сделкам.
+  // ----------------------------------------------------------
+
+  const allTasks = [];
+
+  let page = 1;
+
+  while (true) {
+
+    const params =
+      new URLSearchParams();
+
+    params.set(
+      "filter[entity_type]",
+      "leads"
+    );
+
+    params.set(
+      "filter[task_type][0]",
+      String(TASK_TYPE_ID)
+    );
+
+    params.set(
+      "filter[is_completed][0]",
+      "0"
+    );
+
+    params.set(
+      "filter[complete_till][from]",
+      String(range.from)
+    );
+
+    params.set(
+      "filter[complete_till][to]",
+      String(range.to)
+    );
+
+    params.set(
+      "limit",
+      "250"
+    );
+
+    params.set(
+      "page",
+      String(page)
+    );
+
+    params.set(
+      "order[complete_till]",
+      "asc"
+    );
+
+    const data =
+      await amocrmRequest(
+        `/api/v4/tasks?${params.toString()}`
+      );
+
+    const current =
+      data &&
+      data._embedded &&
+      Array.isArray(
+        data._embedded.tasks
+      )
+        ? data._embedded.tasks
+        : [];
+
+    console.log(
+      `Страница задач ${page}: ${current.length}`
+    );
+
+    allTasks.push(
+      ...current
+    );
+
+    if (
+      current.length < 250
+    ) {
+      break;
+    }
+
+    page++;
+
+    // Защита от бесконечной загрузки
+    if (
+      page > 20
+    ) {
+
+      console.log(
+        "Остановлено после 20 страниц задач."
+      );
+
+      break;
+    }
+  }
+
+  console.log(
+    "Всего найдено незавершённых задач:",
+    allTasks.length
+  );
+
+  // ----------------------------------------------------------
+  // Дополнительная проверка на всякий случай.
+  //
+  // Даже если amoCRM уже отфильтровала задачи,
+  // проверяем их ещё раз внутри программы.
+  // ----------------------------------------------------------
+
+  const measurementTasks =
+    allTasks.filter(
+      task => {
+
+        const correctEntity =
+          String(
+            task.entity_type
+          ) === "leads";
+
+        const correctType =
+          Number(
+            task.task_type_id
+          ) ===
+          Number(
+            TASK_TYPE_ID
+          );
+
+        const notCompleted =
+          task.is_completed === false ||
+          task.is_completed === 0 ||
+          task.is_completed === "0";
+
+        const hasDeadline =
+          task.complete_till !== null &&
+          task.complete_till !== undefined;
+
+        return (
+          correctEntity &&
+          correctType &&
+          notCompleted &&
+          hasDeadline
+        );
+      }
+    );
+
+  console.log(
+    "Задач типа Подтв. замер(и), незавершённых:",
+    measurementTasks.length
+  );
+
+  // ----------------------------------------------------------
+  // Если задач нет — дальше ничего загружать не надо.
+  // ----------------------------------------------------------
+
+  if (
+    !measurementTasks.length
+  ) {
+
+    console.log(
+      "Подходящих незавершённых задач нет."
+    );
+
+    return {
+
+      leads: [],
+
+      tasks: [],
+
+    };
+  }
+
+  // ----------------------------------------------------------
+  // Получаем ID сделок из задач
+  // ----------------------------------------------------------
+
+  const leadIds = [
+    ...new Set(
+      measurementTasks
+        .filter(
+          task =>
+            String(
+              task.entity_type
+            ) === "leads"
+        )
+        .map(
+          task =>
+            Number(
+              task.entity_id
+            )
+        )
+        .filter(
+          id =>
+            Number.isFinite(id) &&
+            id > 0
+        )
+    ),
+  ];
+
+  console.log(
+    "Уникальных сделок в задачах:",
+    leadIds.length
   );
 
   if (
-    !leads.length
+    !leadIds.length
   ) {
 
     return {
@@ -1119,92 +1372,90 @@ async function getMeasurementTasksForMarina() {
   }
 
   // ----------------------------------------------------------
-  // 2. ID сделок
+  // Получаем ТОЛЬКО сделки, к которым привязаны
+  // найденные задачи.
   // ----------------------------------------------------------
 
-  const leadIds =
-    leads.map(
-      lead =>
-        Number(lead.id)
-    );
-
-  // ----------------------------------------------------------
-  // 3. Получаем задачи этих сделок
-  // ----------------------------------------------------------
-
-  const allTasks =
-    await getTasksForLeadIds(
+  const leads =
+    await getLeadsByIds(
       leadIds
     );
 
   console.log(
-    "Всего задач у сделок Марины:",
-    allTasks.length
+    "Получено сделок:",
+    leads.length
   );
 
   // ----------------------------------------------------------
-  // 4. Оставляем только:
+  // Проверяем инженера.
   //
-  // task_type_id = 2746005
-  // entity_type = leads
-  // is_completed = false
+  // Здесь НЕ используется API-фильтр amoCRM по полю
+  // "Инженер", потому что именно этот фильтр у вашего
+  // аккаунта возвращал:
+  //
+  // HTTP 400
+  // Invalid filter for current account
+  //
+  // Поэтому проверяем поле непосредственно в данных сделки.
   // ----------------------------------------------------------
 
-  const measurementTasks =
-    allTasks.filter(
-      task => {
-
-        return (
-
-          String(
-            task.entity_type
-          ) === "leads"
-
-          &&
-
-          Number(
-            task.task_type_id
-          ) ===
-          Number(
-            TASK_TYPE_ID
-          )
-
-          &&
-
-          (
-            task.is_completed === false ||
-            task.is_completed === 0 ||
-            task.is_completed === "0"
-          )
-
-          &&
-
-          task.complete_till !== null
-
-          &&
-
-          task.complete_till !== undefined
-
-        );
-      }
+  const marinaLeads =
+    leads.filter(
+      lead =>
+        isMarina(
+          lead
+        )
     );
 
   console.log(
-    "Задач типа Подтв. замер(и):",
-    measurementTasks.length
+    "Сделок Марины:",
+    marinaLeads.length
+  );
+
+  // ----------------------------------------------------------
+  // Оставляем только задачи, которые относятся
+  // к сделкам Марины.
+  // ----------------------------------------------------------
+
+  const marinaLeadIds =
+    new Set(
+      marinaLeads.map(
+        lead =>
+          Number(
+            lead.id
+          )
+      )
+    );
+
+  const marinaTasks =
+    measurementTasks.filter(
+      task =>
+        marinaLeadIds.has(
+          Number(
+            task.entity_id
+          )
+        )
+    );
+
+  console.log(
+    "Задач Марины:",
+    marinaTasks.length
+  );
+
+  console.log(
+    "=========================================="
   );
 
   return {
 
-    leads,
+    leads:
+      marinaLeads,
 
     tasks:
-      measurementTasks,
+      marinaTasks,
 
   };
 }
-
-
 // ============================================================
 // ФИЛЬТР ПО ДАТЕ ЗАДАЧИ
 // ============================================================
