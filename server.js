@@ -3219,6 +3219,81 @@ const PORT =
   process.env.PORT ||
   3000;
 
+// ============================================================
+// DEBUG: ПРОВЕРКА КОНКРЕТНОЙ ЗАДАЧИ
+// ============================================================
+
+app.get("/debug/task-63882106", async (req, res) => {
+
+  try {
+
+    const taskId = 63882106;
+
+    const task =
+      await amocrmRequest(
+        `/api/v4/tasks/${taskId}`
+      );
+
+    res.json({
+
+      status: "OK",
+
+      task_id: taskId,
+
+      task: task,
+
+      checks: {
+
+        entity_id:
+          task.entity_id,
+
+        entity_type:
+          task.entity_type,
+
+        task_type_id:
+          task.task_type_id,
+
+        is_completed:
+          task.is_completed,
+
+        complete_till:
+          task.complete_till,
+
+        complete_till_moscow:
+          task.complete_till
+            ? formatMoscowDate(
+                task.complete_till
+              )
+            : null
+
+      }
+
+    });
+
+  } catch (error) {
+
+    console.error(
+      "Ошибка проверки задачи:",
+      error
+    );
+
+    res.status(500).json({
+
+      status: "Ошибка",
+
+      message:
+        error.message,
+
+      details:
+        error.response?.data ||
+        null
+
+    });
+
+  }
+
+});
+
 app.listen(
   PORT,
   () => {
