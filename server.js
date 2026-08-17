@@ -1,24 +1,3 @@
-// ============================================================
-// amoMessenger + amoCRM
-// Версия 0.2 — диагностика сделок и задач
-//
-// Тестовый инженер:
-// Марина Трафимова
-//
-// Поле Инженер:
-// ID = 203849
-//
-// Значение Марина Трафимова:
-// enum ID = 1059150
-//
-// Тип задачи:
-// Подтв. замер(и)
-// ID = 2746005
-//
-// Часовой пояс:
-// Europe/Moscow
-// ============================================================
-
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
@@ -34,21 +13,25 @@ app.use(express.urlencoded({ extended: true }));
 
 const TIME_ZONE = "Europe/Moscow";
 
-// ------------------------------------------------------------
-// amoCRM
-// ------------------------------------------------------------
+// ============================================================
+// ИНЖЕНЕР
+// ============================================================
 
-const TASK_TYPE_ID = 2746005;
+const ENGINEER_NAME = "Марина Трафимова";
 
 const ENGINEER_FIELD_ID = 203849;
 
 const ENGINEER_ENUM_ID = 1059150;
 
-const ENGINEER_NAME = "Марина Трафимова";
+// ============================================================
+// ТИП ЗАДАЧИ
+// ============================================================
 
-// ------------------------------------------------------------
-// Поля сделки
-// ------------------------------------------------------------
+const TASK_TYPE_ID = 2746005;
+
+// ============================================================
+// ПОЛЯ СДЕЛКИ
+// ============================================================
 
 const FIELD_IDS = {
   contractNumber: 412776,
@@ -58,98 +41,56 @@ const FIELD_IDS = {
   product: 172572,
 };
 
-// ------------------------------------------------------------
-// amoMessenger
-// ------------------------------------------------------------
+// ============================================================
+// ФАЙЛ ТОКЕНА amoMessenger
+// ============================================================
 
 const AMOMESSENGER_TOKENS_FILE = path.join(
   __dirname,
   "amomessenger_tokens.json"
 );
 
-// ------------------------------------------------------------
-// Хранилище текущих запросов
-// ------------------------------------------------------------
+// ============================================================
+// АКТИВНЫЕ СЕССИИ БОТА
+// ============================================================
 
 const activeRequests = new Map();
 
-// ------------------------------------------------------------
-// Последние входящие запросы
-// ------------------------------------------------------------
+// ============================================================
+// ПОСЛЕДНИЕ WEBHOOK
+// ============================================================
 
 const lastRequests = [];
-const MAX_STORED = 30;
 
 
 // ============================================================
-// СОХРАНЕНИЕ ВХОДЯЩИХ ЗАПРОСОВ
-// ============================================================
-
-function storeRequest(req) {
-  lastRequests.unshift({
-    time: new Date().toISOString(),
-    method: req.method,
-    path: req.originalUrl,
-    query: req.query,
-    body: req.body,
-  });
-
-  if (lastRequests.length > MAX_STORED) {
-    lastRequests.pop();
-  }
-}
-
-app.use((req, res, next) => {
-  storeRequest(req);
-  next();
-});
-
-
-// ============================================================
-// JSON ФАЙЛ
-// ============================================================
-
-function saveJsonFile(filePath, data) {
-  fs.writeFileSync(
-    filePath,
-    JSON.stringify(data, null, 2)
-  );
-}
-
-function loadJsonFile(filePath) {
-  try {
-    return JSON.parse(
-      fs.readFileSync(filePath, "utf8")
-    );
-  } catch (error) {
-    return null;
-  }
-}
-
-
-// ============================================================
-// amoCRM API
+// amoCRM REQUEST
 // ============================================================
 
 async function amocrmRequest(pathAndQuery) {
-  const domain = process.env.AMOCRM_DOMAIN;
-  const token = process.env.AMOCRM_TOKEN;
+
+  const domain =
+    process.env.AMOCRM_DOMAIN;
+
+  const token =
+    process.env.AMOCRM_TOKEN;
 
   if (!domain) {
     throw new Error(
-      "Не задана переменная AMOCRM_DOMAIN."
+      "Не задана переменная AMOCRM_DOMAIN"
     );
   }
 
   if (!token) {
     throw new Error(
-      "Не задана переменная AMOCRM_TOKEN."
+      "Не задана переменная AMOCRM_TOKEN"
     );
   }
 
-  const cleanDomain = domain
-    .replace(/^https?:\/\//, "")
-    .replace(/\/+$/, "");
+  const cleanDomain =
+    domain
+      .replace(/^https?:\/\//, "")
+      .replace(/\/+$/, "");
 
   const url =
     `https://${cleanDomain}${pathAndQuery}`;
@@ -159,24 +100,21 @@ async function amocrmRequest(pathAndQuery) {
     url
   );
 
-  const response = await fetch(
-    url,
-    {
-      method: "GET",
+  const response =
+    await fetch(
+      url,
+      {
+        method: "GET",
 
-      headers: {
-        Authorization:
-          `Bearer ${token}`,
+        headers: {
+          Authorization:
+            `Bearer ${token}`,
 
-        "Content-Type":
-          "application/json",
-      },
-    }
-  );
-
-  if (response.status === 204) {
-    return null;
-  }
+          "Content-Type":
+            "application/json",
+        },
+      }
+    );
 
   const data =
     await response
@@ -184,9 +122,11 @@ async function amocrmRequest(pathAndQuery) {
       .catch(() => null);
 
   if (!response.ok) {
-    const error = new Error(
-      `amoCRM ответила с ошибкой HTTP ${response.status}`
-    );
+
+    const error =
+      new Error(
+        `amoCRM HTTP ${response.status}`
+      );
 
     error.status =
       response.status;
@@ -202,25 +142,43 @@ async function amocrmRequest(pathAndQuery) {
 
 
 // ============================================================
-// amoMessenger API
+// amoMessenger REQUEST
 // ============================================================
+
+function loadTokens() {
+
+  try {
+
+    return JSON.parse(
+      fs.readFileSync(
+        AMOMESSENGER_TOKENS_FILE,
+        "utf8"
+      )
+    );
+
+  } catch {
+
+    return null;
+  }
+}
+
 
 async function amoMessengerRequest(
   method,
   pathAndQuery,
   body
 ) {
+
   const tokens =
-    loadJsonFile(
-      AMOMESSENGER_TOKENS_FILE
-    );
+    loadTokens();
 
   if (
     !tokens ||
     !tokens.access_token
   ) {
+
     throw new Error(
-      "Нет сохранённого токена amoMessenger."
+      "Токен amoMessenger не найден"
     );
   }
 
@@ -245,19 +203,17 @@ async function amoMessengerRequest(
       }
     );
 
-  if (response.status === 204) {
-    return null;
-  }
-
   const data =
     await response
       .json()
       .catch(() => null);
 
   if (!response.ok) {
-    const error = new Error(
-      `amoMessenger API ответила с ошибкой HTTP ${response.status}`
-    );
+
+    const error =
+      new Error(
+        `amoMessenger HTTP ${response.status}`
+      );
 
     error.status =
       response.status;
@@ -273,74 +229,46 @@ async function amoMessengerRequest(
 
 
 // ============================================================
-// Отправка сообщения в amoMessenger
+// ПОСЛЕДНИЕ WEBHOOK
 // ============================================================
 
-async function sendBotMessage(
-  botId,
-  requestId,
-  text,
-  buttonTexts,
-  receiverUserId
-) {
-  const body = {
-    text,
+function storeRequest(req) {
 
-    receiver: {
-      user_id:
-        receiverUserId,
-    },
-  };
+  lastRequests.unshift({
+
+    time:
+      new Date().toISOString(),
+
+    method:
+      req.method,
+
+    path:
+      req.originalUrl,
+
+    body:
+      req.body,
+
+    query:
+      req.query,
+  });
 
   if (
-    buttonTexts &&
-    buttonTexts.length > 0
+    lastRequests.length > 30
   ) {
-    body.reply_markup = {
-      inline_keyboard: {
-        buttons:
-          buttonTexts.map(
-            (buttonText) => ({
-              text:
-                String(
-                  buttonText
-                ),
-            })
-          ),
-      },
-    };
+
+    lastRequests.pop();
   }
-
-  return amoMessengerRequest(
-    "POST",
-
-    `/v1.3/bots/${botId}/request/${requestId}/sendMessage`,
-
-    body
-  );
 }
 
 
-// ============================================================
-// Вернуть управление Salesbot
-// ============================================================
+app.use(
+  (req, res, next) => {
 
-async function returnControl(
-  botId,
-  requestId,
-  returnCode
-) {
-  return amoMessengerRequest(
-    "POST",
+    storeRequest(req);
 
-    `/v1.3/bots/${botId}/request/${requestId}/returnControl`,
-
-    {
-      return_code:
-        returnCode,
-    }
-  );
-}
+    next();
+  }
+);
 
 
 // ============================================================
@@ -348,6 +276,7 @@ async function returnControl(
 // ============================================================
 
 function moscowNow() {
+
   const parts =
     new Intl.DateTimeFormat(
       "en-US",
@@ -355,30 +284,44 @@ function moscowNow() {
         timeZone:
           TIME_ZONE,
 
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
+        year:
+          "numeric",
 
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
+        month:
+          "2-digit",
 
-        hourCycle: "h23",
+        day:
+          "2-digit",
+
+        hour:
+          "2-digit",
+
+        minute:
+          "2-digit",
+
+        second:
+          "2-digit",
+
+        hourCycle:
+          "h23",
       }
-    ).formatToParts(
-      new Date()
-    );
+    )
+      .formatToParts(
+        new Date()
+      );
 
-  const values = {};
+  const result = {};
 
   for (
     const part of parts
   ) {
+
     if (
       part.type !==
       "literal"
     ) {
-      values[
+
+      result[
         part.type
       ] =
         Number(
@@ -387,69 +330,39 @@ function moscowNow() {
     }
   }
 
-  return {
-    year:
-      values.year,
-
-    month:
-      values.month,
-
-    day:
-      values.day,
-
-    hour:
-      values.hour,
-
-    minute:
-      values.minute,
-
-    second:
-      values.second,
-  };
+  return result;
 }
 
 
 // ============================================================
-// TIMESTAMP МОСКОВСКОГО ДНЯ
+// ПРЕОБРАЗОВАНИЕ МОСКОВСКОЙ ДАТЫ В UNIX
+// ============================================================
+//
+// Москва = UTC+3
 // ============================================================
 
-function moscowDayTimestamp(
-  offset,
-  endOfDay = false
+function moscowTimestamp(
+  year,
+  month,
+  day,
+  hour = 0,
+  minute = 0,
+  second = 0
 ) {
-  const now =
-    moscowNow();
 
-  const date =
-    new Date(
-      Date.UTC(
-        now.year,
-        now.month - 1,
-        now.day,
-
-        endOfDay
-          ? 23
-          : 0,
-
-        endOfDay
-          ? 59
-          : 0,
-
-        endOfDay
-          ? 59
-          : 0
-      )
+  const utc =
+    Date.UTC(
+      year,
+      month - 1,
+      day,
+      hour,
+      minute,
+      second
     );
 
-  date.setUTCDate(
-    date.getUTCDate() +
-      offset
-  );
-
-  // Москва = UTC+3
   return Math.floor(
     (
-      date.getTime() -
+      utc -
       3 * 60 * 60 * 1000
     ) / 1000
   );
@@ -457,146 +370,246 @@ function moscowDayTimestamp(
 
 
 // ============================================================
-// ДИАПАЗОН ПОИСКА ЗАДАЧ
+// ДИАПАЗОН ДЛЯ ПОИСКА ЗАДАЧ
+// ============================================================
 //
-// До 18:00:
-// вчера 00:00 → сейчас
+// ДО 18:00:
 //
-// После 18:00:
-// сегодня 00:00 → завтра 23:59
+// вчера 00:00
+// ->
+// сегодня текущее время
+//
+// ПОСЛЕ 18:00:
+//
+// сегодня 00:00
+// ->
+// завтра 23:59:59
 // ============================================================
 
-function getDateRange() {
+function getTaskDateRange() {
+
   const now =
     moscowNow();
 
-  let from;
-  let to;
+  const todayStart =
+    moscowTimestamp(
+      now.year,
+      now.month,
+      now.day,
+      0,
+      0,
+      0
+    );
+
+  const tomorrowStartDate =
+    new Date(
+      Date.UTC(
+        now.year,
+        now.month - 1,
+        now.day
+      )
+    );
+
+  tomorrowStartDate.setUTCDate(
+    tomorrowStartDate.getUTCDate() + 1
+  );
+
+  const tomorrowYear =
+    tomorrowStartDate.getUTCFullYear();
+
+  const tomorrowMonth =
+    tomorrowStartDate.getUTCMonth() + 1;
+
+  const tomorrowDay =
+    tomorrowStartDate.getUTCDate();
+
+  const tomorrowEnd =
+    moscowTimestamp(
+      tomorrowYear,
+      tomorrowMonth,
+      tomorrowDay,
+      23,
+      59,
+      59
+    );
+
+  const currentMoment =
+    moscowTimestamp(
+      now.year,
+      now.month,
+      now.day,
+      now.hour,
+      now.minute,
+      now.second
+    );
+
+  const yesterdayDate =
+    new Date(
+      Date.UTC(
+        now.year,
+        now.month - 1,
+        now.day
+      )
+    );
+
+  yesterdayDate.setUTCDate(
+    yesterdayDate.getUTCDate() - 1
+  );
+
+  const yesterdayStart =
+    moscowTimestamp(
+      yesterdayDate.getUTCFullYear(),
+      yesterdayDate.getUTCMonth() + 1,
+      yesterdayDate.getUTCDate(),
+      0,
+      0,
+      0
+    );
 
   if (
     now.hour < 18
   ) {
-    // Вчера 00:00
-    from =
-      moscowDayTimestamp(
-        -1,
-        false
-      );
 
-    // Сейчас
-    const currentMoscowAsUtc =
-      Date.UTC(
-        now.year,
-        now.month - 1,
-        now.day,
-        now.hour,
-        now.minute,
-        now.second
-      );
+    return {
 
-    to =
-      Math.floor(
-        (
-          currentMoscowAsUtc -
-          3 * 60 * 60 * 1000
-        ) / 1000
-      );
-  } else {
-    // Сегодня 00:00
-    from =
-      moscowDayTimestamp(
-        0,
-        false
-      );
+      from:
+        yesterdayStart,
 
-    // Завтра 23:59:59
-    to =
-      moscowDayTimestamp(
-        1,
-        true
-      );
+      to:
+        currentMoment,
+
+      mode:
+        "до 18:00",
+
+    };
+
   }
 
   return {
-    from,
-    to,
-    moscowHour:
-      now.hour,
-    moscowMinute:
-      now.minute,
+
+    from:
+      todayStart,
+
+    to:
+      tomorrowEnd,
+
+    mode:
+      "после 18:00",
+
   };
 }
 
 
 // ============================================================
-// ПОЛЯ СДЕЛКИ
+// ФОРМАТИРОВАНИЕ UNIX В МОСКОВСКОЕ ВРЕМЯ
 // ============================================================
 
-function getRawCustomFieldValue(
-  entity,
-  fieldId
+function formatMoscowDate(
+  timestamp
 ) {
+
   if (
-    !entity ||
-    !entity.custom_fields_values
+    !timestamp
   ) {
+
     return null;
   }
 
+  return new Intl.DateTimeFormat(
+    "ru-RU",
+    {
+      timeZone:
+        TIME_ZONE,
+
+      dateStyle:
+        "short",
+
+      timeStyle:
+        "medium",
+    }
+  )
+    .format(
+      new Date(
+        Number(timestamp) *
+        1000
+      )
+    );
+}
+
+
+// ============================================================
+// ПОЛУЧЕНИЕ ЗНАЧЕНИЯ CUSTOM FIELD
+// ============================================================
+
+function getField(
+  lead,
+  fieldId
+) {
+
+  if (
+    !lead ||
+    !lead.custom_fields_values
+  ) {
+
+    return null;
+  }
+
+  return lead.custom_fields_values.find(
+    field =>
+      Number(
+        field.field_id
+      ) ===
+      Number(
+        fieldId
+      )
+  ) || null;
+}
+
+
+// ============================================================
+// ТЕКСТОВОЕ ЗНАЧЕНИЕ CUSTOM FIELD
+// ============================================================
+
+function getFieldText(
+  lead,
+  fieldId
+) {
+
   const field =
-    entity.custom_fields_values.find(
-      (item) =>
-        Number(
-          item.field_id
-        ) ===
-        Number(
-          fieldId
-        )
+    getField(
+      lead,
+      fieldId
     );
 
   if (
     !field ||
     !field.values ||
-    field.values.length === 0
+    !field.values.length
   ) {
+
     return null;
   }
 
-  return field.values[0];
-}
-
-
-function getCustomFieldText(
-  entity,
-  fieldId
-) {
-  const item =
-    getRawCustomFieldValue(
-      entity,
-      fieldId
-    );
-
-  if (!item) {
-    return null;
-  }
+  const value =
+    field.values[0];
 
   if (
-    item.value !==
-      undefined &&
-    item.value !== null
+    value.value !==
+    undefined
   ) {
+
     return String(
-      item.value
+      value.value
     );
   }
 
   if (
-    item.enum_id !==
-      undefined &&
-    item.enum_id !== null
+    value.enum_id !==
+    undefined
   ) {
+
     return String(
-      item.enum_id
+      value.enum_id
     );
   }
 
@@ -604,52 +617,63 @@ function getCustomFieldText(
 }
 
 
-function formatDateField(
-  value
+// ============================================================
+// ДАТА ИЗ ПОЛЯ СДЕЛКИ
+// ============================================================
+
+function getFieldDate(
+  lead,
+  fieldId
 ) {
+
+  const field =
+    getField(
+      lead,
+      fieldId
+    );
+
   if (
-    value === null ||
-    value === undefined
+    !field ||
+    !field.values ||
+    !field.values.length
   ) {
+
     return null;
   }
 
-  let timestamp =
-    null;
+  const value =
+    field.values[0].value;
 
   if (
-    typeof value ===
-    "number"
+    value ===
+    undefined ||
+    value ===
+    null
   ) {
-    timestamp =
-      value;
+
+    return null;
   }
 
-  if (
-    typeof value ===
-      "string" &&
-    /^\d+$/.test(
-      value
-    )
-  ) {
-    timestamp =
-      Number(value);
-  }
+  const number =
+    Number(value);
 
   if (
-    timestamp !== null &&
-    timestamp >
-      1000000000
+    !Number.isNaN(number) &&
+    number > 1000000000
   ) {
-    return new Date(
-      timestamp * 1000
-    ).toLocaleDateString(
+
+    return new Intl.DateTimeFormat(
       "ru-RU",
       {
         timeZone:
           TIME_ZONE,
       }
-    );
+    )
+      .format(
+        new Date(
+          number * 1000
+        )
+      );
   }
 
   return String(
@@ -658,66 +682,57 @@ function formatDateField(
 }
 
 
-function getCustomFieldDate(
-  entity,
-  fieldId
-) {
-  const item =
-    getRawCustomFieldValue(
-      entity,
-      fieldId
-    );
-
-  if (!item) {
-    return null;
-  }
-
-  return formatDateField(
-    item.value
-  );
-}
-
-
 // ============================================================
 // ПРОВЕРКА ИНЖЕНЕРА
 // ============================================================
 
-function isMarinaEngineer(
+function isMarina(
   lead
 ) {
-  const item =
-    getRawCustomFieldValue(
+
+  const field =
+    getField(
       lead,
       ENGINEER_FIELD_ID
     );
 
-  if (!item) {
+  if (
+    !field ||
+    !field.values ||
+    !field.values.length
+  ) {
+
     return false;
   }
 
-  // Главный вариант
+  const value =
+    field.values[0];
+
+  // Основной вариант для select
   if (
-    item.enum_id !==
+    value.enum_id !==
       undefined &&
     Number(
-      item.enum_id
+      value.enum_id
     ) ===
       Number(
         ENGINEER_ENUM_ID
       )
   ) {
+
     return true;
   }
 
-  // Запасной вариант
+  // Дополнительная проверка
   if (
-    item.value !==
+    value.value !==
       undefined &&
     String(
-      item.value
+      value.value
     ).trim() ===
       ENGINEER_NAME
   ) {
+
     return true;
   }
 
@@ -732,10 +747,10 @@ function isMarinaEngineer(
 function leadLink(
   leadId
 ) {
+
   const domain =
     (
-      process.env
-        .AMOCRM_DOMAIN ||
+      process.env.AMOCRM_DOMAIN ||
       ""
     )
       .replace(
@@ -747,216 +762,74 @@ function leadLink(
         ""
       );
 
-  return `https://${domain}/leads/detail/${leadId}`;
+  return (
+    `https://${domain}/leads/detail/${leadId}`
+  );
 }
 
 
 // ============================================================
-// ПОЛУЧЕНИЕ ВСЕХ СДЕЛОК
-//
-// ВАЖНО:
-// Здесь специально НЕ используем фильтр по полю Инженер,
-// потому что предыдущий вариант дал HTTP 400.
-//
-// Получаем сделки страницами и фильтруем Марину уже
-// непосредственно в JavaScript.
+// ПОЛУЧЕНИЕ СДЕЛКИ ПО ID
 // ============================================================
 
-async function fetchAllLeads(
-  maxPages = 5
+async function getLead(
+  leadId
 ) {
-  const allLeads = [];
 
-  for (
-    let page = 1;
-    page <= maxPages;
-    page++
-  ) {
-    const params =
-      new URLSearchParams();
-
-    params.set(
-      "with",
-      "contacts"
-    );
-
-    params.set(
-      "limit",
-      "250"
-    );
-
-    params.set(
-      "page",
-      String(page)
-    );
-
-    const data =
-      await amocrmRequest(
-        `/api/v4/leads?${params.toString()}`
-      );
-
-    const leads =
-      data &&
-      data._embedded &&
-      data._embedded.leads
-        ? data._embedded.leads
-        : [];
-
-    allLeads.push(
-      ...leads
-    );
-
-    console.log(
-      `Страница сделок ${page}: ${leads.length}`
-    );
-
-    if (
-      leads.length < 250
-    ) {
-      break;
-    }
-  }
-
-  return allLeads;
+  return amocrmRequest(
+    `/api/v4/leads/${leadId}?with=contacts`
+  );
 }
 
 
 // ============================================================
-// ПОЛУЧЕНИЕ СДЕЛОК ПО ID
+// ПОЛУЧЕНИЕ КОНТАКТА
 // ============================================================
 
-async function fetchLeadsByIds(
-  ids
-) {
-  if (
-    !ids ||
-    ids.length === 0
-  ) {
-    return [];
-  }
-
-  const uniqueIds = [
-    ...new Set(
-      ids
-        .filter(
-          (id) =>
-            id !== null &&
-            id !== undefined
-        )
-        .map(
-          (id) =>
-            Number(id)
-        )
-    ),
-  ];
-
-  const allLeads = [];
-
-  for (
-    let start = 0;
-    start <
-      uniqueIds.length;
-    start += 100
-  ) {
-    const chunk =
-      uniqueIds.slice(
-        start,
-        start + 100
-      );
-
-    const params =
-      new URLSearchParams();
-
-    chunk.forEach(
-      (id) => {
-        params.append(
-          "filter[id][]",
-          String(id)
-        );
-      }
-    );
-
-    params.set(
-      "with",
-      "contacts"
-    );
-
-    params.set(
-      "limit",
-      "250"
-    );
-
-    const data =
-      await amocrmRequest(
-        `/api/v4/leads?${params.toString()}`
-      );
-
-    const leads =
-      data &&
-      data._embedded &&
-      data._embedded.leads
-        ? data._embedded.leads
-        : [];
-
-    allLeads.push(
-      ...leads
-    );
-  }
-
-  return allLeads;
-}
-
-
-// ============================================================
-// КОНТАКТ
-// ============================================================
-
-async function fetchContactInfo(
+async function getContact(
   contactId
 ) {
-  if (!contactId) {
-    return {
-      name: null,
-      phones: [],
-    };
-  }
 
-  const contact =
-    await amocrmRequest(
-      `/api/v4/contacts/${contactId}`
-    );
+  return amocrmRequest(
+    `/api/v4/contacts/${contactId}`
+  );
+}
 
-  if (!contact) {
-    return {
-      name: null,
-      phones: [],
-    };
-  }
+
+// ============================================================
+// ИНФОРМАЦИЯ О КОНТАКТЕ
+// ============================================================
+
+function extractContactInfo(
+  contact
+) {
 
   const phones = [];
 
   if (
+    contact &&
     contact.custom_fields_values
   ) {
+
     for (
       const field of
       contact.custom_fields_values
     ) {
+
       if (
         field.field_code ===
-          "PHONE" &&
-        field.values
+        "PHONE"
       ) {
+
         for (
           const value of
-          field.values
+          field.values || []
         ) {
+
           if (
-            value.value !==
-              undefined &&
-            value.value !==
-              null
+            value.value
           ) {
+
             phones.push(
               String(
                 value.value
@@ -969,418 +842,328 @@ async function fetchContactInfo(
   }
 
   return {
+
     name:
-      contact.name ||
-      null,
+      contact
+        ? contact.name
+        : null,
 
     phones,
+
   };
 }
 
 
 // ============================================================
-// ДИАГНОСТИКА ЗАДАЧ
+// ПОЛУЧЕНИЕ ЗАДАЧ
+// ============================================================
 //
-// Здесь специально сначала получаем задачи БЕЗ фильтра
-// по датам и смотрим, что реально возвращает amoCRM.
-//
-// Это поможет понять правильный формат фильтра.
+// ВАЖНО:
+// Фильтр task_type поддерживается API amoCRM.
+// complete_till не фильтруем через URL,
+// потому что API списка задач документирует
+// task_type, is_completed, responsible_user_id,
+// entity_type и т.д., но не complete_till.
+// Поэтому дату проверяем здесь.
 // ============================================================
 
-async function fetchRawTasks(
-  limit = 250
-) {
-  const params =
-    new URLSearchParams();
+async function getMeasurementTasks() {
 
-  params.set(
-    "limit",
-    String(limit)
-  );
+  const tasks = [];
 
-  params.set(
-    "page",
-    "1"
-  );
+  let page = 1;
 
-  const data =
-    await amocrmRequest(
-      `/api/v4/tasks?${params.toString()}`
-    );
+  while (true) {
 
-  const tasks =
-    data &&
-    data._embedded &&
-    data._embedded.tasks
-      ? data._embedded.tasks
-      : [];
+    const params =
+      new URLSearchParams();
 
-  return {
-    data,
-    tasks,
-  };
-}
-
-
-// ============================================================
-// ПОЛУЧЕНИЕ ЗАДАЧ ТИПА 2746005
-//
-// Пока используем только фильтр task_type.
-// Дату добавим после проверки реального ответа API.
-// ============================================================
-
-async function fetchMeasurementTasksRaw() {
-  const params =
-    new URLSearchParams();
-
-  params.set(
-    "filter[task_type]",
-    String(
-      TASK_TYPE_ID
-    )
-  );
-
-  params.set(
-    "limit",
-    "250"
-  );
-
-  params.set(
-    "page",
-    "1"
-  );
-
-  const data =
-    await amocrmRequest(
-      `/api/v4/tasks?${params.toString()}`
-    );
-
-  const tasks =
-    data &&
-    data._embedded &&
-    data._embedded.tasks
-      ? data._embedded.tasks
-      : [];
-
-  return {
-    data,
-    tasks,
-  };
-}
-
-
-// ============================================================
-// ПОДРОБНАЯ ДИАГНОСТИКА ЗАДАЧ
-// ============================================================
-
-app.get(
-  "/debug/raw-tasks",
-  async (req, res) => {
-    try {
-      const result =
-        await fetchRawTasks(
-          250
-        );
-
-      res.json({
-        status:
-          "OK",
-
-        total_returned:
-          result.tasks.length,
-
-        tasks:
-          result.tasks,
-      });
-    } catch (error) {
-      console.error(
-        "Ошибка raw-tasks:",
-        error.details ||
-          error.message
-      );
-
-      res.status(500).json({
-        status:
-          "Ошибка",
-
-        message:
-          error.message,
-
-        details:
-          error.details ||
-          null,
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// ЗАДАЧИ ТИПА 2746005
-// ============================================================
-
-app.get(
-  "/debug/measurement-tasks",
-  async (req, res) => {
-    try {
-      const result =
-        await fetchMeasurementTasksRaw();
-
-      res.json({
-        status:
-          "OK",
-
-        task_type_id:
-          TASK_TYPE_ID,
-
-        total_returned:
-          result.tasks.length,
-
-        tasks:
-          result.tasks,
-      });
-    } catch (error) {
-      console.error(
-        "Ошибка measurement-tasks:",
-        error.details ||
-          error.message
-      );
-
-      res.status(500).json({
-        status:
-          "Ошибка",
-
-        message:
-          error.message,
-
-        details:
-          error.details ||
-          null,
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// ПОИСК СДЕЛОК МАРИНЫ
-//
-// Получаем сделки без фильтра API и проверяем поле
-// непосредственно в каждой сделке.
-// ============================================================
-
-app.get(
-  "/debug/marina-leads",
-  async (req, res) => {
-    try {
-      console.log(
-        "Начинаем поиск сделок Марины..."
-      );
-
-      const allLeads =
-        await fetchAllLeads(
-          5
-        );
-
-      console.log(
-        "Всего получено сделок:",
-        allLeads.length
-      );
-
-      const marinaLeads =
-        allLeads.filter(
-          isMarinaEngineer
-        );
-
-      console.log(
-        "Сделок Марины:",
-        marinaLeads.length
-      );
-
-      res.json({
-        status:
-          "OK",
-
-        method:
-          "Получение сделок без фильтра + проверка поля в ответе",
-
-        engineer: {
-          name:
-            ENGINEER_NAME,
-
-          field_id:
-            ENGINEER_FIELD_ID,
-
-          enum_id:
-            ENGINEER_ENUM_ID,
-        },
-
-        total_leads_loaded:
-          allLeads.length,
-
-        marina_leads_count:
-          marinaLeads.length,
-
-        leads:
-          marinaLeads.map(
-            (lead) => ({
-              id:
-                lead.id,
-
-              name:
-                lead.name,
-
-              contract_number:
-                getCustomFieldText(
-                  lead,
-                  FIELD_IDS.contractNumber
-                ),
-
-              engineer:
-                getCustomFieldText(
-                  lead,
-                  ENGINEER_FIELD_ID
-                ),
-
-              engineer_raw:
-                getRawCustomFieldValue(
-                  lead,
-                  ENGINEER_FIELD_ID
-                ),
-
-              link:
-                leadLink(
-                  lead.id
-                ),
-            })
-          ),
-      });
-    } catch (error) {
-      console.error(
-        "Ошибка marina-leads:",
-        error.details ||
-          error.message
-      );
-
-      res.status(500).json({
-        status:
-          "Ошибка",
-
-        message:
-          error.message,
-
-        details:
-          error.details ||
-          null,
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// ПОЛУЧЕНИЕ ЗАДАЧ С ФИЛЬТРОМ ПО ТИПУ
-// ============================================================
-
-async function fetchMeasurementTasks() {
-  const result =
-    await fetchMeasurementTasksRaw();
-
-  console.log(
-    `Задач типа ${TASK_TYPE_ID}: ${result.tasks.length}`
-  );
-
-  return result.tasks;
-}
-
-
-// ============================================================
-// ПОСТРОЕНИЕ ЗАМЕРОВ
-//
-// В ЭТОЙ ВЕРСИИ:
-// 1. Получаем задачи типа 2746005.
-// 2. Смотрим entity_id.
-// 3. Получаем соответствующие сделки.
-// 4. Проверяем Инженер = Марина.
-// 5. Формируем данные сделки.
-//
-// Фильтр по датам пока намеренно НЕ применяем.
-// Сначала проверяем реальные данные задач.
-// ============================================================
-
-async function buildMeasurementsList() {
-  const tasks =
-    await fetchMeasurementTasks();
-
-  if (
-    tasks.length === 0
-  ) {
-    return [];
-  }
-
-  const taskLeadPairs =
-    tasks
-      .filter(
-        (task) =>
-          task.entity_type ===
-            "leads" &&
-          task.entity_id
+    params.set(
+      "filter[task_type][]",
+      String(
+        TASK_TYPE_ID
       )
-      .map(
-        (task) => ({
-          task,
-          lead_id:
-            task.entity_id,
-        })
-      );
-
-  console.log(
-    "Задач, привязанных к сделкам:",
-    taskLeadPairs.length
-  );
-
-  const leadIds =
-    taskLeadPairs.map(
-      (item) =>
-        item.lead_id
     );
 
-  const uniqueLeadIds = [
+    params.set(
+      "filter[is_completed][]",
+      "0"
+    );
+
+    params.set(
+      "limit",
+      "250"
+    );
+
+    params.set(
+      "page",
+      String(page)
+    );
+
+    params.set(
+      "order[complete_till]",
+      "asc"
+    );
+
+    const data =
+      await amocrmRequest(
+        `/api/v4/tasks?${params.toString()}`
+      );
+
+    const current =
+      data &&
+      data._embedded &&
+      data._embedded.tasks
+        ? data._embedded.tasks
+        : [];
+
+    tasks.push(
+      ...current
+    );
+
+    console.log(
+      `Задачи: страница ${page}, получено ${current.length}`
+    );
+
+    if (
+      current.length < 250
+    ) {
+
+      break;
+    }
+
+    page++;
+
+    // Защита от бесконечного цикла
+    if (
+      page > 100
+    ) {
+
+      break;
+    }
+  }
+
+  return tasks;
+}
+
+
+// ============================================================
+// ОТБОР ЗАДАЧ ПО ДАТЕ
+// ============================================================
+
+function filterTasksByDate(
+  tasks
+) {
+
+  const range =
+    getTaskDateRange();
+
+  const filtered =
+    tasks.filter(
+      task => {
+
+        if (
+          task.entity_type !==
+          "leads"
+        ) {
+
+          return false;
+        }
+
+        if (
+          !task.entity_id
+        ) {
+
+          return false;
+        }
+
+        if (
+          !task.complete_till
+        ) {
+
+          return false;
+        }
+
+        const deadline =
+          Number(
+            task.complete_till
+          );
+
+        return (
+          deadline >=
+            range.from &&
+          deadline <=
+            range.to
+        );
+      }
+    );
+
+  return {
+
+    range,
+
+    tasks:
+      filtered,
+
+  };
+}
+
+
+// ============================================================
+// ПОЛУЧЕНИЕ ВСЕХ НУЖНЫХ СДЕЛОК
+// ============================================================
+
+async function getLeadsForTasks(
+  tasks
+) {
+
+  const leadIds = [
     ...new Set(
-      leadIds
+      tasks.map(
+        task =>
+          Number(
+            task.entity_id
+          )
+      )
     ),
   ];
 
+  const leads = [];
+
+  for (
+    const leadId of
+    leadIds
+  ) {
+
+    try {
+
+      const lead =
+        await getLead(
+          leadId
+        );
+
+      if (
+        lead
+      ) {
+
+        leads.push(
+          lead
+        );
+      }
+
+    } catch (
+      error
+    ) {
+
+      console.error(
+        `Не удалось получить сделку ${leadId}:`,
+        error.message
+      );
+    }
+  }
+
+  return leads;
+}
+
+
+// ============================================================
+// ФОРМИРОВАНИЕ ЗАМЕРОВ
+// ============================================================
+
+async function buildMeasurements() {
+
+  console.log(
+    "======================================"
+  );
+
+  console.log(
+    "Начинаем поиск замеров"
+  );
+
+  console.log(
+    "Инженер:",
+    ENGINEER_NAME
+  );
+
+  console.log(
+    "Тип задачи:",
+    TASK_TYPE_ID
+  );
+
+  const allTasks =
+    await getMeasurementTasks();
+
+  console.log(
+    "Всего задач нужного типа:",
+    allTasks.length
+  );
+
+  const dateResult =
+    filterTasksByDate(
+      allTasks
+    );
+
+  const tasks =
+    dateResult.tasks;
+
+  console.log(
+    "Задач после фильтра по дате:",
+    tasks.length
+  );
+
   const leads =
-    await fetchLeadsByIds(
-      uniqueLeadIds
+    await getLeadsForTasks(
+      tasks
     );
 
   console.log(
-    "Получено связанных сделок:",
+    "Получено сделок:",
     leads.length
   );
 
-  const marinaLeads =
-    leads.filter(
-      isMarinaEngineer
-    );
-
-  console.log(
-    `Сделок с инженером ${ENGINEER_NAME}:`,
-    marinaLeads.length
-  );
-
-  const results = [];
+  const result = [];
 
   for (
-    const lead of
-    marinaLeads
+    const task of
+    tasks
   ) {
-    let contactInfo = {
-      name: null,
-      phones: [],
-    };
+
+    const lead =
+      leads.find(
+        item =>
+          Number(
+            item.id
+          ) ===
+          Number(
+            task.entity_id
+          )
+      );
+
+    if (
+      !lead
+    ) {
+
+      continue;
+    }
+
+    // Проверяем инженера именно в сделке
+    if (
+      !isMarina(
+        lead
+      )
+    ) {
+
+      console.log(
+        `Сделка ${lead.id} пропущена: другой инженер`
+      );
+
+      continue;
+    }
+
+    let clientName =
+      null;
+
+    let clientPhones = [];
 
     const contacts =
       lead._embedded &&
@@ -1390,7 +1173,7 @@ async function buildMeasurementsList() {
 
     const mainContact =
       contacts.find(
-        (contact) =>
+        contact =>
           contact.is_main ===
           true
       ) ||
@@ -1399,141 +1182,509 @@ async function buildMeasurementsList() {
     if (
       mainContact
     ) {
+
       try {
-        contactInfo =
-          await fetchContactInfo(
+
+        const contact =
+          await getContact(
             mainContact.id
           );
+
+        const info =
+          extractContactInfo(
+            contact
+          );
+
+        clientName =
+          info.name;
+
+        clientPhones =
+          info.phones;
+
       } catch (
-        contactError
+        error
       ) {
+
         console.error(
           "Ошибка получения контакта:",
-          contactError.message
+          error.message
         );
       }
     }
 
-    const relatedTask =
-      taskLeadPairs.find(
-        (item) =>
-          Number(
-            item.lead_id
-          ) ===
-          Number(
-            lead.id
-          )
-      );
+    result.push({
 
-    results.push({
       task_id:
-        relatedTask &&
-        relatedTask.task
-          ? relatedTask.task.id
-          : null,
+        task.id,
 
       task_complete_till:
-        relatedTask &&
-        relatedTask.task
-          ? relatedTask.task
-              .complete_till
-          : null,
+        task.complete_till,
+
+      task_complete_till_moscow:
+        formatMoscowDate(
+          task.complete_till
+        ),
 
       lead_id:
         lead.id,
+
+      contract_number:
+        getFieldText(
+          lead,
+          FIELD_IDS.contractNumber
+        ),
+
+      measure_date:
+        getFieldDate(
+          lead,
+          FIELD_IDS.measureDate
+        ),
+
+      measure_time:
+        getFieldText(
+          lead,
+          FIELD_IDS.measureTime
+        ),
+
+      measure_address:
+        getFieldText(
+          lead,
+          FIELD_IDS.measureAddress
+        ),
+
+      product:
+        getFieldText(
+          lead,
+          FIELD_IDS.product
+        ),
+
+      client_name:
+        clientName,
+
+      client_phones:
+        clientPhones,
 
       lead_link:
         leadLink(
           lead.id
         ),
 
-      contract_number:
-        getCustomFieldText(
-          lead,
-          FIELD_IDS.contractNumber
-        ),
-
-      measure_date:
-        getCustomFieldDate(
-          lead,
-          FIELD_IDS.measureDate
-        ),
-
-      measure_time:
-        getCustomFieldText(
-          lead,
-          FIELD_IDS.measureTime
-        ),
-
-      measure_address:
-        getCustomFieldText(
-          lead,
-          FIELD_IDS.measureAddress
-        ),
-
-      product:
-        getCustomFieldText(
-          lead,
-          FIELD_IDS.product
-        ),
-
-      client_name:
-        contactInfo.name,
-
-      client_phones:
-        contactInfo.phones,
-
       engineer:
         ENGINEER_NAME,
+
     });
   }
 
-  return results;
+  console.log(
+    "ИТОГО НАЙДЕНО:",
+    result.length
+  );
+
+  console.log(
+    "======================================"
+  );
+
+  return {
+
+    range:
+      dateResult.range,
+
+    allTasksCount:
+      allTasks.length,
+
+    dateTasksCount:
+      tasks.length,
+
+    measurements:
+      result,
+
+  };
 }
 
 
 // ============================================================
-// ТЕСТ ВСЕЙ ЦЕПОЧКИ
+// DEBUG: СВЯЗЬ С amoCRM
+// ============================================================
+
+app.get(
+  "/debug/amocrm-test",
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const account =
+        await amocrmRequest(
+          "/api/v4/account"
+        );
+
+      res.json({
+
+        status:
+          "Связь с amoCRM работает!",
+
+        account_name:
+          account.name,
+
+        account_id:
+          account.id,
+
+        subdomain:
+          account.subdomain,
+
+      });
+
+    } catch (
+      error
+    ) {
+
+      res.status(500)
+        .json({
+
+          status:
+            "Ошибка",
+
+          message:
+            error.message,
+
+          details:
+            error.details ||
+            null,
+
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DEBUG: ПОЛЕ ИНЖЕНЕР
+// ============================================================
+
+app.get(
+  "/debug/engineer-field",
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const field =
+        await amocrmRequest(
+          `/api/v4/leads/custom_fields/${ENGINEER_FIELD_ID}`
+        );
+
+      const values =
+        field.enums || [];
+
+      const found =
+        values.find(
+          item =>
+            Number(
+              item.id
+            ) ===
+            Number(
+              ENGINEER_ENUM_ID
+            )
+        );
+
+      res.json({
+
+        status:
+          "OK",
+
+        field: {
+
+          id:
+            field.id,
+
+          name:
+            field.name,
+
+          type:
+            field.type,
+
+        },
+
+        expected_engineer: {
+
+          name:
+            ENGINEER_NAME,
+
+          enum_id:
+            ENGINEER_ENUM_ID,
+
+        },
+
+        found_engineer:
+          found || null,
+
+        all_values:
+          values,
+
+      });
+
+    } catch (
+      error
+    ) {
+
+      res.status(500)
+        .json({
+
+          status:
+            "Ошибка",
+
+          message:
+            error.message,
+
+          details:
+            error.details ||
+            null,
+
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DEBUG: КОНКРЕТНАЯ СДЕЛКА
+//
+// Можно проверить:
+// /debug/lead-test/35485692
+// ============================================================
+
+app.get(
+  "/debug/lead-test/:id",
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const lead =
+        await getLead(
+          req.params.id
+        );
+
+      const engineerField =
+        getField(
+          lead,
+          ENGINEER_FIELD_ID
+        );
+
+      res.json({
+
+        status:
+          "OK",
+
+        lead_id:
+          lead.id,
+
+        lead_name:
+          lead.name,
+
+        is_marina:
+          isMarina(
+            lead
+          ),
+
+        engineer_field:
+          engineerField,
+
+        contract_number:
+          getFieldText(
+            lead,
+            FIELD_IDS.contractNumber
+          ),
+
+        measure_date:
+          getFieldDate(
+            lead,
+            FIELD_IDS.measureDate
+          ),
+
+        measure_time:
+          getFieldText(
+            lead,
+            FIELD_IDS.measureTime
+          ),
+
+        address:
+          getFieldText(
+            lead,
+            FIELD_IDS.measureAddress
+          ),
+
+        product:
+          getFieldText(
+            lead,
+            FIELD_IDS.product
+          ),
+
+        link:
+          leadLink(
+            lead.id
+          ),
+
+        contacts:
+          lead._embedded &&
+          lead._embedded.contacts
+            ? lead._embedded.contacts
+            : [],
+
+        raw_lead:
+          lead,
+
+      });
+
+    } catch (
+      error
+    ) {
+
+      res.status(500)
+        .json({
+
+          status:
+            "Ошибка",
+
+          message:
+            error.message,
+
+          details:
+            error.details ||
+            null,
+
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DEBUG: ЗАДАЧИ НУЖНОГО ТИПА
+// ============================================================
+
+app.get(
+  "/debug/measurement-tasks",
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const tasks =
+        await getMeasurementTasks();
+
+      res.json({
+
+        status:
+          "OK",
+
+        task_type_id:
+          TASK_TYPE_ID,
+
+        total:
+          tasks.length,
+
+        tasks:
+          tasks.map(
+            task => ({
+
+              id:
+                task.id,
+
+              task_type_id:
+                task.task_type_id,
+
+              entity_id:
+                task.entity_id,
+
+              entity_type:
+                task.entity_type,
+
+              responsible_user_id:
+                task.responsible_user_id,
+
+              is_completed:
+                task.is_completed,
+
+              complete_till:
+                task.complete_till,
+
+              complete_till_moscow:
+                formatMoscowDate(
+                  task.complete_till
+                ),
+
+              text:
+                task.text,
+
+            })
+          ),
+
+      });
+
+    } catch (
+      error
+    ) {
+
+      res.status(500)
+        .json({
+
+          status:
+            "Ошибка",
+
+          message:
+            error.message,
+
+          details:
+            error.details ||
+            null,
+
+        });
+    }
+  }
+);
+
+
+// ============================================================
+// DEBUG: ПОЛНАЯ ЦЕПОЧКА
 // ============================================================
 
 app.get(
   "/debug/tasks-test",
-  async (req, res) => {
-    try {
-      const range =
-        getDateRange();
+  async (
+    req,
+    res
+  ) => {
 
-      const measurements =
-        await buildMeasurementsList();
+    try {
+
+      const result =
+        await buildMeasurements();
+
+      const now =
+        moscowNow();
 
       res.json({
+
         status:
           "OK",
-
-        note:
-          "В этой диагностической версии фильтр по датам пока НЕ применяется.",
 
         timezone:
           TIME_ZONE,
 
         current_moscow_time:
-          new Intl.DateTimeFormat(
-            "ru-RU",
-            {
-              timeZone:
-                TIME_ZONE,
-
-              dateStyle:
-                "short",
-
-              timeStyle:
-                "medium",
-            }
-          ).format(
-            new Date()
-          ),
+          `${String(now.day).padStart(2, "0")}.${String(now.month).padStart(2, "0")}.${now.year} ${String(now.hour).padStart(2, "0")}:${String(now.minute).padStart(2, "0")}:${String(now.second).padStart(2, "0")}`,
 
         engineer: {
+
           name:
             ENGINEER_NAME,
 
@@ -1542,122 +1693,191 @@ app.get(
 
           enum_id:
             ENGINEER_ENUM_ID,
+
         },
 
         task_type_id:
           TASK_TYPE_ID,
 
-        planned_date_range: {
+        date_mode:
+          result.range.mode,
+
+        date_range: {
+
           from:
-            new Date(
-              range.from *
-                1000
-            ).toLocaleString(
-              "ru-RU",
-              {
-                timeZone:
-                  TIME_ZONE,
-              }
+            formatMoscowDate(
+              result.range.from
             ),
 
           to:
-            new Date(
-              range.to *
-                1000
-            ).toLocaleString(
-              "ru-RU",
-              {
-                timeZone:
-                  TIME_ZONE,
-              }
+            formatMoscowDate(
+              result.range.to
             ),
+
         },
 
+        all_tasks_count:
+          result.allTasksCount,
+
+        tasks_after_date_filter:
+          result.dateTasksCount,
+
         found_count:
-          measurements.length,
+          result.measurements.length,
 
         measurements:
-          measurements,
+          result.measurements,
+
       });
-    } catch (error) {
+
+    } catch (
+      error
+    ) {
+
       console.error(
-        "Ошибка tasks-test:",
-        error.details ||
-          error.message
+        error
       );
 
-      res.status(500).json({
-        status:
-          "Ошибка",
+      res.status(500)
+        .json({
 
-        message:
-          error.message,
+          status:
+            "Ошибка",
 
-        details:
-          error.details ||
-          null,
-      });
+          message:
+            error.message,
+
+          details:
+            error.details ||
+            null,
+
+        });
     }
   }
 );
 
 
 // ============================================================
+// amoMessenger: отправка сообщения
+// ============================================================
+
+async function sendBotMessage(
+  botId,
+  requestId,
+  text,
+  buttons,
+  receiverUserId
+) {
+
+  const body = {
+
+    text,
+
+    receiver: {
+
+      user_id:
+        receiverUserId,
+
+    },
+
+  };
+
+  if (
+    buttons &&
+    buttons.length
+  ) {
+
+    body.reply_markup = {
+
+      inline_keyboard: {
+
+        buttons:
+          buttons.map(
+            text => ({
+              text:
+                String(text),
+            })
+          ),
+
+      },
+
+    };
+  }
+
+  return amoMessengerRequest(
+    "POST",
+
+    `/v1.3/bots/${botId}/request/${requestId}/sendMessage`,
+
+    body
+  );
+}
+
+
+// ============================================================
+// amoMessenger: вернуть управление
+// ============================================================
+
+async function returnControl(
+  botId,
+  requestId,
+  code
+) {
+
+  return amoMessengerRequest(
+    "POST",
+
+    `/v1.3/bots/${botId}/request/${requestId}/returnControl`,
+
+    {
+      return_code:
+        code,
+    }
+  );
+}
+
+
+// ============================================================
 // ФОРМАТ СПИСКА ЗАМЕРОВ
 // ============================================================
 
-function formatMessageText(
+function formatMeasurementsList(
   measurements
 ) {
+
   return measurements
     .map(
-      (m) => {
+      item => {
+
+        const phones =
+          item.client_phones &&
+          item.client_phones.length
+            ? item.client_phones.join(
+                ", "
+              )
+            : "—";
+
         return [
-          `№ договора: ${
-            m.contract_number ||
-            "—"
-          }`,
+          `№ договора: ${item.contract_number || "—"}`,
 
-          `Дата замера: ${
-            m.measure_date ||
-            "—"
-          }`,
+          `Дата замера: ${item.measure_date || "—"}`,
 
-          `Время замера: ${
-            m.measure_time ||
-            "—"
-          }`,
+          `Время замера: ${item.measure_time || "—"}`,
 
-          `Адрес объекта: ${
-            m.measure_address ||
-            "—"
-          }`,
+          `Адрес замера: ${item.measure_address || "—"}`,
 
-          `Продукт: ${
-            m.product ||
-            "—"
-          }`,
+          `Продукт: ${item.product || "—"}`,
 
-          `Имя клиента: ${
-            m.client_name ||
-            "—"
-          }`,
+          `Имя клиента: ${item.client_name || "—"}`,
 
-          `№ телефона: ${
-            m.client_phones &&
-            m.client_phones.length
-              ? m.client_phones.join(
-                  ", "
-                )
-              : "—"
-          }`,
+          `№ телефона: ${phones}`,
 
-          `Ссылка на сделку: ${
-            m.lead_link
-          }`,
+          `Ссылка на сделку: ${item.lead_link}`,
+
         ].join(
           "; "
         );
+
       }
     )
     .join(
@@ -1667,340 +1887,41 @@ function formatMessageText(
 
 
 // ============================================================
-// ПОДРОБНОСТИ ЗАМЕРА
+// ФОРМАТ ОДНОГО ЗАМЕРА
 // ============================================================
 
 function formatMeasurementDetails(
-  measurement
+  item
 ) {
+
+  const phones =
+    item.client_phones &&
+    item.client_phones.length
+      ? item.client_phones.join(
+          ", "
+        )
+      : "—";
+
   return [
-    `Дата замера: ${
-      measurement.measure_date ||
-      "—"
-    }`,
 
-    `Время замера: ${
-      measurement.measure_time ||
-      "—"
-    }`,
+    `Дата замера: ${item.measure_date || "—"}`,
 
-    `Адрес объекта: ${
-      measurement.measure_address ||
-      "—"
-    }`,
+    `Время замера: ${item.measure_time || "—"}`,
 
-    `Продукт: ${
-      measurement.product ||
-      "—"
-    }`,
+    `Адрес замера: ${item.measure_address || "—"}`,
 
-    `Имя клиента: ${
-      measurement.client_name ||
-      "—"
-    }`,
+    `Продукт: ${item.product || "—"}`,
 
-    `№ телефона: ${
-      measurement.client_phones &&
-      measurement.client_phones.length
-        ? measurement.client_phones.join(
-            ", "
-          )
-        : "—"
-    }`,
+    `Имя клиента: ${item.client_name || "—"}`,
 
-    `№ договора: ${
-      measurement.contract_number ||
-      "—"
-    }`,
+    `№ телефона: ${phones}`,
 
-    `Ссылка на сделку: ${
-      measurement.lead_link
-    }`,
+    `№ договора: ${item.contract_number || "—"}`,
+
+    `Ссылка на сделку: ${item.lead_link}`,
+
   ].join(
     "\n"
-  );
-}
-
-
-// ============================================================
-// WEBHOOK: ПЕРЕДАЧА УПРАВЛЕНИЯ БОТУ
-// ============================================================
-
-async function handleControlTransferred(
-  body
-) {
-  const payload =
-    body._embedded &&
-    body._embedded
-      .rpa_bot_control_transferred;
-
-  if (!payload) {
-    return;
-  }
-
-  const botId =
-    payload.bot_id;
-
-  const request =
-    payload._embedded &&
-    payload._embedded.request;
-
-  if (!request) {
-    return;
-  }
-
-  const requestId =
-    request.id;
-
-  const receiverUserId =
-    request.author_id;
-
-  console.log(
-    "Получено управление ботом."
-  );
-
-  console.log(
-    "botId:",
-    botId
-  );
-
-  console.log(
-    "requestId:",
-    requestId
-  );
-
-  console.log(
-    "receiverUserId:",
-    receiverUserId
-  );
-
-  try {
-    const measurements =
-      await buildMeasurementsList();
-
-    if (
-      measurements.length ===
-      0
-    ) {
-      await sendBotMessage(
-        botId,
-
-        requestId,
-
-        `Замеры для инженера ${ENGINEER_NAME} не найдены.`,
-
-        null,
-
-        receiverUserId
-      );
-
-      await returnControl(
-        botId,
-
-        requestId,
-
-        "success"
-      );
-
-      return;
-    }
-
-    activeRequests.set(
-      requestId,
-
-      {
-        botId,
-
-        measurements,
-      }
-    );
-
-    const listText =
-      formatMessageText(
-        measurements
-      );
-
-    const buttonTexts =
-      measurements.map(
-        (measurement) =>
-          measurement.contract_number ||
-          String(
-            measurement.lead_id
-          )
-      );
-
-    const message =
-      `Замеры для инженера ${ENGINEER_NAME}:\n\n` +
-      listText +
-      "\n\nВыберите замер:";
-
-    await sendBotMessage(
-      botId,
-
-      requestId,
-
-      message,
-
-      buttonTexts,
-
-      receiverUserId
-    );
-
-  } catch (error) {
-    console.error(
-      "Ошибка поиска замеров:",
-      error.details ||
-        error.message
-    );
-
-    await sendBotMessage(
-      botId,
-
-      requestId,
-
-      "Произошла ошибка при получении данных из amoCRM.",
-
-      null,
-
-      receiverUserId
-    );
-
-    await returnControl(
-      botId,
-
-      requestId,
-
-      "error"
-    );
-  }
-}
-
-
-// ============================================================
-// WEBHOOK: НАЖАТИЕ КНОПКИ
-// ============================================================
-
-async function handleIncomeMessage(
-  body
-) {
-  const payload =
-    body._embedded &&
-    body._embedded
-      .rpa_bot_income_message;
-
-  if (!payload) {
-    return;
-  }
-
-  const botId =
-    payload.bot_id;
-
-  const request =
-    payload._embedded &&
-    payload._embedded.request;
-
-  if (!request) {
-    return;
-  }
-
-  const requestId =
-    request.id;
-
-  const receiverUserId =
-    request.author_id;
-
-  const incomeMessage =
-    payload._embedded &&
-    payload._embedded
-      .income_message;
-
-  const messageText =
-    incomeMessage &&
-    incomeMessage.text
-      ? String(
-          incomeMessage.text
-        ).trim()
-      : "";
-
-  const session =
-    activeRequests.get(
-      requestId
-    );
-
-  if (!session) {
-    console.log(
-      "Нет активной сессии для requestId:",
-      requestId
-    );
-
-    return;
-  }
-
-  const chosen =
-    session.measurements.find(
-      (measurement) => {
-        const buttonText =
-          measurement.contract_number ||
-          String(
-            measurement.lead_id
-          );
-
-        return (
-          buttonText ===
-          messageText
-        );
-      }
-    );
-
-  if (!chosen) {
-    await sendBotMessage(
-      botId,
-
-      requestId,
-
-      "Не удалось определить выбранный замер. Пожалуйста, нажмите кнопку с номером договора.",
-
-      session.measurements.map(
-        (measurement) =>
-          measurement.contract_number ||
-          String(
-            measurement.lead_id
-          )
-      ),
-
-      receiverUserId
-    );
-
-    return;
-  }
-
-  const detailText =
-    formatMeasurementDetails(
-      chosen
-    );
-
-  await sendBotMessage(
-    botId,
-
-    requestId,
-
-    detailText,
-
-    null,
-
-    receiverUserId
-  );
-
-  activeRequests.delete(
-    requestId
-  );
-
-  await returnControl(
-    botId,
-
-    requestId,
-
-    "success"
   );
 }
 
@@ -2015,23 +1936,12 @@ app.post(
     req,
     res
   ) => {
+
     const body =
       req.body;
 
-    const eventType =
-      body.event_type;
-
     console.log(
-      "================================================"
-    );
-
-    console.log(
-      "Webhook amoMessenger"
-    );
-
-    console.log(
-      "event_type:",
-      eventType
+      "AMOMESSENGER WEBHOOK:"
     );
 
     console.log(
@@ -2042,51 +1952,260 @@ app.post(
       )
     );
 
-    console.log(
-      "================================================"
-    );
-
-    // Отвечаем сразу
-    res.status(
-      200
-    ).json({
-      ok: true,
-    });
+    res.status(200)
+      .json({
+        ok: true,
+      });
 
     try {
+
+      const eventType =
+        body.event_type;
+
+      // ------------------------------------------------------
+      // Передача управления боту
+      // ------------------------------------------------------
+
       if (
         eventType ===
         "rpa_bot_control_transferred"
       ) {
-        await handleControlTransferred(
-          body
+
+        const payload =
+          body._embedded &&
+          body._embedded
+            .rpa_bot_control_transferred;
+
+        if (!payload) {
+          return;
+        }
+
+        const request =
+          payload._embedded &&
+          payload._embedded.request;
+
+        if (!request) {
+          return;
+        }
+
+        const botId =
+          payload.bot_id;
+
+        const requestId =
+          request.id;
+
+        const receiverUserId =
+          request.author_id;
+
+        const result =
+          await buildMeasurements();
+
+        if (
+          !result.measurements.length
+        ) {
+
+          await sendBotMessage(
+
+            botId,
+
+            requestId,
+
+            `Замеры для ${ENGINEER_NAME} не найдены.`,
+
+            null,
+
+            receiverUserId
+
+          );
+
+          await returnControl(
+            botId,
+            requestId,
+            "success"
+          );
+
+          return;
+        }
+
+        activeRequests.set(
+          requestId,
+          {
+            measurements:
+              result.measurements,
+
+            botId,
+
+            receiverUserId,
+          }
         );
+
+        const text =
+          "Выберите замер:\n\n" +
+          formatMeasurementsList(
+            result.measurements
+          );
+
+        const buttons =
+          result.measurements.map(
+            item =>
+              item.contract_number ||
+              String(
+                item.lead_id
+              )
+          );
+
+        await sendBotMessage(
+
+          botId,
+
+          requestId,
+
+          text,
+
+          buttons,
+
+          receiverUserId
+
+        );
+
+        return;
       }
 
-      else if (
+      // ------------------------------------------------------
+      // Нажата кнопка
+      // ------------------------------------------------------
+
+      if (
         eventType ===
         "rpa_bot_income_message"
       ) {
-        await handleIncomeMessage(
-          body
+
+        const payload =
+          body._embedded &&
+          body._embedded
+            .rpa_bot_income_message;
+
+        if (!payload) {
+          return;
+        }
+
+        const request =
+          payload._embedded &&
+          payload._embedded.request;
+
+        if (!request) {
+          return;
+        }
+
+        const requestId =
+          request.id;
+
+        const botId =
+          payload.bot_id;
+
+        const receiverUserId =
+          request.author_id;
+
+        const incoming =
+          payload._embedded &&
+          payload._embedded
+            .income_message;
+
+        const text =
+          incoming &&
+          incoming.text
+            ? String(
+                incoming.text
+              ).trim()
+            : "";
+
+        const session =
+          activeRequests.get(
+            requestId
+          );
+
+        if (!session) {
+
+          console.log(
+            "Сессия не найдена:",
+            requestId
+          );
+
+          return;
+        }
+
+        const selected =
+          session.measurements.find(
+            item =>
+              (
+                item.contract_number ||
+                String(
+                  item.lead_id
+                )
+              ) ===
+              text
+          );
+
+        if (!selected) {
+
+          await sendBotMessage(
+
+            botId,
+
+            requestId,
+
+            "Не удалось определить выбранный замер.",
+
+            session.measurements.map(
+              item =>
+                item.contract_number ||
+                String(
+                  item.lead_id
+                )
+            ),
+
+            receiverUserId
+
+          );
+
+          return;
+        }
+
+        await sendBotMessage(
+
+          botId,
+
+          requestId,
+
+          formatMeasurementDetails(
+            selected
+          ),
+
+          null,
+
+          receiverUserId
+
+        );
+
+        activeRequests.delete(
+          requestId
+        );
+
+        await returnControl(
+          botId,
+          requestId,
+          "success"
         );
       }
 
-      else {
-        console.log(
-          "Событие пока не обрабатывается:",
-          eventType
-        );
-      }
-    }
-
-    catch (
+    } catch (
       error
     ) {
+
       console.error(
-        "Ошибка webhook:",
-        error.details ||
-          error.message
+        "WEBHOOK ERROR:",
+        error.message,
+        error.details
       );
     }
   }
@@ -2094,352 +2213,25 @@ app.post(
 
 
 // ============================================================
-// ГЛАВНАЯ
+// ROOT
 // ============================================================
 
 app.get(
   "/",
-  (req, res) => {
+  (
+    req,
+    res
+  ) => {
+
     res.send(
-      "OK. amoMessenger + amoCRM сервер работает."
+      "amoCRM + amoMessenger сервер работает"
     );
   }
 );
 
 
 // ============================================================
-// ПРОВЕРКА amoCRM
-// ============================================================
-
-app.get(
-  "/debug/amocrm-test",
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const account =
-        await amocrmRequest(
-          "/api/v4/account"
-        );
-
-      res.json({
-        status:
-          "Связь с amoCRM работает!",
-
-        account_name:
-          account.name,
-
-        account_id:
-          account.id,
-
-        subdomain:
-          account.subdomain,
-      });
-    }
-
-    catch (
-      error
-    ) {
-      res.status(
-        500
-      ).json({
-        status:
-          "Ошибка связи с amoCRM",
-
-        message:
-          error.message,
-
-        details:
-          error.details ||
-          null,
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// ПРОВЕРКА ПОЛЯ ИНЖЕНЕР
-// ============================================================
-
-app.get(
-  "/debug/engineer-field",
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const field =
-        await amocrmRequest(
-          `/api/v4/leads/custom_fields/${ENGINEER_FIELD_ID}`
-        );
-
-      const enums =
-        field &&
-        field.enums
-          ? field.enums
-          : [];
-
-      const marina =
-        enums.find(
-          (item) =>
-            Number(
-              item.id
-            ) ===
-            Number(
-              ENGINEER_ENUM_ID
-            )
-        ) ||
-        enums.find(
-          (item) =>
-            String(
-              item.value
-            ).trim() ===
-            ENGINEER_NAME
-        );
-
-      res.json({
-        status:
-          "OK",
-
-        field: {
-          id:
-            field.id,
-
-          name:
-            field.name,
-
-          type:
-            field.type,
-        },
-
-        expected_engineer: {
-          name:
-            ENGINEER_NAME,
-
-          enum_id:
-            ENGINEER_ENUM_ID,
-        },
-
-        found_engineer:
-          marina ||
-          null,
-
-        all_values:
-          enums,
-      });
-    }
-
-    catch (
-      error
-    ) {
-      res.status(
-        500
-      ).json({
-        status:
-          "Ошибка",
-
-        message:
-          error.message,
-
-        details:
-          error.details ||
-          null,
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// УСТАНОВКА amoMessenger
-// ============================================================
-
-app.get(
-  "/oauth/amomessenger/callback",
-  async (
-    req,
-    res
-  ) => {
-    const {
-      code,
-    } =
-      req.query;
-
-    if (!code) {
-      return res
-        .status(
-          400
-        )
-        .send(
-          "Не хватает параметра code."
-        );
-    }
-
-    const CLIENT_ID =
-      process.env
-        .AMOMESSENGER_CLIENT_ID;
-
-    const CLIENT_SECRET =
-      process.env
-        .AMOMESSENGER_CLIENT_SECRET;
-
-    const REDIRECT_URI =
-      process.env
-        .AMOMESSENGER_REDIRECT_URI;
-
-    if (
-      !CLIENT_ID ||
-      !CLIENT_SECRET ||
-      !REDIRECT_URI
-    ) {
-      return res
-        .status(
-          500
-        )
-        .send(
-          "Не заданы переменные amoMessenger."
-        );
-    }
-
-    try {
-      const tokenResponse =
-        await fetch(
-          "https://id.amo.tm/oauth2/access_token",
-          {
-            method:
-              "POST",
-
-            headers: {
-              "Content-Type":
-                "application/json",
-            },
-
-            body:
-              JSON.stringify({
-                client_id:
-                  CLIENT_ID,
-
-                client_secret:
-                  CLIENT_SECRET,
-
-                grant_type:
-                  "authorization_code",
-
-                code:
-                  code,
-
-                redirect_uri:
-                  REDIRECT_URI,
-              }),
-          }
-        );
-
-      const tokenData =
-        await tokenResponse.json();
-
-      if (
-        !tokenResponse.ok
-      ) {
-        console.log(
-          tokenData
-        );
-
-        return res
-          .status(
-            500
-          )
-          .send(
-            "amoMessenger отклонила авторизацию."
-          );
-      }
-
-      saveJsonFile(
-        AMOMESSENGER_TOKENS_FILE,
-
-        {
-          access_token:
-            tokenData.access_token,
-
-          refresh_token:
-            tokenData.refresh_token,
-
-          expires_in:
-            tokenData.expires_in,
-
-          obtained_at:
-            new Date().toISOString(),
-        }
-      );
-
-      res.send(
-        "Готово! amoMessenger успешно подключён."
-      );
-    }
-
-    catch (
-      error
-    ) {
-      console.error(
-        error
-      );
-
-      res
-        .status(
-          500
-        )
-        .send(
-          "Ошибка установки amoMessenger."
-        );
-    }
-  }
-);
-
-
-// ============================================================
-// ПРОВЕРКА ТОКЕНА amoMessenger
-// ============================================================
-
-app.get(
-  "/debug/amomessenger-token",
-  (
-    req,
-    res
-  ) => {
-    const tokens =
-      loadJsonFile(
-        AMOMESSENGER_TOKENS_FILE
-      );
-
-    if (!tokens) {
-      return res.json({
-        status:
-          "Токен ещё не сохранён.",
-      });
-    }
-
-    res.json({
-      status:
-        "Токен найден",
-
-      access_token_preview:
-        tokens.access_token
-          ? tokens.access_token.slice(
-              0,
-              15
-            ) + "..."
-          : null,
-
-      obtained_at:
-        tokens.obtained_at,
-    });
-  }
-);
-
-
-// ============================================================
-// ПОСЛЕДНИЕ WEBHOOK
+// DEBUG LAST REQUESTS
 // ============================================================
 
 app.get(
@@ -2448,89 +2240,10 @@ app.get(
     req,
     res
   ) => {
+
     res.json(
       lastRequests
     );
-  }
-);
-
-
-// ============================================================
-// НАСТРОЙКА ВИДЖЕТА
-// ============================================================
-
-app.post(
-  "/",
-  (
-    req,
-    res
-  ) => {
-    console.log(
-      "Открыта настройка виджета"
-    );
-
-    res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>amoMessenger Widget</title>
-</head>
-
-<body style="
-  font-family: Arial, sans-serif;
-  padding: 20px;
-">
-
-<h3>
-  Виджет «Отчёт инженеров»
-</h3>
-
-<p>
-  Инженер:
-  <strong>
-    ${ENGINEER_NAME}
-  </strong>
-</p>
-
-<p>
-  ID значения:
-  <strong>
-    ${ENGINEER_ENUM_ID}
-  </strong>
-</p>
-
-<p>
-  Сервер работает.
-</p>
-
-<script src="https://js.amo.tm/v1/sdk.js"></script>
-
-<script>
-try {
-
-  var amoSDK =
-    window.AmoSDK();
-
-  amoSDK.setInputValues({
-    ready: "true"
-  });
-
-}
-
-catch (e) {
-
-  console.error(
-    "SDK error",
-    e
-  );
-
-}
-</script>
-
-</body>
-</html>
-`);
   }
 );
 
@@ -2548,45 +2261,45 @@ app.listen(
   () => {
 
     console.log(
-      "================================================"
+      "======================================"
     );
 
     console.log(
-      "amoMessenger + amoCRM сервер запущен"
+      "amoCRM + amoMessenger сервер запущен"
     );
 
     console.log(
-      "Порт:",
+      "PORT:",
       PORT
     );
 
     console.log(
-      "Инженер:",
-      ENGINEER_NAME
-    );
-
-    console.log(
-      "Engineer field ID:",
-      ENGINEER_FIELD_ID
-    );
-
-    console.log(
-      "Engineer enum ID:",
-      ENGINEER_ENUM_ID
-    );
-
-    console.log(
-      "Task type ID:",
-      TASK_TYPE_ID
-    );
-
-    console.log(
-      "Timezone:",
+      "TIMEZONE:",
       TIME_ZONE
     );
 
     console.log(
-      "================================================"
+      "ENGINEER:",
+      ENGINEER_NAME
+    );
+
+    console.log(
+      "ENGINEER FIELD:",
+      ENGINEER_FIELD_ID
+    );
+
+    console.log(
+      "ENGINEER ENUM:",
+      ENGINEER_ENUM_ID
+    );
+
+    console.log(
+      "TASK TYPE:",
+      TASK_TYPE_ID
+    );
+
+    console.log(
+      "======================================"
     );
 
   }
