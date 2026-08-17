@@ -1449,7 +1449,164 @@ app.get(
   }
 );
 
+// ============================================================
+// DEBUG: ЗАДАЧИ КОНКРЕТНОЙ СДЕЛКИ
+// ============================================================
 
+app.get(
+  "/debug/lead-tasks/:id",
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      const leadId =
+        Number(req.params.id);
+
+      if (!leadId) {
+
+        return res.status(400).json({
+          status: "Ошибка",
+          message: "Неверный ID сделки",
+        });
+
+      }
+
+      const params =
+        new URLSearchParams();
+
+      params.set(
+        "filter[entity_type]",
+        "leads"
+      );
+
+      params.set(
+        "filter[entity_id][]",
+        String(leadId)
+      );
+
+      params.set(
+        "limit",
+        "250"
+      );
+
+      params.set(
+        "page",
+        "1"
+      );
+
+      params.set(
+        "order[complete_till]",
+        "asc"
+      );
+
+      const data =
+        await amocrmRequest(
+          `/api/v4/tasks?${params.toString()}`
+        );
+
+      const tasks =
+        data &&
+        data._embedded &&
+        data._embedded.tasks
+          ? data._embedded.tasks
+          : [];
+
+      res.json({
+
+        status:
+          "OK",
+
+        lead_id:
+          leadId,
+
+        found_count:
+          tasks.length,
+
+        tasks:
+          tasks.map(
+            task => ({
+
+              id:
+                task.id,
+
+              task_type_id:
+                task.task_type_id,
+
+              text:
+                task.text,
+
+              entity_id:
+                task.entity_id,
+
+              entity_type:
+                task.entity_type,
+
+              responsible_user_id:
+                task.responsible_user_id,
+
+              is_completed:
+                task.is_completed,
+
+              complete_till:
+                task.complete_till,
+
+              complete_till_moscow:
+                formatMoscowDate(
+                  task.complete_till
+                ),
+
+              created_at:
+                task.created_at,
+
+              created_at_moscow:
+                formatMoscowDate(
+                  task.created_at
+                ),
+
+              updated_at:
+                task.updated_at,
+
+              updated_at_moscow:
+                formatMoscowDate(
+                  task.updated_at
+                ),
+
+            })
+          ),
+
+        raw:
+          data,
+
+      });
+
+    } catch (
+      error
+    ) {
+
+      console.error(
+        "Ошибка получения задач сделки:",
+        error
+      );
+
+      res.status(500).json({
+
+        status:
+          "Ошибка",
+
+        message:
+          error.message,
+
+        details:
+          error.details ||
+          null,
+
+      });
+    }
+  }
+);
 // ============================================================
 // DEBUG: КОНКРЕТНАЯ СДЕЛКА
 //
