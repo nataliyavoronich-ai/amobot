@@ -844,84 +844,137 @@ function extractContactInfo(
 
 async function getMarinaLeads() {
 
+  console.log("==========================================");
+  console.log("ПОИСК СДЕЛОК МАРИНЫ БЕЗ API-ФИЛЬТРА");
+  console.log("Инженер:", ENGINEER_NAME);
+  console.log("Field ID:", ENGINEER_FIELD_ID);
+  console.log("Enum ID:", ENGINEER_ENUM_ID);
+  console.log("==========================================");
+
   const leads = [];
 
   let page = 1;
 
   while (true) {
 
-    const params =
-      new URLSearchParams();
+    const params = new URLSearchParams();
 
-    params.set(
-      "filter[custom_fields_values][203849][]",
-      String(ENGINEER_ENUM_ID)
+    params.set("limit", "250");
+    params.set("page", String(page));
+    params.set("order[id]", "asc");
+
+    const data = await amocrmRequest(
+      `/api/v4/leads?${params.toString()}`
     );
-
-    params.set(
-      "limit",
-      "250"
-    );
-
-    params.set(
-      "page",
-      String(page)
-    );
-
-    params.set(
-      "order[id]",
-      "asc"
-    );
-
-    const data =
-      await amocrmRequest(
-        `/api/v4/leads?${params.toString()}`
-      );
 
     const current =
       data &&
       data._embedded &&
-      Array.isArray(
-        data._embedded.leads
-      )
+      Array.isArray(data._embedded.leads)
         ? data._embedded.leads
         : [];
 
     console.log(
-      `Сделки Марины: страница ${page}, получено ${current.length}`
+      `Страница сделок ${page}: получено ${current.length}`
     );
 
-    leads.push(
-      ...current
-    );
+    leads.push(...current);
 
-    if (
-      current.length < 250
-    ) {
-
+    if (current.length < 250) {
       break;
     }
 
     page++;
 
-    // Защита
-    if (
-      page > 100
-    ) {
-
+    // Защита от бесконечного цикла
+    if (page > 100) {
+      console.log(
+        "Остановлено после 100 страниц"
+      );
       break;
     }
   }
 
-  // Дополнительная проверка.
-  // Она нужна, чтобы даже при особенностях
-  // фильтра API мы точно оставляли только Марину.
-  return leads.filter(
-    lead =>
-      isMarina(lead)
+  console.log(
+    "Всего загружено сделок:",
+    leads.length
   );
-}
 
+  // ==========================================================
+  // Теперь самостоятельно проверяем поле "Инженер"
+  // ==========================================================
+
+  const marinaLeads = [];
+
+  for (const lead of leads) {
+
+    const field =
+      getField(
+        lead,
+        ENGINEER_FIELD_ID
+      );
+
+    if (
+      !field ||
+      !Array.isArray(field.values)
+    ) {
+      continue;
+    }
+
+    let found = false;
+
+    for (const value of field.values) {
+
+      // Проверка по ID значения списка
+      if (
+        value.enum_id !== undefined &&
+        Number(value.enum_id) ===
+          Number(ENGINEER_ENUM_ID)
+      ) {
+
+        found = true;
+        break;
+      }
+
+      // Дополнительная проверка по названию
+      if (
+        value.value !== undefined &&
+        String(value.value).trim() ===
+          ENGINEER_NAME
+      ) {
+
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+
+      marinaLeads.push(lead);
+
+      console.log(
+        "НАЙДЕНА СДЕЛКА МАРИНЫ:",
+        lead.id,
+        lead.name
+      );
+    }
+  }
+
+  console.log(
+    "=========================================="
+  );
+
+  console.log(
+    "НАЙДЕНО СДЕЛОК МАРИНЫ:",
+    marinaLeads.length
+  );
+
+  console.log(
+    "=========================================="
+  );
+
+  return marinaLeads;
+}
 
 // ============================================================
 // ПОЛУЧИТЬ ЗАДАЧИ ДЛЯ НЕСКОЛЬКИХ СДЕЛОК
