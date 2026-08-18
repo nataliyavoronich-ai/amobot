@@ -193,19 +193,72 @@ app.get(
 );
 
 app.post("/", (req, res) => {
-  console.log("====================================");
-  console.log("AMOMESSENGER POST /");
-  console.log("HEADERS:");
-  console.log(req.headers);
-  console.log("BODY:");
-  console.log(JSON.stringify(req.body, null, 2));
-  console.log("====================================");
+  res.send(`
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Отчёт инженеров</title>
 
-  res.json({
-    status: "OK",
-    message: "POST / получен",
-    body: req.body
-  });
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 24px;
+      margin: 0;
+      color: #222;
+      background: #fff;
+    }
+
+    h2 {
+      margin-top: 0;
+      margin-bottom: 12px;
+    }
+
+    p {
+      color: #666;
+      line-height: 1.5;
+    }
+
+    .status {
+      padding: 12px;
+      background: #f2f7ff;
+      border-radius: 8px;
+      margin-top: 16px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>Отчёт инженеров</h2>
+
+  <p>
+    Виджет подключён и готов к работе.
+  </p>
+
+  <div class="status">
+    Настройки виджета не требуются.
+  </div>
+
+  <script src="https://js.amo.tm/v1/sdk.js"></script>
+
+  <script>
+    try {
+      const amoSDK = window.AmoSDK();
+
+      // Сохраняем пустые настройки.
+      // Позже здесь при необходимости можно будет
+      // сохранять дополнительные параметры виджета.
+      amoSDK.setInputValues({});
+
+    } catch (e) {
+      console.error("amoSDK error:", e);
+    }
+  </script>
+
+</body>
+</html>
+  `);
 });
 
 // ============================================================
