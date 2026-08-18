@@ -984,18 +984,33 @@ async function getLeadClient(
 
 async function getAllLeadTasks() {
 
+  const range = getTaskDateRange();
+
   const allTasks = [];
 
   let page = 1;
 
   while (true) {
 
-    const params =
-      new URLSearchParams();
+    const params = new URLSearchParams();
 
+    // Только задачи сделок
     params.set(
       "filter[entity_type]",
       "leads"
+    );
+
+    // Самое важное:
+    // фильтр по сроку выполнения выполняет amoCRM,
+    // поэтому мы НЕ загружаем весь аккаунт.
+    params.set(
+      "filter[complete_till][from]",
+      String(range.from)
+    );
+
+    params.set(
+      "filter[complete_till][to]",
+      String(range.to)
     );
 
     params.set(
@@ -1013,6 +1028,11 @@ async function getAllLeadTasks() {
       "asc"
     );
 
+    console.log(
+      "Запрос задач:",
+      params.toString()
+    );
+
     const data =
       await amocrmRequest(
         `/api/v4/tasks?${params.toString()}`
@@ -1028,13 +1048,15 @@ async function getAllLeadTasks() {
         : [];
 
     console.log(
-      `Задачи: страница ${page}, получено ${current.length}`
+      `Страница задач ${page}: ${current.length}`
     );
 
     allTasks.push(
       ...current
     );
 
+    // Если получили меньше 250,
+    // значит это последняя страница.
     if (
       current.length < 250
     ) {
@@ -1044,17 +1066,23 @@ async function getAllLeadTasks() {
 
     page++;
 
+    // Защита от бесконечного цикла.
     if (
-      page > 100
+      page > 20
     ) {
 
       console.log(
-        "Остановлено после 100 страниц задач."
+        "Достигнут предел 20 страниц задач."
       );
 
       break;
     }
   }
+
+  console.log(
+    "Всего задач в заданном диапазоне:",
+    allTasks.length
+  );
 
   return allTasks;
 }
