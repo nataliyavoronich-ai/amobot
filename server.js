@@ -2894,6 +2894,122 @@ const PORT =
   process.env.PORT ||
   3000;
 
+app.get(
+  "/debug/tasks-filter-test",
+  async (req, res) => {
+
+    try {
+
+      const range = getTaskDateRange();
+
+      const params = new URLSearchParams();
+
+      params.set(
+        "filter[entity_type]",
+        "leads"
+      );
+
+      params.set(
+        "filter[complete_till][from]",
+        String(range.from)
+      );
+
+      params.set(
+        "filter[complete_till][to]",
+        String(range.to)
+      );
+
+      params.set(
+        "limit",
+        "10"
+      );
+
+      params.set(
+        "page",
+        "1"
+      );
+
+      const data =
+        await amocrmRequest(
+          `/api/v4/tasks?${params.toString()}`
+        );
+
+      const tasks =
+        data &&
+        data._embedded &&
+        Array.isArray(data._embedded.tasks)
+          ? data._embedded.tasks
+          : [];
+
+      res.json({
+
+        status: "OK",
+
+        date_mode:
+          range.mode,
+
+        date_range: {
+
+          from:
+            formatMoscowDate(range.from),
+
+          to:
+            formatMoscowDate(range.to),
+
+        },
+
+        returned_count:
+          tasks.length,
+
+        tasks:
+          tasks.map(task => ({
+
+            id:
+              task.id,
+
+            entity_id:
+              task.entity_id,
+
+            entity_type:
+              task.entity_type,
+
+            task_type_id:
+              task.task_type_id,
+
+            is_completed:
+              task.is_completed,
+
+            complete_till:
+              task.complete_till,
+
+            complete_till_moscow:
+              formatMoscowDate(
+                task.complete_till
+              ),
+
+          })),
+
+      });
+
+    } catch (error) {
+
+      res.status(500).json({
+
+        status: "Ошибка",
+
+        message:
+          error.message,
+
+        details:
+          error.details || null,
+
+      });
+
+    }
+
+  }
+);
+
 app.listen(
   PORT,
   () => {
