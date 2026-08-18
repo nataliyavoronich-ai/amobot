@@ -300,27 +300,24 @@ app.get(
       }
 
       res.status(500).send(`
-        <html>
-          <head>
-            <meta charset="UTF-8">
-          </head>
-          <body style="font-family:Arial;padding:40px;">
-            <h2>Ошибка OAuth</h2>
-            <pre>${escapeHtml(
-              error.response
-                ? JSON.stringify(
-                    error.response.data,
-                    null,
-                    2
-                  )
-                : error.message
-            )}</pre>
-          </body>
-        </html>
-      `);
-    }
-  }
-);
+  <html>
+    <head>
+      <meta charset="UTF-8">
+    </head>
+    <body style="font-family:Arial;padding:40px;">
+      <h2>Ошибка OAuth</h2>
+      <pre>${String(
+        error.response
+          ? JSON.stringify(
+              error.response.data,
+              null,
+              2
+            )
+          : error.message
+      )}</pre>
+    </body>
+  </html>
+`);
 
 // ============================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
