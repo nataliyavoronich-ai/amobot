@@ -192,6 +192,21 @@ app.get(
   }
 );
 
+app.post("/", (req, res) => {
+  console.log("====================================");
+  console.log("AMOMESSENGER POST /");
+  console.log("HEADERS:");
+  console.log(req.headers);
+  console.log("BODY:");
+  console.log(JSON.stringify(req.body, null, 2));
+  console.log("====================================");
+
+  res.json({
+    status: "OK",
+    message: "POST / получен",
+    body: req.body
+  });
+});
 
 // ============================================================
 // НАСТРОЙКИ
