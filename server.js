@@ -7,6 +7,191 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+// ============================================================
+// OAUTH AMOMESSENGER
+// ============================================================
+
+app.get(
+  "/oauth/amomessenger/callback",
+  async (req, res) => {
+
+    console.log("==========================================");
+    console.log("AMOMESSENGER OAUTH CALLBACK");
+    console.log("QUERY:", req.query);
+    console.log("==========================================");
+
+    const code = req.query.code;
+
+    if (!code) {
+
+      return res.status(400).send(
+        "Ошибка: amoMessenger не передал параметр code."
+      );
+
+    }
+
+    const CLIENT_ID =
+      process.env.AMOMESSENGER_CLIENT_ID;
+
+    const CLIENT_SECRET =
+      process.env.AMOMESSENGER_CLIENT_SECRET;
+
+    const REDIRECT_URI =
+      process.env.AMOMESSENGER_REDIRECT_URI;
+
+    if (
+      !CLIENT_ID ||
+      !CLIENT_SECRET ||
+      !REDIRECT_URI
+    ) {
+
+      return res.status(500).send(
+        "Ошибка настройки Render. Не заданы AMOMESSENGER_CLIENT_ID, AMOMESSENGER_CLIENT_SECRET или AMOMESSENGER_REDIRECT_URI."
+      );
+
+    }
+
+    try {
+
+      console.log(
+        "Обмениваем code на токен amoMessenger..."
+      );
+
+      const response =
+        await fetch(
+          "https://id.amo.tm/oauth2/access_token",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                client_id:
+                  CLIENT_ID,
+
+                client_secret:
+                  CLIENT_SECRET,
+
+                grant_type:
+                  "authorization_code",
+
+                code:
+                  code,
+
+                redirect_uri:
+                  REDIRECT_URI,
+              }),
+          }
+        );
+
+      const data =
+        await response
+          .json()
+          .catch(
+            () => null
+          );
+
+      console.log(
+        "Ответ amoMessenger OAuth:",
+        data
+      );
+
+      if (!response.ok) {
+
+        return res
+          .status(500)
+          .send(
+            "amoMessenger отклонил авторизацию. Подробности смотрите в Logs на Render."
+          );
+
+      }
+
+      const tokensFile =
+        path.join(
+          __dirname,
+          "amomessenger_tokens.json"
+        );
+
+      fs.writeFileSync(
+        tokensFile,
+        JSON.stringify(
+          {
+            access_token:
+              data.access_token,
+
+            refresh_token:
+              data.refresh_token,
+
+            expires_in:
+              data.expires_in,
+
+            obtained_at:
+              new Date().toISOString(),
+          },
+          null,
+          2
+        )
+      );
+
+      console.log(
+        "=========================================="
+      );
+
+      console.log(
+        "AMOMESSENGER УСПЕШНО АВТОРИЗОВАН"
+      );
+
+      console.log(
+        "Токен сохранён:"
+      );
+
+      console.log(
+        tokensFile
+      );
+
+      console.log(
+        "=========================================="
+      );
+
+      return res.send(
+        `
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+          <meta charset="UTF-8">
+          <title>amoMessenger</title>
+        </head>
+        <body style="font-family: Arial; padding: 40px;">
+          <h2>Бот amoMessenger успешно подключён</h2>
+          <p>Авторизация завершена.</p>
+          <p>Эту страницу можно закрыть.</p>
+        </body>
+        </html>
+        `
+      );
+
+    } catch (error) {
+
+      console.error(
+        "Ошибка OAuth amoMessenger:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "Ошибка при авторизации amoMessenger. Подробности смотрите в Logs на Render."
+        );
+
+    }
+
+  }
+);
+
 
 // ============================================================
 // НАСТРОЙКИ
