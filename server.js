@@ -41,6 +41,13 @@ const AMOCRM_REDIRECT_URI =
 // эндпоинт после того, как заберёте токены.
 const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
 
+// Токен для API BPM-платформы Sensei (https://sensei.plus/api).
+// Нужен, чтобы правильно завершать задачи, которые поставил в сделку
+// процесс Sensei — если завершить такую задачу обычным способом через
+// amoCRM, процесс Sensei в сделке "зависнет" и не пойдёт дальше.
+// Переменная SENSEI_TOKEN уже задана в Environment Variables на Render.
+const SENSEI_TOKEN = process.env.SENSEI_TOKEN || "";
+
 // ============================================================
 // ПОСТОЯННЫЕ ЗНАЧЕНИЯ CRM
 // ============================================================
@@ -83,6 +90,25 @@ let amocrmAccessToken =
 
 let amocrmRefreshToken =
   process.env.AMOCRM_REFRESH_TOKEN || "";
+
+// ============================================================
+// ПАМЯТЬ О ВЫБРАННОМ ЗАМЕРЕ
+// ============================================================
+//
+// Когда пользователь нажимает на кнопку с номером договора, бот
+// присылает подробности замера и предлагает кнопки "Замер подтвержден",
+// "Перенос замера", "Отказ". Чтобы при нажатии на эти кнопки бот знал,
+// к какой именно задаче/сделке относится нажатие, мы временно
+// запоминаем выбранный замер для каждого пользователя.
+//
+// ВАЖНО: это хранилище живёт только в памяти процесса и очищается при
+// каждом перезапуске/деплое на Render — как и токены выше.
+
+const userSelectedMeasurement = {};
+
+// ID аккаунта amoCRM, нужен для заголовка X-Account при обращении
+// к API Sensei. Получаем один раз и кэшируем.
+let amocrmAccountId = null;
 
 // ============================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -281,6 +307,112 @@ async function amoCrmGet(url, params) {
 
     throw error;
   }
+}
+
+// ============================================================
+// ID АККАУНТА AMOCRM (нужен для запросов к Sensei)
+// ============================================================
+
+async function getAmoCrmAccountId() {
+  if (amocrmAccountId) {
+    return amocrmAccountId;
+  }
+
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/account`;
+
+  const response = await amoCrmGet(url, {});
+
+  if (
+    response.status === 200 &&
+    response.data &&
+    response.data.id
+  ) {
+    amocrmAccountId = response.data.id;
+  }
+
+  return amocrmAccountId;
+}
+
+// ============================================================
+// ЗАВЕРШЕНИЕ ЗАДАЧИ ЧЕРЕЗ API SENSEI
+// ============================================================
+//
+// Задачи замера в amoCRM ставит BPM-процесс Sensei. Чтобы процесс
+// корректно "узнал", что задача выполнена, и пошёл дальше по сценарию,
+// завершать задачу нужно ЧЕРЕЗ API SENSEI, а не напрямую через amoCRM.
+// Если завершить задачу напрямую в amoCRM — процесс Sensei в сделке
+// остановится (зависнет) и не продолжит работу.
+//
+// Документация: https://sensei.plus/api
+
+async function senseiCompleteTask(
+  leadId,
+  taskId,
+  resultCaption
+) {
+  if (!SENSEI_TOKEN) {
+    throw new Error(
+      "SENSEI_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  const accountId = await getAmoCrmAccountId();
+
+  const url =
+    "https://api.sensei.plus/v1/element/task/complete";
+
+  const body = {
+    entity_id: Number(leadId),
+    entity_type: 1,
+    result_caption: resultCaption,
+    task_id: Number(taskId)
+  };
+
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Auth-Sensei-Token": SENSEI_TOKEN
+  };
+
+  if (accountId) {
+    headers["X-Account"] = accountId;
+  }
+
+  log("Sensei: завершаем задачу", {
+    url,
+    body,
+    accountId: accountId || "не удалось получить"
+  });
+
+  const response = await axios.post(
+    url,
+    body,
+    {
+      headers,
+      timeout: 30000,
+      validateStatus: () => true
+    }
+  );
+
+  console.log(
+    "Sensei ответ:",
+    response.status,
+    JSON.stringify(response.data)
+  );
+
+  if (
+    response.status !== 200 ||
+    (response.data && response.data.status &&
+      response.data.status !== "success" &&
+      response.data.status !== 200)
+  ) {
+    throw new Error(
+      `Sensei вернул ошибку: HTTP ${response.status}, ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
 }
 
 // ============================================================
@@ -1950,6 +2082,137 @@ app.post(
         }
 
         // ------------------------------------------------------
+        // ЗАМЕР ПОДТВЕРЖДЕН
+        // (нажатие на кнопку после показа деталей замера)
+        // ------------------------------------------------------
+
+        if (
+          text.trim() ===
+          "Замер подтвержден"
+        ) {
+          console.log(
+            "=========================================="
+          );
+
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ЗАМЕР ПОДТВЕРЖДЕН"
+          );
+
+          console.log(
+            "=========================================="
+          );
+
+          const stored =
+            userSelectedMeasurement[receiverUserId];
+
+          if (!stored) {
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "Не нашёл, какой замер вы подтверждаете. " +
+                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+                "и выберите нужную задачу из списка."
+            );
+
+            await returnControl(
+              botId,
+              requestId
+            );
+
+            return;
+          }
+
+          try {
+            // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
+            // через amoCRM — иначе процесс Sensei в сделке остановится.
+            await senseiCompleteTask(
+              stored.lead_id,
+              stored.task_id,
+              "Замер подтвержден"
+            );
+
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "✅ Замер подтвержден. Задача завершена."
+            );
+
+            delete userSelectedMeasurement[
+              receiverUserId
+            ];
+          } catch (error) {
+            console.error(
+              "Ошибка завершения задачи через Sensei:",
+              error.message
+            );
+
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "❌ Не удалось завершить задачу в Sensei. " +
+                "Подробности есть в логах Render. Попробуйте ещё раз " +
+                "или обратитесь к администратору."
+            );
+          }
+
+          await returnControl(
+            botId,
+            requestId
+          );
+
+          return;
+        }
+
+        // ------------------------------------------------------
+        // ПЕРЕНОС ЗАМЕРА
+        // ------------------------------------------------------
+
+        if (
+          text.trim() ===
+          "Перенос замера"
+        ) {
+          await sendMessengerMessage(
+            botId,
+            requestId,
+            receiverUserId,
+            "Функция «Перенос замера» пока находится в разработке."
+          );
+
+          await returnControl(
+            botId,
+            requestId
+          );
+
+          return;
+        }
+
+        // ------------------------------------------------------
+        // ОТКАЗ
+        // ------------------------------------------------------
+
+        if (
+          text.trim() ===
+          "Отказ"
+        ) {
+          await sendMessengerMessage(
+            botId,
+            requestId,
+            receiverUserId,
+            "Функция «Отказ» пока находится в разработке."
+          );
+
+          await returnControl(
+            botId,
+            requestId
+          );
+
+          return;
+        }
+
+        // ------------------------------------------------------
         // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
         // (нажатие на одну из кнопок из списка замеров, п.5)
         // ------------------------------------------------------
@@ -1992,17 +2255,29 @@ app.post(
                 `№ договора: ${selected.contract_number || "—"}\n` +
                 `Ссылка на сделку: ${selected.lead_link}`;
 
+              // Запоминаем, какой именно замер (задача + сделка)
+              // выбрал этот пользователь — понадобится, когда он
+              // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
+              userSelectedMeasurement[receiverUserId] = {
+                task_id: selected.task_id,
+                lead_id: selected.lead_id,
+                contract_number: selected.contract_number
+              };
+
               await sendMessengerMessage(
                 botId,
                 requestId,
                 receiverUserId,
-                detailMessage
+                detailMessage,
+                [
+                  "Замер подтвержден",
+                  "Перенос замера",
+                  "Отказ"
+                ]
               );
 
-              await returnControl(
-                botId,
-                requestId
-              );
+              // Управление НЕ возвращаем — ждём, что пользователь
+              // нажмёт одну из кнопок выше.
 
               return;
             }
