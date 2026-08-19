@@ -552,208 +552,37 @@ async function senseiCompleteTask(
 // 3) текущую рабочую логику поиска задач.
 // ============================================================
 
+// ============================================================
+// RPA-БОТ ДЛЯ ЗАПУСКА ИЗ ДИРЕКТ-БОТА
+// ============================================================
+//
+// ВАЖНО:
+// "Бот инженеров" — это директ-бот.
+// Он получает входящее сообщение через AMOMESSENGER WEBHOOK.
+//
+// RPA-бот, который нужно запускать после сообщения,
+// называется "Отчетов инженеров".
+//
+// Его ID:
+// d414fbc0-9649-11f1-873d-0123456789ab
+//
+// Больше НЕ пытаемся искать его через GET /v1.3/bots.
+// ============================================================
+
 async function getRpaBotId() {
-  if (amomessengerRpaBotId) {
-    return amomessengerRpaBotId;
-  }
-
-  if (!amomessengerAccessToken) {
-    throw new Error(
-      "Токен amoMessenger не найден"
-    );
-  }
-
-  const url =
-    "https://api.amo.tm/v1.3/bots";
+  const rpaBotId =
+    "d414fbc0-9649-11f1-873d-0123456789ab";
 
   console.log("");
-  console.log(
-    "Ищем бот-заявку по названию:",
-    AMOMESSENGER_RPA_BOT_TITLE
-  );
+  console.log("==========================================");
+  console.log("RPA-БОТ ДЛЯ ЗАПУСКА");
+  console.log("==========================================");
+  console.log("Название: Отчетов инженеров");
+  console.log("ID:", rpaBotId);
+  console.log("==========================================");
 
-  const response = await axios.get(
-    url,
-    {
-      params: {
-        query: AMOMESSENGER_RPA_BOT_TITLE,
-        limit: 100
-      },
-      headers: {
-        Authorization:
-          `Bearer ${amomessengerAccessToken}`,
-        Accept: "application/hal+json"
-      },
-      timeout: 30000,
-      validateStatus: () => true
-    }
-  );
-
-  console.log(
-    "Получение списка ботов:",
-    response.status
-  );
-
-  if (response.status >= 400) {
-    throw new Error(
-      `amoMessenger GET /bots HTTP ${response.status}: ` +
-      `${JSON.stringify(response.data)}`
-    );
-  }
-
-  const items =
-    response.data?._embedded?.items || [];
-
-  console.log(
-    "Найдено ботов:",
-    JSON.stringify(items, null, 2)
-  );
-
-  const exact = items.find(
-    (item) =>
-      String(item.title || "").trim().toLowerCase() ===
-      AMOMESSENGER_RPA_BOT_TITLE.trim().toLowerCase()
-  );
-
-  if (!exact) {
-    throw new Error(
-      `Бот "${AMOMESSENGER_RPA_BOT_TITLE}" не найден через API amo Messenger. ` +
-      `Проверьте название бота и наличие scope rpa-bots:read.`
-    );
-  }
-
-  amomessengerRpaBotId = exact.id;
-
-  console.log(
-    "ID найденного бота-заявки:",
-    amomessengerRpaBotId
-  );
-
-  return amomessengerRpaBotId;
+  return rpaBotId;
 }
-
-async function createRpaRequestFromDirectMessage(
-  userId
-) {
-  if (!userId) {
-    throw new Error(
-      "Не удалось определить user_id для создания заявки"
-    );
-  }
-
-  if (activeDirectRequests[userId]) {
-    console.log(
-      "Для пользователя уже есть активная заявка:",
-      activeDirectRequests[userId]
-    );
-
-    return {
-      alreadyExists: true,
-      requestId: activeDirectRequests[userId],
-      botId: amomessengerRpaBotId
-    };
-  }
-
-  if (directRequestCreationInProgress[userId]) {
-    console.log(
-      "Создание заявки уже выполняется для пользователя:",
-      userId
-    );
-
-    return {
-      alreadyInProgress: true
-    };
-  }
-
-  directRequestCreationInProgress[userId] = true;
-
-  try {
-    const botId =
-      await getRpaBotId();
-
-    const url =
-      `https://api.amo.tm/v1.3/bots/${botId}/run`;
-
-    const body = {
-      user_id: userId
-    };
-
-    log(
-      "СОЗДАЁМ ЗАЯВКУ ИЗ ДИРЕКТ-БОТА",
-      {
-        botId,
-        botTitle: AMOMESSENGER_RPA_BOT_TITLE,
-        userId,
-        url,
-        body
-      }
-    );
-
-    const response =
-      await axios.post(
-        url,
-        body,
-        {
-          headers: {
-            Authorization:
-              `Bearer ${amomessengerAccessToken}`,
-            "Content-Type":
-              "application/json"
-          },
-          timeout: 30000,
-          validateStatus: () => true
-        }
-      );
-
-    console.log(
-      "Создание заявки response:",
-      response.status,
-      JSON.stringify(response.data, null, 2)
-    );
-
-    if (response.status >= 400) {
-      throw new Error(
-        `amoMessenger create request HTTP ${response.status}: ` +
-        `${JSON.stringify(response.data)}`
-      );
-    }
-
-    const requestId =
-      response.data?.id;
-
-    if (!requestId) {
-      throw new Error(
-        "amoMessenger создал заявку, но в ответе нет request id"
-      );
-    }
-
-    activeDirectRequests[userId] =
-      requestId;
-
-    requestToDirectUser[requestId] =
-      userId;
-
-    console.log(
-      "Заявка успешно создана:",
-      {
-        botId,
-        requestId,
-        userId
-      }
-    );
-
-    return {
-      alreadyExists: false,
-      alreadyInProgress: false,
-      botId,
-      requestId,
-      request: response.data
-    };
-  } finally {
-    delete directRequestCreationInProgress[userId];
-  }
-}
-
 // ============================================================
 // AMOMESSENGER API
 // ============================================================
