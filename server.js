@@ -24,6 +24,18 @@ const AMOMESSENGER_REDIRECT_URI =
   process.env.AMOMESSENGER_REDIRECT_URI ||
   "https://amobot-cpck.onrender.com/oauth/amomessenger/callback";
 
+// Бот из раздела "Боты", через который пользователь запускает
+// рабочую заявку одним сообщением.
+//
+// Если ID не задан, сервер автоматически найдёт бота по названию
+// "Бот инженеров" через API amo Messenger.
+const AMOMESSENGER_RPA_BOT_ID =
+  process.env.AMOMESSENGER_RPA_BOT_ID || "";
+
+const AMOMESSENGER_RPA_BOT_TITLE =
+  process.env.AMOMESSENGER_RPA_BOT_TITLE ||
+  "Бот инженеров";
+
 // amoCRM OAuth
 const AMOCRM_CLIENT_ID =
   process.env.AMOCRM_CLIENT_ID || "";
@@ -71,12 +83,12 @@ const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 // ============================================================
 // ХРАНИЛИЩЕ ТОКЕНОВ
 // ============================================================
-
+//
 // ВАЖНО:
 // На бесплатном Render локальный файл может исчезнуть после перезапуска,
 // а память процесса очищается при каждом рестарте/деплое.
 // Поэтому для постоянной работы токены нужно сохранять в Environment
-// Variables (или во внешнее хранилище — БД/Redis), иначе после каждого
+// Variables (или во внешнем хранилище — БД/Redis), иначе после каждого
 // рестарта потребуется заново проходить авторизацию.
 
 let amomessengerAccessToken =
@@ -84,6 +96,18 @@ let amomessengerAccessToken =
 
 let amomessengerRefreshToken =
   process.env.AMOMESSENGER_REFRESH_TOKEN || "";
+
+// ID бота-заявки, который будет запускаться из директ-бота.
+// Если AMOMESSENGER_RPA_BOT_ID не задан, ID определяется автоматически
+// по названию AMOMESSENGER_RPA_BOT_TITLE.
+let amomessengerRpaBotId =
+  AMOMESSENGER_RPA_BOT_ID || "";
+
+// Защита от повторного создания нескольких заявок подряд одним
+// и тем же пользователем во время одного запуска.
+const activeDirectRequests = {};
+const directRequestCreationInProgress = {};
+const requestToDirectUser = {};
 
 let amocrmAccessToken =
   process.env.AMOCRM_ACCESS_TOKEN || "";
@@ -506,6 +530,227 @@ async function senseiCompleteTask(
   }
 
   return response.data;
+}
+
+// ============================================================
+// ЗАПУСК ЗАЯВКИ ИЗ ДИРЕКТ-БОТА
+// ============================================================
+//
+// Пользователь сначала пишет нашему боту в разделе "Боты".
+// При событии income_message мы программно создаём заявку
+// нужного бота через POST /v1.3/bots/{BOT_ID}/run.
+//
+// После создания заявки amo Messenger уже работает как обычная
+// заявка бота: её цепочка доходит до нашего виджета, приходит
+// rpa_bot_control_transferred, и дальше используются настоящие
+// inline-кнопки через sendMessage.
+//
+// Это позволяет сохранить:
+// 1) запуск через отдельного бота в списке;
+// 2) кнопки;
+// 3) текущую рабочую логику поиска задач.
+// ============================================================
+
+async function getRpaBotId() {
+  if (amomessengerRpaBotId) {
+    return amomessengerRpaBotId;
+  }
+
+  if (!amomessengerAccessToken) {
+    throw new Error(
+      "Токен amoMessenger не найден"
+    );
+  }
+
+  const url =
+    "https://api.amo.tm/v1.3/bots";
+
+  console.log("");
+  console.log(
+    "Ищем бот-заявку по названию:",
+    AMOMESSENGER_RPA_BOT_TITLE
+  );
+
+  const response = await axios.get(
+    url,
+    {
+      params: {
+        query: AMOMESSENGER_RPA_BOT_TITLE,
+        limit: 100
+      },
+      headers: {
+        Authorization:
+          `Bearer ${amomessengerAccessToken}`,
+        Accept: "application/hal+json"
+      },
+      timeout: 30000,
+      validateStatus: () => true
+    }
+  );
+
+  console.log(
+    "Получение списка ботов:",
+    response.status
+  );
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoMessenger GET /bots HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  const items =
+    response.data?._embedded?.items || [];
+
+  console.log(
+    "Найдено ботов:",
+    JSON.stringify(items, null, 2)
+  );
+
+  const exact = items.find(
+    (item) =>
+      String(item.title || "").trim().toLowerCase() ===
+      AMOMESSENGER_RPA_BOT_TITLE.trim().toLowerCase()
+  );
+
+  if (!exact) {
+    throw new Error(
+      `Бот "${AMOMESSENGER_RPA_BOT_TITLE}" не найден через API amo Messenger. ` +
+      `Проверьте название бота и наличие scope rpa-bots:read.`
+    );
+  }
+
+  amomessengerRpaBotId = exact.id;
+
+  console.log(
+    "ID найденного бота-заявки:",
+    amomessengerRpaBotId
+  );
+
+  return amomessengerRpaBotId;
+}
+
+async function createRpaRequestFromDirectMessage(
+  userId
+) {
+  if (!userId) {
+    throw new Error(
+      "Не удалось определить user_id для создания заявки"
+    );
+  }
+
+  if (activeDirectRequests[userId]) {
+    console.log(
+      "Для пользователя уже есть активная заявка:",
+      activeDirectRequests[userId]
+    );
+
+    return {
+      alreadyExists: true,
+      requestId: activeDirectRequests[userId],
+      botId: amomessengerRpaBotId
+    };
+  }
+
+  if (directRequestCreationInProgress[userId]) {
+    console.log(
+      "Создание заявки уже выполняется для пользователя:",
+      userId
+    );
+
+    return {
+      alreadyInProgress: true
+    };
+  }
+
+  directRequestCreationInProgress[userId] = true;
+
+  try {
+    const botId =
+      await getRpaBotId();
+
+    const url =
+      `https://api.amo.tm/v1.3/bots/${botId}/run`;
+
+    const body = {
+      user_id: userId
+    };
+
+    log(
+      "СОЗДАЁМ ЗАЯВКУ ИЗ ДИРЕКТ-БОТА",
+      {
+        botId,
+        botTitle: AMOMESSENGER_RPA_BOT_TITLE,
+        userId,
+        url,
+        body
+      }
+    );
+
+    const response =
+      await axios.post(
+        url,
+        body,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${amomessengerAccessToken}`,
+            "Content-Type":
+              "application/json"
+          },
+          timeout: 30000,
+          validateStatus: () => true
+        }
+      );
+
+    console.log(
+      "Создание заявки response:",
+      response.status,
+      JSON.stringify(response.data, null, 2)
+    );
+
+    if (response.status >= 400) {
+      throw new Error(
+        `amoMessenger create request HTTP ${response.status}: ` +
+        `${JSON.stringify(response.data)}`
+      );
+    }
+
+    const requestId =
+      response.data?.id;
+
+    if (!requestId) {
+      throw new Error(
+        "amoMessenger создал заявку, но в ответе нет request id"
+      );
+    }
+
+    activeDirectRequests[userId] =
+      requestId;
+
+    requestToDirectUser[requestId] =
+      userId;
+
+    console.log(
+      "Заявка успешно создана:",
+      {
+        botId,
+        requestId,
+        userId
+      }
+    );
+
+    return {
+      alreadyExists: false,
+      alreadyInProgress: false,
+      botId,
+      requestId,
+      request: response.data
+    };
+  } finally {
+    delete directRequestCreationInProgress[userId];
+  }
 }
 
 // ============================================================
@@ -1307,6 +1552,10 @@ app.get("/status", (req, res) => {
       amomessengerAccessToken
         ? "ДА"
         : "НЕТ",
+    amomessenger_rpa_bot_title:
+      AMOMESSENGER_RPA_BOT_TITLE,
+    amomessenger_rpa_bot_id:
+      amomessengerRpaBotId || null,
     amocrm_token:
       amocrmAccessToken
         ? "ДА"
@@ -1815,6 +2064,49 @@ app.get(
 );
 
 // ============================================================
+// DEBUG: AMOMESSENGER BOTS
+// ============================================================
+//
+// Вспомогательный endpoint. Показывает, какой бот-заявка
+// найден по названию "Бот инженеров".
+//
+// Можно открыть:
+// https://amobot-cpck.onrender.com/debug/amomessenger-bot
+// ============================================================
+
+app.get(
+  "/debug/amomessenger-bot",
+  async (req, res) => {
+    try {
+      const botId =
+        await getRpaBotId();
+
+      res.json({
+        status: "OK",
+        bot_title:
+          AMOMESSENGER_RPA_BOT_TITLE,
+        bot_id:
+          botId
+      });
+    } catch (error) {
+      console.error(
+        "DEBUG AMOMESSENGER BOT ERROR:",
+        error.response
+          ? error.response.data
+          : error.stack || error.message
+      );
+
+      res.status(500).json({
+        status: "Ошибка",
+        message:
+          error.response?.data ||
+          error.message
+      });
+    }
+  }
+);
+
+// ============================================================
 // ПОИСК ЗАМЕРОВ + ОТПРАВКА СПИСКА ПОЛЬЗОВАТЕЛЮ
 // ============================================================
 //
@@ -1939,6 +2231,207 @@ app.post(
     try {
       const eventType =
         body.event_type;
+
+      // --------------------------------------------------------
+      // ЗАЯВКА ОБНОВЛЕНА
+      // --------------------------------------------------------
+      //
+      // Если созданная из директ-бота заявка архивирована,
+      // снимаем её из временной памяти, чтобы следующий запуск
+      // снова мог создать новую заявку.
+      // --------------------------------------------------------
+
+      if (
+        eventType ===
+        "rpa_request_updated"
+      ) {
+        const data =
+          body._embedded
+            ?.rpa_request_updated;
+
+        const request =
+          data?._embedded
+            ?.request;
+
+        const requestId =
+          data?.request_id ||
+          request?.id;
+
+        const changes =
+          data?.changes || [];
+
+        const archived =
+          changes.some(
+            (change) =>
+              change?.archive_status?.is_archived === true
+          );
+
+        log(
+          "ОБНОВЛЕНИЕ ЗАЯВКИ",
+          {
+            requestId,
+            botId: request?.bot_id,
+            archived,
+            changes
+          }
+        );
+
+        if (archived && requestId) {
+          const userId =
+            requestToDirectUser[requestId];
+
+          if (userId) {
+            delete activeDirectRequests[userId];
+            delete requestToDirectUser[requestId];
+
+            console.log(
+              "Активная заявка удалена из памяти:",
+              {
+                userId,
+                requestId
+              }
+            );
+          }
+        }
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // DIRECT BOT -> СОЗДАЁМ ЗАЯВКУ
+      // --------------------------------------------------------
+      //
+      // Пользователь пишет "старт" или ЛЮБОЕ другое сообщение
+      // нашему боту в разделе "Боты".
+      //
+      // Это событие отличается от сообщения внутри заявки:
+      // event_type = "income_message"
+      //
+      // Мы не пытаемся рисовать кнопки прямо в директ-чате.
+      // Вместо этого создаём настоящую заявку через API amo.
+      // После этого amo запускает обычную цепочку заявки,
+      // а когда управление передаётся нашему виджету,
+      // приходит rpa_bot_control_transferred.
+      //
+      // Именно там остаются наши существующие кнопки.
+      // --------------------------------------------------------
+
+      if (
+        eventType ===
+        "income_message"
+      ) {
+        const context =
+          body._embedded
+            ?.context;
+
+        const conversationIdentity =
+          body._embedded
+            ?.conversation_identity;
+
+        const message =
+          body._embedded
+            ?.message;
+
+        const text =
+          message?.text ||
+          "";
+
+        const userId =
+          message?.author?.user_id ||
+          context?.user_id;
+
+        const directId =
+          conversationIdentity?.direct_id;
+
+        log(
+          "ПОЛУЧЕНО СООБЩЕНИЕ ОТ ДИРЕКТ-БОТА",
+          {
+            text,
+            userId,
+            directId,
+            messageId: message?.id
+          }
+        );
+
+        if (!userId) {
+          console.error(
+            "DIRECT BOT: не удалось определить user_id."
+          );
+
+          return;
+        }
+
+        try {
+          const result =
+            await createRpaRequestFromDirectMessage(
+              userId
+            );
+
+          if (
+            result.alreadyExists ||
+            result.alreadyInProgress
+          ) {
+            console.log(
+              "Новая заявка не создавалась:",
+              result
+            );
+
+            return;
+          }
+
+          console.log(
+            "DIRECT BOT: заявка создана.",
+            result.requestId
+          );
+
+          // Ничего больше здесь не отправляем.
+          // Следующий шаг выполняет сам бот-заявка:
+          // его цепочка дойдёт до виджета,
+          // после чего придёт rpa_bot_control_transferred.
+        } catch (error) {
+          console.error(
+            "Ошибка запуска заявки из директ-бота:",
+            error.response
+              ? JSON.stringify(error.response.data)
+              : error.stack || error.message
+          );
+
+          // В случае ошибки пытаемся сообщить пользователю
+          // обычным сообщением в директ.
+          try {
+            const errorText =
+              "❌ Не удалось запустить бота-заявку. " +
+              "Попробуйте ещё раз или обратитесь к администратору.";
+
+            const directUrl =
+              `https://api.amo.tm/v1.3/direct/${userId}/sendMessage`;
+
+            await axios.post(
+              directUrl,
+              {
+                text: errorText
+              },
+              {
+                headers: {
+                  Authorization:
+                    `Bearer ${amomessengerAccessToken}`,
+                  "Content-Type":
+                    "application/json"
+                },
+                timeout: 30000,
+                validateStatus: () => true
+              }
+            );
+          } catch (sendError) {
+            console.error(
+              "Не удалось отправить сообщение об ошибке в директ:",
+              sendError.message
+            );
+          }
+        }
+
+        return;
+      }
 
       // --------------------------------------------------------
       // CONTROL TRANSFERRED
@@ -2659,6 +3152,18 @@ app.listen(
       amomessengerAccessToken
         ? "ДА"
         : "НЕТ"
+    );
+
+    console.log(
+      "amoMessenger RPA bot title:",
+      AMOMESSENGER_RPA_BOT_TITLE
+    );
+
+    console.log(
+      "amoMessenger RPA bot ID:",
+      amomessengerRpaBotId
+        ? amomessengerRpaBotId
+        : "будет найден автоматически"
     );
 
     console.log(
