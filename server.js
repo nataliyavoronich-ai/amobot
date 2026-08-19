@@ -1778,6 +1778,8 @@ app.post(
             "=========================================="
           );
 
+          let shouldReturnControl = true;
+
           try {
             // Сообщение пользователю
             await sendMessengerMessage(
@@ -1844,6 +1846,11 @@ app.post(
                 message,
                 buttons
               );
+
+              // Список с кнопками показан — НЕ отдаём управление,
+              // так как ждём, что пользователь нажмёт одну из кнопок
+              // (обработка в блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
+              shouldReturnControl = false;
             }
           } catch (error) {
             console.error(
@@ -1867,13 +1874,16 @@ app.post(
           }
 
           // ------------------------------------------------
-          // Возвращаем управление amoMessenger
+          // Возвращаем управление amoMessenger только если НЕ
+          // ждём, что пользователь выберет замер кнопкой
           // ------------------------------------------------
 
-          await returnControl(
-            botId,
-            requestId
-          );
+          if (shouldReturnControl) {
+            await returnControl(
+              botId,
+              requestId
+            );
+          }
 
           return;
         }
