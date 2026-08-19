@@ -51,6 +51,13 @@ const ENGINEER_ENUM_ID = 1059150;
 
 const MEASUREMENT_TASK_TYPE_ID = 2746005;
 
+// Поля сделки, которые нужно выводить в сообщениях бота
+const CONTRACT_NUMBER_FIELD_ID = 412776; // № договора (текст)
+const MEASURE_DATE_FIELD_ID = 175370; // Дата замера (дата)
+const MEASURE_TIME_FIELD_ID = 413828; // Время замера (список)
+const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстовая область)
+const PRODUCT_FIELD_ID = 172572; // Продукт (список)
+
 // Часовой пояс Москвы
 const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 
@@ -443,6 +450,140 @@ async function getLead(leadId) {
   }
 
   return response.data;
+}
+
+// ============================================================
+// ПОЛУЧЕНИЕ КОНТАКТА
+// ============================================================
+
+async function getContact(contactId) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/contacts/${contactId}`;
+
+  const response = await amoCrmGet(url, {});
+
+  if (response.status !== 200) {
+    console.log(
+      `Не удалось получить контакт ${contactId}:`,
+      response.status
+    );
+
+    return null;
+  }
+
+  return response.data;
+}
+
+function getMainContactId(lead) {
+  if (
+    !lead ||
+    !lead._embedded ||
+    !Array.isArray(lead._embedded.contacts) ||
+    lead._embedded.contacts.length === 0
+  ) {
+    return null;
+  }
+
+  const main = lead._embedded.contacts.find(
+    (c) => c.is_main
+  );
+
+  return (main || lead._embedded.contacts[0]).id;
+}
+
+function getContactPhones(contact) {
+  if (
+    !contact ||
+    !Array.isArray(contact.custom_fields_values)
+  ) {
+    return [];
+  }
+
+  const phoneField = contact.custom_fields_values.find(
+    (f) => f.field_code === "PHONE"
+  );
+
+  if (
+    !phoneField ||
+    !Array.isArray(phoneField.values)
+  ) {
+    return [];
+  }
+
+  return phoneField.values
+    .map((v) => v.value)
+    .filter(Boolean);
+}
+
+// ============================================================
+// УНИВЕРСАЛЬНОЕ ЧТЕНИЕ ЗНАЧЕНИЙ ПОЛЕЙ СДЕЛКИ ПО ID
+// ============================================================
+
+function getFieldValues(entity, fieldId) {
+  if (
+    !entity ||
+    !Array.isArray(entity.custom_fields_values)
+  ) {
+    return [];
+  }
+
+  const field = entity.custom_fields_values.find(
+    (item) =>
+      Number(item.field_id) === Number(fieldId)
+  );
+
+  if (
+    !field ||
+    !Array.isArray(field.values)
+  ) {
+    return [];
+  }
+
+  return field.values
+    .map((v) => v.value)
+    .filter(
+      (v) => v !== null && v !== undefined && v !== ""
+    );
+}
+
+function getFieldValueJoined(entity, fieldId, separator = ", ") {
+  return getFieldValues(entity, fieldId).join(separator);
+}
+
+// Для полей типа "дата" amoCRM хранит значение как Unix-время (сек).
+// Выводим только дату (без времени) по московскому часовому поясу.
+function formatDateFieldValue(entity, fieldId) {
+  const values = getFieldValues(entity, fieldId);
+
+  if (values.length === 0) {
+    return "";
+  }
+
+  return values
+    .map((raw) => {
+      const unix = Number(raw);
+
+      if (!unix || Number.isNaN(unix)) {
+        return String(raw);
+      }
+
+      const moscow = new Date(
+        unix * 1000 + MOSCOW_OFFSET_MS
+      );
+
+      const day = String(
+        moscow.getUTCDate()
+      ).padStart(2, "0");
+
+      const month = String(
+        moscow.getUTCMonth() + 1
+      ).padStart(2, "0");
+
+      const year = moscow.getUTCFullYear();
+
+      return `${day}.${month}.${year}`;
+    })
+    .join(", ");
 }
 
 // ============================================================
@@ -857,6 +998,24 @@ async function findMeasurementTasks() {
       continue;
     }
 
+    // --------------------------------------------------------
+    // Подтягиваем контакт (имя + телефоны)
+    // --------------------------------------------------------
+
+    let contactName = "";
+    let contactPhones = [];
+
+    const mainContactId = getMainContactId(lead);
+
+    if (mainContactId) {
+      const contact = await getContact(mainContactId);
+
+      if (contact) {
+        contactName = contact.name || "";
+        contactPhones = getContactPhones(contact);
+      }
+    }
+
     measurements.push({
       task_id: Number(task.id),
       lead_id: Number(task.entity_id),
@@ -876,7 +1035,19 @@ async function findMeasurementTasks() {
       engineer:
         ENGINEER_NAME,
       lead_link:
-        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
+      contract_number:
+        getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID),
+      measure_date:
+        formatDateFieldValue(lead, MEASURE_DATE_FIELD_ID),
+      measure_time:
+        getFieldValueJoined(lead, MEASURE_TIME_FIELD_ID),
+      address:
+        getFieldValueJoined(lead, ADDRESS_FIELD_ID),
+      product:
+        getFieldValueJoined(lead, PRODUCT_FIELD_ID),
+      contact_name: contactName,
+      contact_phones: contactPhones.join(", ")
     });
   }
 
@@ -1648,24 +1819,30 @@ app.post(
                 (item, index) => {
                   message +=
                     `${index + 1}. ` +
-                    `${item.lead_name}\n`;
-
-                  message +=
-                    `📝 Задача: ${item.task_id}\n`;
-
-                  message +=
-                    `📅 Срок: ${item.complete_till_moscow}\n`;
-
-                  message +=
-                    `${item.lead_link}\n\n`;
+                    `№ договора: ${item.contract_number || "—"}; ` +
+                    `Дата замера: ${item.measure_date || "—"}; ` +
+                    `Время замера: ${item.measure_time || "—"}; ` +
+                    `Адрес замера: ${item.address || "—"}; ` +
+                    `Продукт: ${item.product || "—"}; ` +
+                    `Имя контакта: ${item.contact_name || "—"}; ` +
+                    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
+                    `Ссылка на сделку: ${item.lead_link}\n`;
                 }
               );
+
+              const buttons =
+                result.measurements.map(
+                  (item) =>
+                    item.contract_number ||
+                    `Задача ${item.task_id}`
+                );
 
               await sendMessengerMessage(
                 botId,
                 requestId,
                 receiverUserId,
-                message
+                message,
+                buttons
               );
             }
           } catch (error) {
@@ -1760,6 +1937,71 @@ app.post(
           );
 
           return;
+        }
+
+        // ------------------------------------------------------
+        // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
+        // (нажатие на одну из кнопок из списка замеров, п.5)
+        // ------------------------------------------------------
+
+        const selectedContract = text.trim();
+
+        if (selectedContract) {
+          try {
+            const result =
+              await findMeasurementTasks();
+
+            const selected =
+              result.measurements.find(
+                (item) =>
+                  String(item.contract_number).trim() ===
+                  selectedContract
+              );
+
+            if (selected) {
+              console.log(
+                "=========================================="
+              );
+
+              console.log(
+                "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
+                selectedContract
+              );
+
+              console.log(
+                "=========================================="
+              );
+
+              const detailMessage =
+                `Дата замера: ${selected.measure_date || "—"}\n` +
+                `Время замера: ${selected.measure_time || "—"}\n` +
+                `Адрес замера: ${selected.address || "—"}\n` +
+                `Продукт: ${selected.product || "—"}\n` +
+                `Имя контакта: ${selected.contact_name || "—"}\n` +
+                `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
+                `№ договора: ${selected.contract_number || "—"}\n` +
+                `Ссылка на сделку: ${selected.lead_link}`;
+
+              await sendMessengerMessage(
+                botId,
+                requestId,
+                receiverUserId,
+                detailMessage
+              );
+
+              await returnControl(
+                botId,
+                requestId
+              );
+
+              return;
+            }
+          } catch (error) {
+            console.error(
+              "Ошибка при выборе замера:",
+              error.message
+            );
+          }
         }
 
         console.log(
