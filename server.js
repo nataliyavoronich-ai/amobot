@@ -35,6 +35,12 @@ const AMOCRM_REDIRECT_URI =
   process.env.AMOCRM_REDIRECT_URI ||
   "https://amobot-cpck.onrender.com/amocrm/callback";
 
+// Секрет для временного debug-эндпоинта, который отдаёт токены.
+// ОБЯЗАТЕЛЬНО задайте DEBUG_SECRET в Environment Variables на Render
+// перед использованием /debug/tokens, и удалите/отключите этот
+// эндпоинт после того, как заберёте токены.
+const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
+
 // ============================================================
 // ПОСТОЯННЫЕ ЗНАЧЕНИЯ CRM
 // ============================================================
@@ -53,10 +59,11 @@ const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 // ============================================================
 
 // ВАЖНО:
-// На бесплатном Render локальный файл может исчезнуть после перезапуска.
-// Поэтому для постоянной работы лучше добавить токены в Environment Variables.
-//
-// Но для текущего запуска сохраняем токены в памяти.
+// На бесплатном Render локальный файл может исчезнуть после перезапуска,
+// а память процесса очищается при каждом рестарте/деплое.
+// Поэтому для постоянной работы токены нужно сохранять в Environment
+// Variables (или во внешнее хранилище — БД/Redis), иначе после каждого
+// рестарта потребуется заново проходить авторизацию.
 
 let amomessengerAccessToken =
   process.env.AMOMESSENGER_ACCESS_TOKEN || "";
@@ -94,6 +101,9 @@ function getMoscowDate() {
   const now = new Date();
 
   // Получаем UTC-время и добавляем +3 часа.
+  // ВАЖНО: у получившегося объекта Date поля getUTCFullYear/getUTCMonth/
+  // getUTCDate/getUTCHours и т.д. фактически представляют московское
+  // время (хотя формально это UTC-геттеры). Это используется ниже.
   return new Date(now.getTime() + MOSCOW_OFFSET_MS);
 }
 
@@ -121,21 +131,27 @@ function unixToMoscow(unix) {
   return formatMoscow(new Date(Number(unix) * 1000));
 }
 
+// ИСПРАВЛЕНО:
+// Раньше функция брала "московские" год/месяц/день из getMoscowDate()
+// и снова оборачивала их в Date.UTC(...), из-за чего получалась
+// полночь UTC, а не полночь по Москве — диапазон дат сдвигался на
+// 3 часа вперёд и мог "срезать" пограничные задачи.
 function todayMoscowStartUnix() {
   const now = getMoscowDate();
 
-  const start = new Date(
-    Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate(),
-      0,
-      0,
-      0
-    )
+  const startUtcMs = Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    0,
+    0,
+    0
   );
 
-  return Math.floor(start.getTime() / 1000);
+  // startUtcMs — это полночь календарного дня в "смещённых" полях,
+  // поэтому нужно вычесть обратно московское смещение, чтобы получить
+  // настоящий Unix-момент полуночи по Москве.
+  return Math.floor((startUtcMs - MOSCOW_OFFSET_MS) / 1000);
 }
 
 function yesterdayMoscowStartUnix() {
@@ -481,12 +497,19 @@ function getEngineerFieldValue(lead) {
 // ПРОВЕРКА ИНЖЕНЕРА
 // ============================================================
 
+// ИСПРАВЛЕНО: сравнение по имени теперь без учёта регистра и лишних
+// пробелов (раньше расхождение в регистре или пробелах в конце строки
+// приводило к тому, что подходящая сделка не находилась).
 function leadBelongsToEngineer(lead) {
   const values = getEngineerFieldValue(lead);
 
   if (!values) {
     return false;
   }
+
+  const normalizedEngineerName = ENGINEER_NAME
+    .trim()
+    .toLowerCase();
 
   return values.some((item) => {
     if (
@@ -497,12 +520,14 @@ function leadBelongsToEngineer(lead) {
       return true;
     }
 
-    if (
-      item.value &&
-      String(item.value).trim() ===
-        ENGINEER_NAME
-    ) {
-      return true;
+    if (item.value) {
+      const normalizedValue = String(item.value)
+        .trim()
+        .toLowerCase();
+
+      if (normalizedValue === normalizedEngineerName) {
+        return true;
+      }
     }
 
     return false;
@@ -885,6 +910,36 @@ app.get("/status", (req, res) => {
       ENGINEER_ENUM_ID,
     task_type_id:
       MEASUREMENT_TASK_TYPE_ID
+  });
+});
+
+// ============================================================
+// DEBUG: TOKENS (ВРЕМЕННЫЙ ЭНДПОИНТ)
+//
+// Отдаёт текущие значения токенов, чтобы можно было скопировать их
+// в Environment Variables на Render. Защищён секретом DEBUG_SECRET.
+//
+// ВАЖНО: после того как заберёте токены — удалите этот роут из кода
+// или хотя бы очистите переменную DEBUG_SECRET на Render, чтобы никто
+// посторонний не смог получить доступ к вашим токенам.
+// ============================================================
+
+app.get("/debug/tokens", (req, res) => {
+  if (!DEBUG_SECRET) {
+    return res.status(500).send(
+      "DEBUG_SECRET не задан в Environment Variables. Задайте его, чтобы использовать этот эндпоинт."
+    );
+  }
+
+  if (req.query.secret !== DEBUG_SECRET) {
+    return res.status(403).send("Forbidden");
+  }
+
+  res.json({
+    amocrm_access_token: amocrmAccessToken || null,
+    amocrm_refresh_token: amocrmRefreshToken || null,
+    amomessenger_access_token: amomessengerAccessToken || null,
+    amomessenger_refresh_token: amomessengerRefreshToken || null
   });
 });
 
