@@ -29,6 +29,7 @@ const AMOMESSENGER_REDIRECT_URI =
 //
 // Если ID не задан, сервер автоматически найдёт бота по названию
 // "Бот инженеров" через API amo Messenger.
+
 const AMOMESSENGER_RPA_BOT_ID =
   process.env.AMOMESSENGER_RPA_BOT_ID || "";
 
@@ -1538,6 +1539,206 @@ async function findMeasurementTasks() {
     validTasks: dateTasks.length
   };
 }
+
+// ============================================================
+// DEBUG: ПОЛУЧИТЬ ВСЕ RPA-БОТЫ
+// ============================================================
+//
+// ВРЕМЕННЫЙ ЭНДПОИНТ.
+//
+// Нужен только для того, чтобы посмотреть, какие RPA-боты
+// доступны приложению через API amo Messenger.
+//
+// После получения ID этот блок можно удалить.
+//
+
+app.get(
+  "/debug/rpa-bots",
+  async (req, res) => {
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+    console.log(
+      "DEBUG: ПОЛУЧЕНИЕ ВСЕХ RPA-БОТОВ"
+    );
+    console.log(
+      "=========================================="
+    );
+
+    try {
+      if (!amomessengerAccessToken) {
+        return res.status(500).json({
+          status: "Ошибка",
+          message:
+            "AMOMESSENGER_ACCESS_TOKEN не найден."
+        });
+      }
+
+      const allBots = [];
+      let pageToken = null;
+      let pageNumber = 1;
+
+      while (true) {
+        const params = {
+          limit: 500
+        };
+
+        if (pageToken) {
+          params.page_token = pageToken;
+        }
+
+        console.log("");
+        console.log(
+          `Получаем страницу RPA-ботов: ${pageNumber}`
+        );
+
+        const response = await axios.get(
+          "https://api.amo.tm/v1.3/bots",
+          {
+            params,
+            headers: {
+              Authorization:
+                `Bearer ${amomessengerAccessToken}`,
+              Accept:
+                "application/hal+json"
+            },
+            timeout: 30000,
+            validateStatus: () => true
+          }
+        );
+
+        console.log(
+          "HTTP:",
+          response.status
+        );
+
+        if (response.status !== 200) {
+          console.error(
+            "Ошибка API RPA-ботов:"
+          );
+
+          console.error(
+            JSON.stringify(
+              response.data,
+              null,
+              2
+            )
+          );
+
+          return res.status(
+            response.status
+          ).json({
+            status: "Ошибка",
+            http_status:
+              response.status,
+            response:
+              response.data
+          });
+        }
+
+        const items =
+          response.data?._embedded?.items || [];
+
+        console.log(
+          `Получено ботов на странице ${pageNumber}: ${items.length}`
+        );
+
+        allBots.push(...items);
+
+        pageToken =
+          response.data?.page_token ||
+          null;
+
+        if (!pageToken) {
+          break;
+        }
+
+        pageNumber++;
+      }
+
+      console.log("");
+      console.log(
+        "=========================================="
+      );
+      console.log(
+        `ВСЕГО RPA-БОТОВ: ${allBots.length}`
+      );
+      console.log(
+        "=========================================="
+      );
+
+      if (allBots.length === 0) {
+        console.log(
+          "RPA-БОТОВ НЕ НАЙДЕНО."
+        );
+      }
+
+      allBots.forEach(
+        (bot, index) => {
+          console.log("");
+          console.log(
+            `RPA-БОТ №${index + 1}`
+          );
+          console.log(
+            "ID:",
+            bot.id
+          );
+          console.log(
+            "Название:",
+            bot.title
+          );
+
+          if (bot.links) {
+            console.log(
+              "Ссылки:",
+              JSON.stringify(
+                bot.links,
+                null,
+                2
+              )
+            );
+          }
+        }
+      );
+
+      console.log("");
+      console.log(
+        "=========================================="
+      );
+      console.log(
+        "КОНЕЦ СПИСКА RPA-БОТОВ"
+      );
+      console.log(
+        "=========================================="
+      );
+
+      return res.json({
+        status: "OK",
+        count: allBots.length,
+        bots: allBots.map(
+          (bot) => ({
+            id: bot.id,
+            title: bot.title
+          })
+        )
+      });
+
+    } catch (error) {
+      console.error(
+        "DEBUG RPA BOTS ERROR:",
+        error.stack ||
+          error.message
+      );
+
+      return res.status(500).json({
+        status: "Ошибка",
+        message:
+          error.message
+      });
+    }
+  }
+);
 
 // ============================================================
 // DEBUG: STATUS
