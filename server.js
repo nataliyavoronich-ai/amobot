@@ -106,6 +106,12 @@ let amocrmRefreshToken =
 
 const userSelectedMeasurement = {};
 
+// Когда пользователь нажимает "Перенос замера" или "Отказ", бот
+// просит написать комментарий и ждёт следующее сообщение. Здесь
+// запоминаем, какое именно действие и по какой задаче/сделке нужно
+// выполнить, когда комментарий придёт.
+const userPendingComment = {};
+
 // ID аккаунта amoCRM, нужен для заголовка X-Account при обращении
 // к API Sensei. Получаем один раз и кэшируем.
 let amocrmAccountId = null;
@@ -250,6 +256,93 @@ async function refreshAmoCrmToken() {
 
     throw error;
   }
+}
+
+// ============================================================
+// POST amoCRM
+// ============================================================
+
+async function amoCrmPost(url, body) {
+  if (!amocrmAccessToken) {
+    throw new Error(
+      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  try {
+    const response = await axios.post(url, body, {
+      headers: {
+        Authorization: `Bearer ${amocrmAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/hal+json"
+      },
+      timeout: 60000,
+      validateStatus: () => true
+    });
+
+    if (response.status === 401) {
+      console.log(
+        "amoCRM вернул 401. Пробуем обновить токен..."
+      );
+
+      try {
+        await refreshAmoCrmToken();
+
+        const retry = await axios.post(url, body, {
+          headers: {
+            Authorization: `Bearer ${amocrmAccessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/hal+json"
+          },
+          timeout: 60000,
+          validateStatus: () => true
+        });
+
+        return retry;
+      } catch (refreshError) {
+        return response;
+      }
+    }
+
+    return response;
+  } catch (error) {
+    console.error("amoCRM POST ERROR:", error.message);
+
+    throw error;
+  }
+}
+
+// ============================================================
+// ДОБАВЛЕНИЕ КОММЕНТАРИЯ (ПРИМЕЧАНИЯ) К СДЕЛКЕ
+// ============================================================
+//
+// Добавляет текстовый комментарий пользователя в ленту событий
+// сделки в amoCRM (обычное примечание). Используется после того,
+// как пользователь указывает причину переноса замера/отказа.
+
+async function addLeadNote(leadId, text) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}/notes`;
+
+  const body = [
+    {
+      note_type: "common",
+      params: {
+        text
+      }
+    }
+  ];
+
+  const response = await amoCrmPost(url, body);
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoCRM notes HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
 }
 
 // ============================================================
@@ -1722,6 +1815,95 @@ app.get(
 );
 
 // ============================================================
+// ПОИСК ЗАМЕРОВ + ОТПРАВКА СПИСКА ПОЛЬЗОВАТЕЛЮ
+// ============================================================
+//
+// Общая логика, которая раньше была только внутри обработки кнопки
+// "Подтвердить замер". Вынесена в отдельную функцию, чтобы её же можно
+// было вызвать повторно после того, как пользователь закроет задачу
+// через "Перенос замера" или "Отказ" — бот должен снова поискать
+// оставшиеся задачи и показать список.
+//
+// Возвращает true, если управление нужно вернуть amoMessenger сразу
+// (замеров не найдено или произошла ошибка), и false, если бот ждёт,
+// что пользователь нажмёт на кнопку с номером договора.
+
+async function searchAndPresentMeasurements(
+  botId,
+  requestId,
+  receiverUserId
+) {
+  let shouldReturnControl = true;
+
+  try {
+    const result = await findMeasurementTasks();
+
+    if (result.measurements.length === 0) {
+      await sendMessengerMessage(
+        botId,
+        requestId,
+        receiverUserId,
+        "📋 Замеров для подтверждения не найдено."
+      );
+    } else {
+      let message = "📋 Найдены замеры:\n\n";
+
+      result.measurements.forEach((item, index) => {
+        message +=
+          `${index + 1}. ` +
+          `№ договора: ${item.contract_number || "—"}; ` +
+          `Дата замера: ${item.measure_date || "—"}; ` +
+          `Время замера: ${item.measure_time || "—"}; ` +
+          `Адрес замера: ${item.address || "—"}; ` +
+          `Продукт: ${item.product || "—"}; ` +
+          `Имя контакта: ${item.contact_name || "—"}; ` +
+          `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
+          `Ссылка на сделку: ${item.lead_link}\n`;
+      });
+
+      const buttons = result.measurements.map(
+        (item) =>
+          item.contract_number || `Задача ${item.task_id}`
+      );
+
+      await sendMessengerMessage(
+        botId,
+        requestId,
+        receiverUserId,
+        message,
+        buttons
+      );
+
+      // Список с кнопками показан — НЕ отдаём управление, так как
+      // ждём, что пользователь нажмёт одну из кнопок (обработка в
+      // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
+      shouldReturnControl = false;
+    }
+  } catch (error) {
+    console.error(
+      "Ошибка поиска замеров:",
+      error.message
+    );
+
+    try {
+      await sendMessengerMessage(
+        botId,
+        requestId,
+        receiverUserId,
+        "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
+      );
+    } catch (sendError) {
+      console.error(
+        "Ошибка отправки ошибки:",
+        sendError.message
+      );
+    }
+  }
+
+  return shouldReturnControl;
+}
+
+// ============================================================
 // AMOMESSENGER WEBHOOK
 // ============================================================
 
@@ -1891,6 +2073,112 @@ app.post(
         );
 
         // ------------------------------------------------------
+        // ОЖИДАЕМ КОММЕНТАРИЙ (после "Перенос замера" / "Отказ")
+        // ------------------------------------------------------
+        //
+        // Если для этого пользователя мы ждём комментарий — значит,
+        // текущее сообщение это НЕ команда/кнопка, а сам комментарий.
+        // Обрабатываем его в первую очередь, до любых других проверок.
+
+        const pendingComment =
+          userPendingComment[receiverUserId];
+
+        if (pendingComment) {
+          const comment = text.trim();
+
+          console.log(
+            "=========================================="
+          );
+
+          console.log(
+            "ПОЛУЧЕН КОММЕНТАРИЙ:",
+            pendingComment.displayResult,
+            comment
+          );
+
+          console.log(
+            "=========================================="
+          );
+
+          if (!comment) {
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "Комментарий не может быть пустым. Укажите комментарий"
+            );
+
+            return;
+          }
+
+          try {
+            // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
+            // через amoCRM — иначе процесс Sensei в сделке остановится.
+            await senseiCompleteTask(
+              pendingComment.lead_id,
+              pendingComment.task_id,
+              pendingComment.resultCaption
+            );
+
+            try {
+              await addLeadNote(
+                pendingComment.lead_id,
+                comment
+              );
+            } catch (noteError) {
+              console.error(
+                "Не удалось добавить комментарий к сделке:",
+                noteError.message
+              );
+            }
+
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              `Текущая задача amoCRM закрыта с результатом ` +
+                `"${pendingComment.displayResult}".`
+            );
+          } catch (error) {
+            console.error(
+              "Ошибка завершения задачи через Sensei:",
+              error.message
+            );
+
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "❌ Не удалось завершить задачу в Sensei. " +
+                "Подробности есть в логах Render. Попробуйте ещё раз " +
+                "или обратитесь к администратору."
+            );
+          }
+
+          delete userPendingComment[receiverUserId];
+          delete userSelectedMeasurement[receiverUserId];
+
+          // Возвращаемся к шагу поиска других задач замера и
+          // показываем список (или сообщение, что задач больше нет).
+
+          const shouldReturnControl =
+            await searchAndPresentMeasurements(
+              botId,
+              requestId,
+              receiverUserId
+            );
+
+          if (shouldReturnControl) {
+            await returnControl(
+              botId,
+              requestId
+            );
+          }
+
+          return;
+        }
+
+        // ------------------------------------------------------
         // ПОДТВЕРДИТЬ ЗАМЕР
         // ------------------------------------------------------
 
@@ -1910,105 +2198,19 @@ app.post(
             "=========================================="
           );
 
-          let shouldReturnControl = true;
+          await sendMessengerMessage(
+            botId,
+            requestId,
+            receiverUserId,
+            "⏳ Проверяю задачи на подтверждение замера..."
+          );
 
-          try {
-            // Сообщение пользователю
-            await sendMessengerMessage(
+          const shouldReturnControl =
+            await searchAndPresentMeasurements(
               botId,
               requestId,
-              receiverUserId,
-              "⏳ Проверяю задачи на подтверждение замера..."
+              receiverUserId
             );
-
-            // Поиск
-            const result =
-              await findMeasurementTasks();
-
-            // ------------------------------------------------
-            // Если ничего не нашли
-            // ------------------------------------------------
-
-            if (
-              result.measurements.length ===
-              0
-            ) {
-              await sendMessengerMessage(
-                botId,
-                requestId,
-                receiverUserId,
-                "📋 Замеров для подтверждения не найдено."
-              );
-            }
-
-            // ------------------------------------------------
-            // Если нашли
-            // ------------------------------------------------
-
-            else {
-              let message =
-                "📋 Найдены замеры:\n\n";
-
-              result.measurements.forEach(
-                (item, index) => {
-                  message +=
-                    `${index + 1}. ` +
-                    `№ договора: ${item.contract_number || "—"}; ` +
-                    `Дата замера: ${item.measure_date || "—"}; ` +
-                    `Время замера: ${item.measure_time || "—"}; ` +
-                    `Адрес замера: ${item.address || "—"}; ` +
-                    `Продукт: ${item.product || "—"}; ` +
-                    `Имя контакта: ${item.contact_name || "—"}; ` +
-                    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
-                    `Ссылка на сделку: ${item.lead_link}\n`;
-                }
-              );
-
-              const buttons =
-                result.measurements.map(
-                  (item) =>
-                    item.contract_number ||
-                    `Задача ${item.task_id}`
-                );
-
-              await sendMessengerMessage(
-                botId,
-                requestId,
-                receiverUserId,
-                message,
-                buttons
-              );
-
-              // Список с кнопками показан — НЕ отдаём управление,
-              // так как ждём, что пользователь нажмёт одну из кнопок
-              // (обработка в блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
-              shouldReturnControl = false;
-            }
-          } catch (error) {
-            console.error(
-              "Ошибка поиска замеров:",
-              error.message
-            );
-
-            try {
-              await sendMessengerMessage(
-                botId,
-                requestId,
-                receiverUserId,
-                "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
-              );
-            } catch (sendError) {
-              console.error(
-                "Ошибка отправки ошибки:",
-                sendError.message
-              );
-            }
-          }
-
-          // ------------------------------------------------
-          // Возвращаем управление amoMessenger только если НЕ
-          // ждём, что пользователь выберет замер кнопкой
-          // ------------------------------------------------
 
           if (shouldReturnControl) {
             await returnControl(
@@ -2174,17 +2376,43 @@ app.post(
           text.trim() ===
           "Перенос замера"
         ) {
+          const stored =
+            userSelectedMeasurement[receiverUserId];
+
+          if (!stored) {
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "Не нашёл, какой замер вы переносите. " +
+                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+                "и выберите нужную задачу из списка."
+            );
+
+            await returnControl(
+              botId,
+              requestId
+            );
+
+            return;
+          }
+
+          userPendingComment[receiverUserId] = {
+            task_id: stored.task_id,
+            lead_id: stored.lead_id,
+            resultCaption: "Перенос замера",
+            displayResult: "Перенос замера"
+          };
+
           await sendMessengerMessage(
             botId,
             requestId,
             receiverUserId,
-            "Функция «Перенос замера» пока находится в разработке."
+            "Укажите комментарий"
           );
 
-          await returnControl(
-            botId,
-            requestId
-          );
+          // Управление НЕ возвращаем — ждём текст комментария
+          // следующим сообщением.
 
           return;
         }
@@ -2197,17 +2425,43 @@ app.post(
           text.trim() ===
           "Отказ"
         ) {
+          const stored =
+            userSelectedMeasurement[receiverUserId];
+
+          if (!stored) {
+            await sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              "Не нашёл, от какого замера вы отказываетесь. " +
+                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+                "и выберите нужную задачу из списка."
+            );
+
+            await returnControl(
+              botId,
+              requestId
+            );
+
+            return;
+          }
+
+          userPendingComment[receiverUserId] = {
+            task_id: stored.task_id,
+            lead_id: stored.lead_id,
+            resultCaption: "Отказался от замера",
+            displayResult: "Отказался от замера"
+          };
+
           await sendMessengerMessage(
             botId,
             requestId,
             receiverUserId,
-            "Функция «Отказ» пока находится в разработке."
+            "Укажите комментарий"
           );
 
-          await returnControl(
-            botId,
-            requestId
-          );
+          // Управление НЕ возвращаем — ждём текст комментария
+          // следующим сообщением.
 
           return;
         }
