@@ -3097,7 +3097,7 @@ async function processUserMessage({
       await senseiCompleteTask(
         stored.lead_id,
         stored.result_task_id,
-        "Заключен договор"
+        "Да, заключен договор"
       );
     } catch (error) {
       console.error(
