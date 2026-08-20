@@ -2372,3 +2372,1843 @@ async function waitForResultTask(
 
   return null;
 }
+
+// ============================================================
+// ОБРАБОТКА ТЕКСТА/КНОПКИ ОТ ПОЛЬЗОВАТЕЛЯ
+// ============================================================
+
+async function processUserMessage({
+  text,
+  userKey,
+  send,
+  finish,
+  showMenuOnUnknown,
+  imageUrls
+}) {
+  const trimmedText =
+    (text || "").trim();
+
+  console.log(
+    "Обработка сообщения пользователя:",
+    userKey,
+    trimmedText
+  );
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ КОММЕНТАРИЙ
+  // ------------------------------------------------------
+
+  const pendingComment =
+    userPendingComment[userKey];
+
+  if (pendingComment) {
+    const comment =
+      trimmedText;
+
+    if (!comment) {
+      await send(
+        "Комментарий не может быть пустым. Укажите комментарий"
+      );
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        pendingComment.lead_id,
+        pendingComment.task_id,
+        pendingComment.resultCaption
+      );
+
+      try {
+        await addLeadNote(
+          pendingComment.lead_id,
+          comment
+        );
+      } catch (noteError) {
+        console.error(
+          "Не удалось добавить комментарий к сделке:",
+          noteError.message
+        );
+      }
+
+      await send(
+        `Текущая задача amoCRM закрыта с результатом ` +
+          `"${pendingComment.displayResult}".`
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи через Sensei:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+        "Подробности есть в логах Render. Попробуйте ещё раз " +
+        "или обратитесь к администратору."
+      );
+    }
+
+    delete userPendingComment[userKey];
+    delete userSelectedMeasurement[userKey];
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(
+        send
+      );
+
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ ФОТО ДОГОВОРА
+  // ------------------------------------------------------
+
+  const pendingPhoto =
+    userPendingPhotoUpload[userKey];
+
+  if (pendingPhoto) {
+    // Пользователь закончил загрузку файлов
+    if (
+      trimmedText === "Готово"
+    ) {
+      await send(
+        "✅ Фото сохранены. Спасибо!"
+      );
+
+      delete userPendingPhotoUpload[
+        userKey
+      ];
+
+      await finish();
+
+      return;
+    }
+
+    // Получены изображения
+    if (
+      imageUrls &&
+      imageUrls.length > 0
+    ) {
+      let uploaded = 0;
+
+      for (
+        const url of imageUrls
+      ) {
+        try {
+          const fileName =
+            buildContractFileName(
+              pendingPhoto.contract_date_text,
+              pendingPhoto.next_file_number
+            );
+
+          await ydUploadFromUrl(
+            `${pendingPhoto.contract_path}/${fileName}`,
+            url
+          );
+
+          // После успешной загрузки увеличиваем номер.
+          // Если пользователь отправит ещё один файл,
+          // он получит следующий номер.
+          pendingPhoto.next_file_number++;
+
+          uploaded++;
+        } catch (error) {
+          console.error(
+            "Ошибка загрузки фото на Яндекс.Диск:",
+            error.message
+          );
+        }
+      }
+
+      if (
+        uploaded > 0
+      ) {
+        await send(
+          `Фото получено (${uploaded}). Когда закончите — нажмите «Готово».`,
+          ["Готово"]
+        );
+      } else {
+        await send(
+          "❌ Не удалось сохранить фото на Яндекс.Диске. " +
+          "Попробуйте ещё раз или нажмите «Готово», чтобы закончить.",
+          ["Готово"]
+        );
+      }
+
+      return;
+    }
+
+    // Если бот ждёт фото, а пользователь прислал обычный текст
+    await send(
+      "Загрузите фото договора и нажмите «Готово», когда закончите.",
+      ["Готово"]
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПОДТВЕРДИТЬ ЗАМЕР
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Подтвердить замер"
+  ) {
+    userLastSearchMode[
+      userKey
+    ] = "confirm";
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(
+        send
+      );
+
+    if (
+      shouldFinish
+    ) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПРОВЕСТИ ЗАМЕР
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Провести замер"
+  ) {
+    userLastSearchMode[
+      userKey
+    ] = "conduct";
+
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(
+        send
+      );
+
+    if (
+      shouldFinish
+    ) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАГРУЗИТЬ ФОТООТЧЕТ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Загрузить фотоотчет"
+  ) {
+    await send(
+      "Функция «Загрузить фотоотчет» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ВНЕСТИ ПРАВКИ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Внести правки"
+  ) {
+    await send(
+      "Функция «Внести правки» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАМЕР ПОДТВЕРЖДЕН
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Замер подтвержден"
+  ) {
+    const stored =
+      userSelectedMeasurement[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить выбранный замер. " +
+        "Пожалуйста, начните заново."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.task_id,
+        "Замер подтвержден"
+      );
+
+      await send(
+        "✅ Замер подтвержден."
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу. " +
+        "Подробности есть в логах Render."
+      );
+    }
+
+    delete userSelectedMeasurement[
+      userKey
+    ];
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(
+        send
+      );
+
+    if (
+      shouldFinish
+    ) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПЕРЕНОС ЗАМЕРА
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Перенос замера"
+  ) {
+    const stored =
+      userSelectedMeasurement[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить выбранный замер. " +
+        "Пожалуйста, начните заново."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingComment[
+      userKey
+    ] = {
+      lead_id:
+        stored.lead_id,
+
+      task_id:
+        stored.task_id,
+
+      resultCaption:
+        "Перенос замера",
+
+      displayResult:
+        "Перенос замера"
+    };
+
+    await send(
+      "Укажите причину переноса замера."
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОТКАЗ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Отказ"
+  ) {
+    const stored =
+      userSelectedMeasurement[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить выбранный замер. " +
+        "Пожалуйста, начните заново."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingComment[
+      userKey
+    ] = {
+      lead_id:
+        stored.lead_id,
+
+      task_id:
+        stored.task_id,
+
+      resultCaption:
+        "Отказ",
+
+      displayResult:
+        "Отказ"
+    };
+
+    await send(
+      "Укажите причину отказа."
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАМЕР СОСТОЯЛСЯ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Замер состоялся"
+  ) {
+    const stored =
+      userSelectedConductMeasurement[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить выбранный замер. " +
+        "Пожалуйста, начните заново."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.task_id,
+        "Замер состоялся"
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи «Провести замер»:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу. " +
+        "Подробности есть в логах Render."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    await send(
+      "⏳ Обрабатываю результат замера..."
+    );
+
+    const resultTask =
+      await waitForResultTask(
+        stored.lead_id
+      );
+
+    if (
+      !resultTask
+    ) {
+      await send(
+        "❌ Не удалось дождаться появления задачи «Рез-т замера(и)». " +
+        "Попробуйте ещё раз позже."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingResultTask[
+      userKey
+    ] = {
+      lead_id:
+        stored.lead_id,
+
+      result_task_id:
+        Number(
+          resultTask.id
+        )
+    };
+
+    delete userSelectedConductMeasurement[
+      userKey
+    ];
+
+    await send(
+      "Укажите результат замера",
+      [
+        "Заключен договор",
+        "Нужно подготовить КП и/или черновой проект",
+        "Думает (свяжусь сам)",
+        "Думает/отказ (передать менеджеру)"
+      ]
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАМЕР НЕ СОСТОЯЛСЯ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Замер не состоялся"
+  ) {
+    await send(
+      "Функция «Замер не состоялся» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАКЛЮЧЕН ДОГОВОР
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Заключен договор"
+  ) {
+    const stored =
+      userPendingResultTask[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не нашёл задачу «Рез-т замера(и)» для этой сделки. " +
+        "Пожалуйста, начните заново: нажмите «Провести замер»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Да, заключен договор"
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Заключен договор):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+        "Подробности есть в логах Render. Попробуйте ещё раз " +
+        "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    let folders;
+
+    try {
+      const lead =
+        await getLead(
+          stored.lead_id
+        );
+
+      if (!lead) {
+        throw new Error(
+          "Не удалось получить сделку"
+        );
+      }
+
+      folders =
+        await ensureLeadYandexFolders(
+          lead
+        );
+    } catch (error) {
+      console.error(
+        "Ошибка подготовки папок на Яндекс.Диске:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+        "Подробности есть в логах Render."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    // Определяем дату загрузки файла по Москве.
+    const contractUploadDate =
+      getMoscowDate();
+
+    const contractDateText =
+      `${String(
+        contractUploadDate.getUTCDate()
+      ).padStart(2, "0")}.` +
+      `${String(
+        contractUploadDate.getUTCMonth() + 1
+      ).padStart(2, "0")}.` +
+      `${contractUploadDate.getUTCFullYear()}`;
+
+    // Проверяем, какие файлы с такой датой уже есть в папке.
+    // Благодаря этому нумерация продолжается даже после
+    // перезапуска Render.
+    let nextContractFileNumber;
+
+    try {
+      nextContractFileNumber =
+        await ydGetNextContractFileNumber(
+          folders.contractPath,
+          contractDateText
+        );
+    } catch (error) {
+      console.error(
+        "Ошибка определения номера следующего файла договора:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось определить имя следующего файла договора. " +
+        "Подробности есть в логах Render."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    // Запоминаем состояние ожидания файлов.
+    userPendingPhotoUpload[
+      userKey
+    ] = {
+      lead_id:
+        stored.lead_id,
+
+      contract_path:
+        folders.contractPath,
+
+      contract_date_text:
+        contractDateText,
+
+      next_file_number:
+        nextContractFileNumber
+    };
+
+    delete userPendingResultTask[
+      userKey
+    ];
+
+    await send(
+      "Загрузите фото договора. " +
+      "Когда закончите загрузку — нажмите «Готово».",
+      ["Готово"]
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ДРУГИЕ РЕЗУЛЬТАТЫ ЗАМЕРА
+  // ------------------------------------------------------
+
+  if (
+    trimmedText ===
+    "Нужно подготовить КП и/или черновой проект"
+  ) {
+    const stored =
+      userPendingResultTask[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить задачу результата замера."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Нужно подготовить КП и/или черновой проект"
+      );
+
+      await send(
+        "✅ Результат замера сохранен."
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи результата замера:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось сохранить результат замера."
+      );
+    }
+
+    delete userPendingResultTask[
+      userKey
+    ];
+
+    await finish();
+
+    return;
+  }
+
+  if (
+    trimmedText ===
+    "Думает (свяжусь сам)"
+  ) {
+    const stored =
+      userPendingResultTask[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить задачу результата замера."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Думает (свяжусь сам)"
+      );
+
+      await send(
+        "✅ Результат замера сохранен."
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи результата замера:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось сохранить результат замера."
+      );
+    }
+
+    delete userPendingResultTask[
+      userKey
+    ];
+
+    await finish();
+
+    return;
+  }
+
+  if (
+    trimmedText ===
+    "Думает/отказ (передать менеджеру)"
+  ) {
+    const stored =
+      userPendingResultTask[
+        userKey
+      ];
+
+    if (!stored) {
+      await send(
+        "Не удалось определить задачу результата замера."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Думает/отказ (передать менеджеру)"
+      );
+
+      await send(
+        "✅ Результат замера сохранен."
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи результата замера:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось сохранить результат замера."
+      );
+    }
+
+    delete userPendingResultTask[
+      userKey
+    ];
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
+  // ------------------------------------------------------
+
+  if (trimmedText) {
+    const mode =
+      userLastSearchMode[userKey];
+
+    // ======================================================
+    // ВЫБОР ИЗ СПИСКА «ПРОВЕСТИ ЗАМЕР»
+    // ======================================================
+
+    if (
+      mode === "conduct"
+    ) {
+      try {
+        const result =
+          await findConductMeasurementTasks();
+
+        const selected =
+          result.measurements.find(
+            (item) =>
+              String(
+                item.contract_number
+              ).trim() ===
+              trimmedText
+          );
+
+        if (selected) {
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР (Провести замер):",
+            trimmedText
+          );
+
+          userSelectedConductMeasurement[
+            userKey
+          ] = {
+            task_id:
+              selected.task_id,
+
+            lead_id:
+              selected.lead_id,
+
+            contract_number:
+              selected.contract_number
+          };
+
+          const detailMessage =
+            `Дата замера: ${
+              selected.measure_date || "—"
+            }\n` +
+
+            `Время замера: ${
+              selected.measure_time || "—"
+            }\n` +
+
+            `Адрес замера: ${
+              selected.address || "—"
+            }\n` +
+
+            `Продукт: ${
+              selected.product || "—"
+            }\n` +
+
+            `Имя клиента: ${
+              selected.client_name || "—"
+            }\n` +
+
+            `№ телефона: ${
+              selected.client_phones &&
+              selected.client_phones.length > 0
+                ? selected.client_phones.join(", ")
+                : "—"
+            }\n` +
+
+            `№ договора: ${
+              selected.contract_number || "—"
+            }`;
+
+          await send(
+            detailMessage,
+            [
+              "Замер состоялся",
+              "Замер не состоялся"
+            ]
+          );
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка при выборе замера (Провести замер):",
+          error.message
+        );
+      }
+    }
+
+    // ======================================================
+    // ВЫБОР ИЗ СПИСКА «ПОДТВЕРДИТЬ ЗАМЕР»
+    // ======================================================
+
+    else {
+      try {
+        const result =
+          await findMeasurementTasks();
+
+        const selected =
+          result.measurements.find(
+            (item) =>
+              String(
+                item.contract_number
+              ).trim() ===
+              trimmedText
+          );
+
+        if (selected) {
+          console.log(
+            "=========================================="
+          );
+
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
+            trimmedText
+          );
+
+          console.log(
+            "=========================================="
+          );
+
+          userSelectedMeasurement[
+            userKey
+          ] = {
+            task_id:
+              selected.task_id,
+
+            lead_id:
+              selected.lead_id,
+
+            contract_number:
+              selected.contract_number
+          };
+
+          const detailMessage =
+            `Дата замера: ${
+              selected.measure_date || "—"
+            }\n` +
+
+            `Время замера: ${
+              selected.measure_time || "—"
+            }\n` +
+
+            `Адрес замера: ${
+              selected.address || "—"
+            }\n` +
+
+            `Продукт: ${
+              selected.product || "—"
+            }\n` +
+
+            `Имя клиента: ${
+              selected.client_name || "—"
+            }\n` +
+
+            `№ телефона: ${
+              selected.client_phones &&
+              selected.client_phones.length > 0
+                ? selected.client_phones.join(", ")
+                : "—"
+            }\n` +
+
+            `№ договора: ${
+              selected.contract_number || "—"
+            }`;
+
+          await send(
+            detailMessage,
+            [
+              "Замер подтвержден",
+              "Перенос замера",
+              "Отказ"
+            ]
+          );
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка при выборе замера:",
+          error.message
+        );
+      }
+    }
+  }
+
+  // ------------------------------------------------------
+  // НЕИЗВЕСТНАЯ КОМАНДА
+  // ------------------------------------------------------
+
+  if (
+    showMenuOnUnknown
+  ) {
+    await send(
+      MAIN_MENU_TEXT,
+      MAIN_MENU_BUTTONS
+    );
+  } else {
+    await send(
+      "Не удалось распознать команду. " +
+      "Выберите действие."
+    );
+  }
+}
+
+// ============================================================
+// ИЗВЛЕЧЕНИЕ ССЫЛОК НА ИЗОБРАЖЕНИЯ ИЗ СООБЩЕНИЯ
+// ============================================================
+
+function extractImageUrlsFromMessage(
+  incomeMessage
+) {
+  const urls = [];
+
+  if (!incomeMessage) {
+    return urls;
+  }
+
+  function searchObject(
+    object
+  ) {
+    if (
+      !object ||
+      typeof object !== "object"
+    ) {
+      return;
+    }
+
+    if (
+      Array.isArray(object)
+    ) {
+      for (
+        const item of object
+      ) {
+        searchObject(item);
+      }
+
+      return;
+    }
+
+    for (
+      const [
+        key,
+        value
+      ] of Object.entries(
+        object
+      )
+    ) {
+      const lowerKey =
+        String(key).toLowerCase();
+
+      if (
+        typeof value ===
+          "string" &&
+        /^https?:\/\//i.test(
+          value
+        )
+      ) {
+        if (
+          lowerKey.includes(
+            "url"
+          ) ||
+          lowerKey.includes(
+            "link"
+          ) ||
+          lowerKey.includes(
+            "file"
+          ) ||
+          lowerKey.includes(
+            "image"
+          ) ||
+          lowerKey.includes(
+            "media"
+          )
+        ) {
+          urls.push(
+            value
+          );
+        }
+      }
+
+      if (
+        value &&
+        typeof value ===
+          "object"
+      ) {
+        searchObject(
+          value
+        );
+      }
+    }
+  }
+
+  searchObject(
+    incomeMessage
+  );
+
+  return [
+    ...new Set(
+      urls
+    )
+  ];
+}
+
+// ============================================================
+// AMOMESSENGER OAUTH — НАЧАЛО АВТОРИЗАЦИИ
+// ============================================================
+
+app.get(
+  "/oauth/amomessenger",
+  (req, res) => {
+    const url =
+      "https://id.amo.tm/oauth2/authorize?" +
+      `client_id=${encodeURIComponent(
+        AMOMESSENGER_CLIENT_ID
+      )}` +
+      `&redirect_uri=${encodeURIComponent(
+        AMOMESSENGER_REDIRECT_URI
+      )}` +
+      "&response_type=code";
+
+    console.log(
+      "amoMessenger authorization URL:",
+      url
+    );
+
+    res.redirect(
+      url
+    );
+  }
+);
+
+// ============================================================
+// AMOMESSENGER OAUTH CALLBACK
+// ============================================================
+
+app.get(
+  "/oauth/amomessenger/callback",
+  async (req, res) => {
+    const code =
+      req.query.code;
+
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "AMOMESSENGER OAUTH CALLBACK"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    if (!code) {
+      return res.status(
+        400
+      ).send(
+        "Код авторизации amoMessenger не получен."
+      );
+    }
+
+    try {
+      const response =
+        await axios.post(
+          "https://id.amo.tm/oauth2/access_token",
+          {
+            client_id:
+              AMOMESSENGER_CLIENT_ID,
+
+            client_secret:
+              AMOMESSENGER_CLIENT_SECRET,
+
+            grant_type:
+              "authorization_code",
+
+            code,
+
+            redirect_uri:
+              AMOMESSENGER_REDIRECT_URI
+          },
+          {
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+
+            timeout:
+              30000
+          }
+        );
+
+      amomessengerAccessToken =
+        response.data.access_token;
+
+      amomessengerRefreshToken =
+        response.data.refresh_token;
+
+      console.log(
+        "amoMessenger токены успешно получены."
+      );
+
+      res.send(
+        `
+        <!DOCTYPE html>
+        <html lang="ru">
+          <head>
+            <meta charset="UTF-8">
+            <title>amoMessenger OAuth</title>
+          </head>
+          <body style="font-family:Arial;padding:40px;">
+            <h2>
+              Авторизация amoMessenger успешно выполнена
+            </h2>
+
+            <p>
+              Теперь можно закрыть это окно.
+            </p>
+          </body>
+        </html>
+        `
+      );
+    } catch (error) {
+      console.error(
+        "AMOMESSENGER OAuth ERROR:",
+        error.response
+          ? error.response.data
+          : error.message
+      );
+
+      res.status(
+        500
+      ).json({
+        status:
+          "Ошибка",
+
+        message:
+          error.response?.data ||
+          error.message
+      });
+    }
+  }
+);
+
+// ============================================================
+// AMOCRM OAUTH — НАЧАЛО АВТОРИЗАЦИИ
+// ============================================================
+
+app.get(
+  "/amocrm/auth",
+  (req, res) => {
+    const url =
+      `https://www.amocrm.ru/oauth?` +
+      `client_id=${encodeURIComponent(
+        AMOCRM_CLIENT_ID
+      )}` +
+      `&redirect_uri=${encodeURIComponent(
+        AMOCRM_REDIRECT_URI
+      )}` +
+      `&response_type=code` +
+      `&mode=post_message`;
+
+    console.log(
+      "amoCRM authorization URL:",
+      url
+    );
+
+    res.redirect(
+      url
+    );
+  }
+);
+
+// ============================================================
+// AMOCRM CALLBACK
+// ============================================================
+
+app.get(
+  "/amocrm/callback",
+  async (req, res) => {
+    const code =
+      req.query.code;
+
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "AMOCRM OAUTH CALLBACK"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    if (!code) {
+      return res.status(
+        400
+      ).send(
+        "Код авторизации amoCRM не получен."
+      );
+    }
+
+    try {
+      const response =
+        await axios.post(
+          `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/oauth2/access_token`,
+          {
+            client_id:
+              AMOCRM_CLIENT_ID,
+
+            client_secret:
+              AMOCRM_CLIENT_SECRET,
+
+            grant_type:
+              "authorization_code",
+
+            code,
+
+            redirect_uri:
+              AMOCRM_REDIRECT_URI
+          },
+          {
+            headers: {
+              "Content-Type":
+                "application/json"
+            },
+
+            timeout:
+              30000
+          }
+        );
+
+      amocrmAccessToken =
+        response.data.access_token;
+
+      amocrmRefreshToken =
+        response.data.refresh_token;
+
+      console.log(
+        "amoCRM токены успешно получены."
+      );
+
+      res.send(
+        `
+        <!DOCTYPE html>
+        <html lang="ru">
+          <head>
+            <meta charset="UTF-8">
+            <title>amoCRM OAuth</title>
+          </head>
+          <body style="font-family:Arial;padding:40px;">
+            <h2>
+              Авторизация amoCRM успешно выполнена
+            </h2>
+
+            <p>
+              Теперь можно закрыть это окно.
+            </p>
+          </body>
+        </html>
+        `
+      );
+    } catch (error) {
+      console.error(
+        "AMOCRM OAuth ERROR:",
+        error.response
+          ? error.response.data
+          : error.message
+      );
+
+      res.status(
+        500
+      ).json({
+        status:
+          "Ошибка",
+
+        message:
+          error.response?.data ||
+          error.message
+      });
+    }
+  }
+);
+
+// ============================================================
+// СТАТУС AMOCRM
+// ============================================================
+
+app.get(
+  "/amocrm/status",
+  (req, res) => {
+    res.json({
+      status:
+        "OK",
+
+      amocrm_access_token:
+        amocrmAccessToken
+          ? "ДА"
+          : "НЕТ",
+
+      amocrm_refresh_token:
+        amocrmRefreshToken
+          ? "ДА"
+          : "НЕТ",
+
+      subdomain:
+        AMOCRM_SUBDOMAIN,
+
+      engineer:
+        ENGINEER_NAME,
+
+      engineer_field_id:
+        ENGINEER_FIELD_ID,
+
+      engineer_enum_id:
+        ENGINEER_ENUM_ID
+    });
+  }
+);
+
+// ============================================================
+// WEBHOOK AMOMESSENGER
+// ============================================================
+
+app.post(
+  "/",
+  async (req, res) => {
+    // Сразу отвечаем 200.
+    // Дальнейшая обработка выполняется асинхронно.
+    res.sendStatus(
+      200
+    );
+
+    const body =
+      req.body || {};
+
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "ПОЛУЧЕН WEBHOOK AMOMESSENGER"
+    );
+
+    console.log(
+      JSON.stringify(
+        body,
+        null,
+        2
+      )
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    try {
+      const eventType =
+        body.event_type;
+
+      // ------------------------------------------------------
+      // ПОЛУЧЕННОЕ СООБЩЕНИЕ ОТ ДИРЕКТ-БОТА
+      // ------------------------------------------------------
+
+      if (
+        eventType ===
+        "income_message"
+      ) {
+        const data =
+          body._embedded
+            ?.income_message;
+
+        const incomeMessage =
+          data?._embedded
+            ?.income_message;
+
+        const directId =
+          body._embedded
+            ?.conversation_identity
+            ?.direct_id;
+
+        const text =
+          incomeMessage?.text ||
+          "";
+
+        const userId =
+          incomeMessage?.author
+            ?.user_id ||
+          body._embedded
+            ?.context
+            ?.user_id;
+
+        if (
+          !directId ||
+          !userId
+        ) {
+          console.error(
+            "Не удалось определить direct_id или user_id."
+          );
+
+          return;
+        }
+
+        const imageUrls =
+          extractImageUrlsFromMessage(
+            incomeMessage
+          );
+
+        if (
+          imageUrls.length > 0
+        ) {
+          log(
+            "НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ (DIRECT)",
+            imageUrls
+          );
+        }
+
+        await processUserMessage({
+          text,
+
+          userKey:
+            userId,
+
+          send: (
+            msgText,
+            buttons
+          ) =>
+            sendDirectMessage(
+              directId,
+              msgText,
+              buttons
+            ),
+
+          finish:
+            async () => {},
+
+          showMenuOnUnknown:
+            true,
+
+          imageUrls
+        });
+
+        return;
+      }
+
+      // ------------------------------------------------------
+      // ПЕРЕДАЧА УПРАВЛЕНИЯ ВИДЖЕТУ
+      // ------------------------------------------------------
+
+      if (
+        eventType ===
+        "rpa_bot_control_transferred"
+      ) {
+        const data =
+          body._embedded
+            ?.rpa_bot_control_transferred;
+
+        const nested =
+          data?._embedded;
+
+        const context =
+          body._embedded
+            ?.context;
+
+        const request =
+          nested?.request;
+
+        const botId =
+          data?.bot_id;
+
+        const requestId =
+          request?.id;
+
+        const requestAuthorId =
+          request?.author_id;
+
+        const contextUserId =
+          context?.user_id;
+
+        const receiverUserId =
+          requestAuthorId ||
+          contextUserId;
+
+        log(
+          "ПЕРЕДАНО УПРАВЛЕНИЕ ВИДЖЕТУ",
+          {
+            botId,
+            requestId,
+            receiverUserId,
+            contextUserId,
+            requestAuthorId
+          }
+        );
+
+        if (
+          !botId ||
+          !requestId ||
+          !receiverUserId
+        ) {
+          console.error(
+            "Не удалось определить параметры запроса."
+          );
+
+          return;
+        }
+
+        await sendMessengerMessage(
+          botId,
+          requestId,
+          receiverUserId,
+          MAIN_MENU_TEXT,
+          MAIN_MENU_BUTTONS
+        );
+
+        return;
+      }
+
+      // ------------------------------------------------------
+      // СООБЩЕНИЕ В RPA-КАНАЛЕ
+      // ------------------------------------------------------
+
+      if (
+        eventType ===
+        "rpa_bot_income_message"
+      ) {
+        const data =
+          body._embedded
+            ?.rpa_bot_income_message;
+
+        const nested =
+          data?._embedded;
+
+        const context =
+          body._embedded
+            ?.context;
+
+        const incomeMessage =
+          nested?.income_message;
+
+        const request =
+          nested?.request;
+
+        const text =
+          incomeMessage?.text ||
+          "";
+
+        const botId =
+          data?.bot_id;
+
+        const requestId =
+          request?.id;
+
+        const receiverUserId =
+          incomeMessage?.author
+            ?.user_id ||
+          request?.author_id ||
+          context?.user_id;
+
+        console.log(
+          "Получено сообщение:",
+          text
+        );
+
+        console.log(
+          "requestId:",
+          requestId
+        );
+
+        console.log(
+          "receiverUserId:",
+          receiverUserId
+        );
+
+        if (
+          !botId ||
+          !requestId ||
+          !receiverUserId
+        ) {
+          console.error(
+            "Не удалось определить параметры запроса (RPA)."
+          );
+
+          return;
+        }
+
+        const imageUrls =
+          extractImageUrlsFromMessage(
+            incomeMessage
+          );
+
+        if (
+          imageUrls.length > 0
+        ) {
+          log(
+            "НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ (RPA)",
+            imageUrls
+          );
+        }
+
+        await processUserMessage({
+          text,
+
+          userKey:
+            receiverUserId,
+
+          send: (
+            msgText,
+            buttons
+          ) =>
+            sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              msgText,
+              buttons
+            ),
+
+          finish: () =>
+            returnControl(
+              botId,
+              requestId
+            ),
+
+          showMenuOnUnknown:
+            false,
+
+          imageUrls
+        });
+
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "WEBHOOK ERROR:",
+        error.stack ||
+          error.message
+      );
+    }
+  }
+);
+
+// ============================================================
+// GET /
+// ============================================================
+
+app.get(
+  "/",
+  (req, res) => {
+    res.json({
+      status:
+        "OK",
+
+      service:
+        "amoMessenger + amoCRM bot",
+
+      timezone:
+        "Europe/Moscow"
+    });
+  }
+);
+
+// ============================================================
+// 404
+// ============================================================
+
+app.use(
+  (req, res) => {
+    res.status(
+      404
+    ).json({
+      error:
+        "Not found"
+    });
+  }
+);
+
+// ============================================================
+// ЗАПУСК СЕРВЕРА
+// ============================================================
+
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      `Server is running on port ${PORT}`
+    );
+  }
+);
