@@ -145,8 +145,164 @@ let amocrmRefreshToken =
 // он одинаковый и для "прямого" канала (income_message), и для канала
 // через виджет (rpa_bot_*), так что состояние переносится независимо
 // от того, каким способом бот был запущен.
+// ============================================================
+// АКТИВНЫЕ КНОПКИ БОТА
+// ============================================================
 
+// Кнопки, которые активны для пользователя прямо сейчас.
+// Каждый раз, когда бот отправляет новое сообщение с кнопками,
+// этот список полностью заменяется новым.
+const userActiveButtons = {};
+
+// Все кнопки, которые бот уже показывал пользователю.
+//
+// Это нужно, чтобы отличить нажатие на старую кнопку от обычного
+// текстового сообщения пользователя.
+const userKnownButtons = {};
 const userSelectedMeasurement = {};
+
+// ============================================================
+// РЕГИСТРАЦИЯ ТЕКУЩИХ КНОПОК
+// ============================================================
+
+function setUserActiveButtons(
+  userKey,
+  buttons
+) {
+  // Если новое сообщение отправлено без кнопок,
+  // предыдущие кнопки больше не считаются активными.
+  if (
+    !Array.isArray(buttons) ||
+    buttons.length === 0
+  ) {
+    userActiveButtons[userKey] = [];
+
+    return;
+  }
+
+  const normalizedButtons =
+    buttons
+      .filter(
+        (button) =>
+          button !== null &&
+          button !== undefined
+      )
+      .map((button) =>
+        String(button).trim()
+      )
+      .filter(Boolean);
+
+  // Сохраняем только последний набор кнопок.
+  userActiveButtons[userKey] =
+    normalizedButtons;
+
+  // Одновременно запоминаем все кнопки, которые когда-либо
+  // показывались этому пользователю.
+  if (
+    !userKnownButtons[userKey]
+  ) {
+    userKnownButtons[userKey] =
+      new Set();
+  }
+
+  for (
+    const button of normalizedButtons
+  ) {
+    userKnownButtons[userKey].add(
+      button
+    );
+  }
+
+  console.log(
+    "АКТИВНЫЕ КНОПКИ ПОЛЬЗОВАТЕЛЯ:",
+    userKey,
+    normalizedButtons
+  );
+}
+
+
+// ============================================================
+// ПРОВЕРКА НАЖАТИЯ НА СТАРУЮ КНОПКУ
+// ============================================================
+
+function isInactiveOldButton(
+  userKey,
+  text
+) {
+  const normalizedText =
+    String(text || "").trim();
+
+  // ============================================================
+// ПРОВЕРКА НАЖАТИЯ НА СТАРУЮ КНОПКУ
+// ============================================================
+
+// Если пользователь нажал кнопку, которая была показана
+// в одном из предыдущих сообщений, но её нет в последнем
+// сообщении бота — ничего не выполняем.
+
+if (
+  isInactiveOldButton(
+    userKey,
+    trimmedText
+  )
+) {
+  console.log(
+    "НАЖАТА НЕАКТИВНАЯ СТАРАЯ КНОПКА — ИГНОРИРУЕМ:",
+    {
+      userKey,
+      text:
+        trimmedText,
+
+      activeButtons:
+        userActiveButtons[
+          userKey
+        ] || []
+    }
+  );
+
+  return;
+}
+
+  if (!normalizedText) {
+    return false;
+  }
+
+  const knownButtons =
+    userKnownButtons[userKey];
+
+  // Бот ещё не отправлял пользователю кнопки.
+  if (!knownButtons) {
+    return false;
+  }
+
+  // Если этот текст вообще никогда не был кнопкой,
+  // это обычное текстовое сообщение.
+  if (
+    !knownButtons.has(
+      normalizedText
+    )
+  ) {
+    return false;
+  }
+
+  const activeButtons =
+    userActiveButtons[userKey] ||
+    [];
+
+  // Если кнопка есть в последнем сообщении —
+  // она активна.
+  if (
+    activeButtons.includes(
+      normalizedText
+    )
+  ) {
+    return false;
+  }
+
+  // Эта кнопка была показана раньше,
+  // но сейчас уже не является активной.
+  return true;
+}
 
 // Когда пользователь нажимает "Перенос замера" или "Отказ", бот
 // просит написать комментарий и ждёт следующее сообщение. Здесь
@@ -3987,12 +4143,17 @@ app.post(
         }
 
         await sendMessengerMessage(
-          botId,
-          requestId,
-          receiverUserId,
-          MAIN_MENU_TEXT,
-          MAIN_MENU_BUTTONS
-        );
+  botId,
+  requestId,
+  receiverUserId,
+  MAIN_MENU_TEXT,
+  MAIN_MENU_BUTTONS
+);
+
+setUserActiveButtons(
+  receiverUserId,
+  MAIN_MENU_BUTTONS
+);
 
         return;
       }
@@ -4072,21 +4233,35 @@ app.post(
         }
 
         await processUserMessage({
-          text,
-          userKey: receiverUserId,
-          send: (msgText, buttons) =>
-            sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              msgText,
-              buttons
-            ),
-          finish: () =>
-            returnControl(botId, requestId),
-          showMenuOnUnknown: false,
-          imageUrls
-        });
+  text,
+
+  userKey,
+
+  send: async (
+    msgText,
+    buttons
+  ) => {
+    const response =
+      await sendDirectMessage(
+        directId,
+        msgText,
+        buttons
+      );
+
+    setUserActiveButtons(
+      userKey,
+      buttons
+    );
+
+    return response;
+  },
+
+  finish: async () => {},
+
+  showMenuOnUnknown: true,
+
+  imageUrls
+});
 
         return;
       }
