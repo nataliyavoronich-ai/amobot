@@ -24,19 +24,6 @@ const AMOMESSENGER_REDIRECT_URI =
   process.env.AMOMESSENGER_REDIRECT_URI ||
   "https://amobot-cpck.onrender.com/oauth/amomessenger/callback";
 
-// Бот из раздела "Боты", через который пользователь запускает
-// рабочую заявку одним сообщением.
-//
-// Если ID не задан, сервер автоматически найдёт бота по названию
-// "Бот инженеров" через API amo Messenger.
-
-const AMOMESSENGER_RPA_BOT_ID =
-  process.env.AMOMESSENGER_RPA_BOT_ID || "";
-
-const AMOMESSENGER_RPA_BOT_TITLE =
-  process.env.AMOMESSENGER_RPA_BOT_TITLE ||
-  "Бот инженеров";
-
 // amoCRM OAuth
 const AMOCRM_CLIENT_ID =
   process.env.AMOCRM_CLIENT_ID || "";
@@ -82,14 +69,27 @@ const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 
 // ============================================================
+// ГЛАВНОЕ МЕНЮ
+// ============================================================
+
+const MAIN_MENU_TEXT = "Выберите задачу для выполнения:";
+
+const MAIN_MENU_BUTTONS = [
+  "Подтвердить замер",
+  "Провести замер",
+  "Загрузить фотоотчет",
+  "Внести правки"
+];
+
+// ============================================================
 // ХРАНИЛИЩЕ ТОКЕНОВ
 // ============================================================
-//
+
 // ВАЖНО:
 // На бесплатном Render локальный файл может исчезнуть после перезапуска,
 // а память процесса очищается при каждом рестарте/деплое.
 // Поэтому для постоянной работы токены нужно сохранять в Environment
-// Variables (или во внешнем хранилище — БД/Redis), иначе после каждого
+// Variables (или во внешнее хранилище — БД/Redis), иначе после каждого
 // рестарта потребуется заново проходить авторизацию.
 
 let amomessengerAccessToken =
@@ -97,18 +97,6 @@ let amomessengerAccessToken =
 
 let amomessengerRefreshToken =
   process.env.AMOMESSENGER_REFRESH_TOKEN || "";
-
-// ID бота-заявки, который будет запускаться из директ-бота.
-// Если AMOMESSENGER_RPA_BOT_ID не задан, ID определяется автоматически
-// по названию AMOMESSENGER_RPA_BOT_TITLE.
-let amomessengerRpaBotId =
-  AMOMESSENGER_RPA_BOT_ID || "";
-
-// Защита от повторного создания нескольких заявок подряд одним
-// и тем же пользователем во время одного запуска.
-const activeDirectRequests = {};
-const directRequestCreationInProgress = {};
-const requestToDirectUser = {};
 
 let amocrmAccessToken =
   process.env.AMOCRM_ACCESS_TOKEN || "";
@@ -128,6 +116,11 @@ let amocrmRefreshToken =
 //
 // ВАЖНО: это хранилище живёт только в памяти процесса и очищается при
 // каждом перезапуске/деплое на Render — как и токены выше.
+//
+// Ключом служит идентификатор пользователя (context.user_id / author.user_id) —
+// он одинаковый и для "прямого" канала (income_message), и для канала
+// через виджет (rpa_bot_*), так что состояние переносится независимо
+// от того, каким способом бот был запущен.
 
 const userSelectedMeasurement = {};
 
@@ -534,57 +527,7 @@ async function senseiCompleteTask(
 }
 
 // ============================================================
-// ЗАПУСК ЗАЯВКИ ИЗ ДИРЕКТ-БОТА
-// ============================================================
-//
-// Пользователь сначала пишет нашему боту в разделе "Боты".
-// При событии income_message мы программно создаём заявку
-// нужного бота через POST /v1.3/bots/{BOT_ID}/run.
-//
-// После создания заявки amo Messenger уже работает как обычная
-// заявка бота: её цепочка доходит до нашего виджета, приходит
-// rpa_bot_control_transferred, и дальше используются настоящие
-// inline-кнопки через sendMessage.
-//
-// Это позволяет сохранить:
-// 1) запуск через отдельного бота в списке;
-// 2) кнопки;
-// 3) текущую рабочую логику поиска задач.
-// ============================================================
-
-// ============================================================
-// RPA-БОТ ДЛЯ ЗАПУСКА ИЗ ДИРЕКТ-БОТА
-// ============================================================
-//
-// ВАЖНО:
-// "Бот инженеров" — это директ-бот.
-// Он получает входящее сообщение через AMOMESSENGER WEBHOOK.
-//
-// RPA-бот, который нужно запускать после сообщения,
-// называется "Отчетов инженеров".
-//
-// Его ID:
-// d414fbc0-9649-11f1-873d-0123456789ab
-//
-// Больше НЕ пытаемся искать его через GET /v1.3/bots.
-// ============================================================
-
-async function getRpaBotId() {
-  const rpaBotId =
-    "d414fbc0-9649-11f1-873d-0123456789ab";
-
-  console.log("");
-  console.log("==========================================");
-  console.log("RPA-БОТ ДЛЯ ЗАПУСКА");
-  console.log("==========================================");
-  console.log("Название: Отчетов инженеров");
-  console.log("ID:", rpaBotId);
-  console.log("==========================================");
-
-  return rpaBotId;
-}
-// ============================================================
-// AMOMESSENGER API
+// AMOMESSENGER API (RPA-канал, через виджет / control_transferred)
 // ============================================================
 
 async function amoMessengerPost(
@@ -604,7 +547,7 @@ async function amoMessengerPost(
     `/request/${requestId}/${method}`;
 
   console.log("");
-  console.log("amoMessenger POST");
+  console.log("amoMessenger POST (RPA)");
   console.log(url);
   console.log("BODY:");
   console.log(JSON.stringify(body, null, 2));
@@ -657,7 +600,7 @@ async function amoMessengerPost(
 }
 
 // ============================================================
-// ОТПРАВКА СООБЩЕНИЯ
+// ОТПРАВКА СООБЩЕНИЯ (RPA-канал)
 // ============================================================
 
 async function sendMessengerMessage(
@@ -693,7 +636,7 @@ async function sendMessengerMessage(
 }
 
 // ============================================================
-// ВОЗВРАТ УПРАВЛЕНИЯ AMOMESSENGER
+// ВОЗВРАТ УПРАВЛЕНИЯ AMOMESSENGER (RPA-канал)
 // ============================================================
 
 async function returnControl(
@@ -723,6 +666,83 @@ async function returnControl(
       error.message
     );
   }
+}
+
+// ============================================================
+// ОТПРАВКА СООБЩЕНИЯ (ПРЯМОЙ КАНАЛ, direct_id)
+// ============================================================
+//
+// Используется, когда бот запускается НЕ через передачу управления
+// от виджета (rpa_bot_control_transferred), а напрямую — пользователь
+// просто пишет боту сообщение, и приходит вебхук с event_type
+// "income_message" и полем _embedded.conversation_identity.direct_id.
+//
+// В этом канале не нужен bot_id/request_id и не нужно вызывать
+// returnControl — отвечаем сразу по direct_id из вебхука.
+
+async function sendDirectMessage(
+  directId,
+  text,
+  buttons = null
+) {
+  if (!amomessengerAccessToken) {
+    throw new Error(
+      "Токен amoMessenger не найден"
+    );
+  }
+
+  const url =
+    `https://api.amo.tm/v1.3/direct/${directId}/sendMessage`;
+
+  const body = { text };
+
+  if (buttons) {
+    body.reply_markup = {
+      inline_keyboard: {
+        buttons: buttons.map((text) => ({
+          text
+        }))
+      }
+    };
+  }
+
+  console.log("");
+  console.log("amoMessenger POST (DIRECT)");
+  console.log(url);
+  console.log("BODY:");
+  console.log(JSON.stringify(body, null, 2));
+
+  const response = await axios.post(url, body, {
+    headers: {
+      Authorization: `Bearer ${amomessengerAccessToken}`,
+      "Content-Type": "application/json"
+    },
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  console.log(
+    "amoMessenger DIRECT response:",
+    response.status,
+    JSON.stringify(response.data)
+  );
+
+  if (
+    response.status === 401 ||
+    response.status === 403
+  ) {
+    console.log(
+      "amoMessenger token недействителен (DIRECT)."
+    );
+  }
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoMessenger DIRECT HTTP ${response.status}`
+    );
+  }
+
+  return response;
 }
 
 // ============================================================
@@ -1370,206 +1390,6 @@ async function findMeasurementTasks() {
 }
 
 // ============================================================
-// DEBUG: ПОЛУЧИТЬ ВСЕ RPA-БОТЫ
-// ============================================================
-//
-// ВРЕМЕННЫЙ ЭНДПОИНТ.
-//
-// Нужен только для того, чтобы посмотреть, какие RPA-боты
-// доступны приложению через API amo Messenger.
-//
-// После получения ID этот блок можно удалить.
-//
-
-app.get(
-  "/debug/rpa-bots",
-  async (req, res) => {
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "DEBUG: ПОЛУЧЕНИЕ ВСЕХ RPA-БОТОВ"
-    );
-    console.log(
-      "=========================================="
-    );
-
-    try {
-      if (!amomessengerAccessToken) {
-        return res.status(500).json({
-          status: "Ошибка",
-          message:
-            "AMOMESSENGER_ACCESS_TOKEN не найден."
-        });
-      }
-
-      const allBots = [];
-      let pageToken = null;
-      let pageNumber = 1;
-
-      while (true) {
-        const params = {
-          limit: 500
-        };
-
-        if (pageToken) {
-          params.page_token = pageToken;
-        }
-
-        console.log("");
-        console.log(
-          `Получаем страницу RPA-ботов: ${pageNumber}`
-        );
-
-        const response = await axios.get(
-          "https://api.amo.tm/v1.3/bots",
-          {
-            params,
-            headers: {
-              Authorization:
-                `Bearer ${amomessengerAccessToken}`,
-              Accept:
-                "application/hal+json"
-            },
-            timeout: 30000,
-            validateStatus: () => true
-          }
-        );
-
-        console.log(
-          "HTTP:",
-          response.status
-        );
-
-        if (response.status !== 200) {
-          console.error(
-            "Ошибка API RPA-ботов:"
-          );
-
-          console.error(
-            JSON.stringify(
-              response.data,
-              null,
-              2
-            )
-          );
-
-          return res.status(
-            response.status
-          ).json({
-            status: "Ошибка",
-            http_status:
-              response.status,
-            response:
-              response.data
-          });
-        }
-
-        const items =
-          response.data?._embedded?.items || [];
-
-        console.log(
-          `Получено ботов на странице ${pageNumber}: ${items.length}`
-        );
-
-        allBots.push(...items);
-
-        pageToken =
-          response.data?.page_token ||
-          null;
-
-        if (!pageToken) {
-          break;
-        }
-
-        pageNumber++;
-      }
-
-      console.log("");
-      console.log(
-        "=========================================="
-      );
-      console.log(
-        `ВСЕГО RPA-БОТОВ: ${allBots.length}`
-      );
-      console.log(
-        "=========================================="
-      );
-
-      if (allBots.length === 0) {
-        console.log(
-          "RPA-БОТОВ НЕ НАЙДЕНО."
-        );
-      }
-
-      allBots.forEach(
-        (bot, index) => {
-          console.log("");
-          console.log(
-            `RPA-БОТ №${index + 1}`
-          );
-          console.log(
-            "ID:",
-            bot.id
-          );
-          console.log(
-            "Название:",
-            bot.title
-          );
-
-          if (bot.links) {
-            console.log(
-              "Ссылки:",
-              JSON.stringify(
-                bot.links,
-                null,
-                2
-              )
-            );
-          }
-        }
-      );
-
-      console.log("");
-      console.log(
-        "=========================================="
-      );
-      console.log(
-        "КОНЕЦ СПИСКА RPA-БОТОВ"
-      );
-      console.log(
-        "=========================================="
-      );
-
-      return res.json({
-        status: "OK",
-        count: allBots.length,
-        bots: allBots.map(
-          (bot) => ({
-            id: bot.id,
-            title: bot.title
-          })
-        )
-      });
-
-    } catch (error) {
-      console.error(
-        "DEBUG RPA BOTS ERROR:",
-        error.stack ||
-          error.message
-      );
-
-      return res.status(500).json({
-        status: "Ошибка",
-        message:
-          error.message
-      });
-    }
-  }
-);
-
-// ============================================================
 // DEBUG: STATUS
 // ============================================================
 
@@ -1582,10 +1402,6 @@ app.get("/status", (req, res) => {
       amomessengerAccessToken
         ? "ДА"
         : "НЕТ",
-    amomessenger_rpa_bot_title:
-      AMOMESSENGER_RPA_BOT_TITLE,
-    amomessenger_rpa_bot_id:
-      amomessengerRpaBotId || null,
     amocrm_token:
       amocrmAccessToken
         ? "ДА"
@@ -2094,77 +1910,27 @@ app.get(
 );
 
 // ============================================================
-// DEBUG: AMOMESSENGER BOTS
-// ============================================================
-//
-// Вспомогательный endpoint. Показывает, какой бот-заявка
-// найден по названию "Бот инженеров".
-//
-// Можно открыть:
-// https://amobot-cpck.onrender.com/debug/amomessenger-bot
-// ============================================================
-
-app.get(
-  "/debug/amomessenger-bot",
-  async (req, res) => {
-    try {
-      const botId =
-        await getRpaBotId();
-
-      res.json({
-        status: "OK",
-        bot_title:
-          AMOMESSENGER_RPA_BOT_TITLE,
-        bot_id:
-          botId
-      });
-    } catch (error) {
-      console.error(
-        "DEBUG AMOMESSENGER BOT ERROR:",
-        error.response
-          ? error.response.data
-          : error.stack || error.message
-      );
-
-      res.status(500).json({
-        status: "Ошибка",
-        message:
-          error.response?.data ||
-          error.message
-      });
-    }
-  }
-);
-
-// ============================================================
 // ПОИСК ЗАМЕРОВ + ОТПРАВКА СПИСКА ПОЛЬЗОВАТЕЛЮ
 // ============================================================
 //
-// Общая логика, которая раньше была только внутри обработки кнопки
-// "Подтвердить замер". Вынесена в отдельную функцию, чтобы её же можно
-// было вызвать повторно после того, как пользователь закроет задачу
-// через "Перенос замера" или "Отказ" — бот должен снова поискать
-// оставшиеся задачи и показать список.
+// Общая логика для обоих каналов (RPA и прямой). Раньше принимала
+// botId/requestId/receiverUserId и сама вызывала sendMessengerMessage —
+// теперь принимает универсальную функцию отправки `send(text, buttons)`,
+// которая уже "знает", куда и как слать сообщение (через виджет или
+// напрямую по direct_id).
 //
 // Возвращает true, если управление нужно вернуть amoMessenger сразу
 // (замеров не найдено или произошла ошибка), и false, если бот ждёт,
 // что пользователь нажмёт на кнопку с номером договора.
 
-async function searchAndPresentMeasurements(
-  botId,
-  requestId,
-  receiverUserId
-) {
-  let shouldReturnControl = true;
+async function searchAndPresentMeasurements(send) {
+  let shouldFinish = true;
 
   try {
     const result = await findMeasurementTasks();
 
     if (result.measurements.length === 0) {
-      await sendMessengerMessage(
-        botId,
-        requestId,
-        receiverUserId,
+      await send(
         "📋 Замеров для подтверждения не найдено."
       );
     } else {
@@ -2188,18 +1954,12 @@ async function searchAndPresentMeasurements(
           item.contract_number || `Задача ${item.task_id}`
       );
 
-      await sendMessengerMessage(
-        botId,
-        requestId,
-        receiverUserId,
-        message,
-        buttons
-      );
+      await send(message, buttons);
 
       // Список с кнопками показан — НЕ отдаём управление, так как
       // ждём, что пользователь нажмёт одну из кнопок (обработка в
       // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
-      shouldReturnControl = false;
+      shouldFinish = false;
     }
   } catch (error) {
     console.error(
@@ -2208,10 +1968,7 @@ async function searchAndPresentMeasurements(
     );
 
     try {
-      await sendMessengerMessage(
-        botId,
-        requestId,
-        receiverUserId,
+      await send(
         "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
       );
     } catch (sendError) {
@@ -2222,7 +1979,415 @@ async function searchAndPresentMeasurements(
     }
   }
 
-  return shouldReturnControl;
+  return shouldFinish;
+}
+
+// ============================================================
+// ОБРАБОТКА ТЕКСТА/КНОПКИ ОТ ПОЛЬЗОВАТЕЛЯ
+// ============================================================
+//
+// Единая точка входа для бизнес-логики бота — используется и для
+// RPA-канала (после передачи управления от виджета), и для прямого
+// канала (когда пользователь просто пишет боту любое сообщение).
+//
+// options:
+//   text               — текст входящего сообщения
+//   userKey            — ключ пользователя для хранения состояния
+//                         (userSelectedMeasurement / userPendingComment)
+//   send(text, buttons)— функция отправки ответа пользователю
+//   finish()           — что делать по завершении шага:
+//                         для RPA-канала — returnControl,
+//                         для прямого канала — ничего не делать
+//   showMenuOnUnknown  — если true, на нераспознанный текст показываем
+//                         главное меню (нужно для запуска бота ЛЮБЫМ
+//                         сообщением по прямому каналу). Если false —
+//                         на нераспознанный текст просто завершаем шаг
+//                         (как было раньше в RPA-канале).
+
+async function processUserMessage({
+  text,
+  userKey,
+  send,
+  finish,
+  showMenuOnUnknown
+}) {
+  const trimmedText = (text || "").trim();
+
+  console.log(
+    "Обработка сообщения пользователя:",
+    userKey,
+    trimmedText
+  );
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ КОММЕНТАРИЙ (после "Перенос замера" / "Отказ")
+  // ------------------------------------------------------
+  //
+  // Если для этого пользователя мы ждём комментарий — значит,
+  // текущее сообщение это НЕ команда/кнопка, а сам комментарий.
+  // Обрабатываем его в первую очередь, до любых других проверок.
+
+  const pendingComment = userPendingComment[userKey];
+
+  if (pendingComment) {
+    const comment = trimmedText;
+
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "ПОЛУЧЕН КОММЕНТАРИЙ:",
+      pendingComment.displayResult,
+      comment
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    if (!comment) {
+      await send(
+        "Комментарий не может быть пустым. Укажите комментарий"
+      );
+
+      return;
+    }
+
+    try {
+      // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
+      // через amoCRM — иначе процесс Sensei в сделке остановится.
+      await senseiCompleteTask(
+        pendingComment.lead_id,
+        pendingComment.task_id,
+        pendingComment.resultCaption
+      );
+
+      try {
+        await addLeadNote(
+          pendingComment.lead_id,
+          comment
+        );
+      } catch (noteError) {
+        console.error(
+          "Не удалось добавить комментарий к сделке:",
+          noteError.message
+        );
+      }
+
+      await send(
+        `Текущая задача amoCRM закрыта с результатом ` +
+          `"${pendingComment.displayResult}".`
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи через Sensei:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+    }
+
+    delete userPendingComment[userKey];
+    delete userSelectedMeasurement[userKey];
+
+    // Возвращаемся к шагу поиска других задач замера и
+    // показываем список (или сообщение, что задач больше нет).
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПОДТВЕРДИТЬ ЗАМЕР
+  // ------------------------------------------------------
+
+  if (trimmedText === "Подтвердить замер") {
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ПОДТВЕРДИТЬ ЗАМЕР"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    await send(
+      "⏳ Проверяю задачи на подтверждение замера..."
+    );
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ДРУГИЕ КНОПКИ ГЛАВНОГО МЕНЮ
+  // ------------------------------------------------------
+
+  if (trimmedText === "Провести замер") {
+    await send(
+      "Функция «Провести замер» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  if (trimmedText === "Загрузить фотоотчет") {
+    await send(
+      "Функция «Загрузить фотоотчет» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  if (trimmedText === "Внести правки") {
+    await send(
+      "Функция «Внести правки» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАМЕР ПОДТВЕРЖДЕН
+  // (нажатие на кнопку после показа деталей замера)
+  // ------------------------------------------------------
+
+  if (trimmedText === "Замер подтвержден") {
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ЗАМЕР ПОДТВЕРЖДЕН"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    const stored = userSelectedMeasurement[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл, какой замер вы подтверждаете. " +
+          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+          "и выберите нужную задачу из списка."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
+      // через amoCRM — иначе процесс Sensei в сделке остановится.
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.task_id,
+        "Замер подтвержден"
+      );
+
+      await send(
+        "✅ Замер подтвержден. Задача завершена."
+      );
+
+      delete userSelectedMeasurement[userKey];
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи через Sensei:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+    }
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПЕРЕНОС ЗАМЕРА
+  // ------------------------------------------------------
+
+  if (trimmedText === "Перенос замера") {
+    const stored = userSelectedMeasurement[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл, какой замер вы переносите. " +
+          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+          "и выберите нужную задачу из списка."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingComment[userKey] = {
+      task_id: stored.task_id,
+      lead_id: stored.lead_id,
+      resultCaption: "Перенос замера",
+      displayResult: "Перенос замера"
+    };
+
+    await send("Укажите комментарий");
+
+    // Управление НЕ возвращаем — ждём текст комментария
+    // следующим сообщением.
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОТКАЗ
+  // ------------------------------------------------------
+
+  if (trimmedText === "Отказ") {
+    const stored = userSelectedMeasurement[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл, от какого замера вы отказываетесь. " +
+          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
+          "и выберите нужную задачу из списка."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingComment[userKey] = {
+      task_id: stored.task_id,
+      lead_id: stored.lead_id,
+      resultCaption: "Отказался от замера",
+      displayResult: "Отказался от замера"
+    };
+
+    await send("Укажите комментарий");
+
+    // Управление НЕ возвращаем — ждём текст комментария
+    // следующим сообщением.
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
+  // (нажатие на одну из кнопок из списка замеров, п.5)
+  // ------------------------------------------------------
+
+  if (trimmedText) {
+    try {
+      const result = await findMeasurementTasks();
+
+      const selected = result.measurements.find(
+        (item) =>
+          String(item.contract_number).trim() ===
+          trimmedText
+      );
+
+      if (selected) {
+        console.log(
+          "=========================================="
+        );
+
+        console.log(
+          "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
+          trimmedText
+        );
+
+        console.log(
+          "=========================================="
+        );
+
+        const detailMessage =
+          `Дата замера: ${selected.measure_date || "—"}\n` +
+          `Время замера: ${selected.measure_time || "—"}\n` +
+          `Адрес замера: ${selected.address || "—"}\n` +
+          `Продукт: ${selected.product || "—"}\n` +
+          `Имя контакта: ${selected.contact_name || "—"}\n` +
+          `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
+          `№ договора: ${selected.contract_number || "—"}\n` +
+          `Ссылка на сделку: ${selected.lead_link}`;
+
+        // Запоминаем, какой именно замер (задача + сделка)
+        // выбрал этот пользователь — понадобится, когда он
+        // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
+        userSelectedMeasurement[userKey] = {
+          task_id: selected.task_id,
+          lead_id: selected.lead_id,
+          contract_number: selected.contract_number
+        };
+
+        await send(detailMessage, [
+          "Замер подтвержден",
+          "Перенос замера",
+          "Отказ"
+        ]);
+
+        // Управление НЕ возвращаем — ждём, что пользователь
+        // нажмёт одну из кнопок выше.
+
+        return;
+      }
+    } catch (error) {
+      console.error(
+        "Ошибка при выборе замера:",
+        error.message
+      );
+    }
+  }
+
+  // ------------------------------------------------------
+  // НЕИЗВЕСТНАЯ КОМАНДА / ЗАПУСК БОТА ЛЮБЫМ СООБЩЕНИЕМ
+  // ------------------------------------------------------
+
+  console.log(
+    "Неизвестная команда или запуск бота:",
+    trimmedText
+  );
+
+  if (showMenuOnUnknown) {
+    await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
+
+    return;
+  }
+
+  await finish();
 }
 
 // ============================================================
@@ -2263,208 +2428,74 @@ app.post(
         body.event_type;
 
       // --------------------------------------------------------
-      // ЗАЯВКА ОБНОВЛЕНА
-      // --------------------------------------------------------
+      // ПРЯМОЙ КАНАЛ: любое входящее сообщение боту
+      // (без передачи управления от виджета).
       //
-      // Если созданная из директ-бота заявка архивирована,
-      // снимаем её из временной памяти, чтобы следующий запуск
-      // снова мог создать новую заявку.
-      // --------------------------------------------------------
-
-      if (
-        eventType ===
-        "rpa_request_updated"
-      ) {
-        const data =
-          body._embedded
-            ?.rpa_request_updated;
-
-        const request =
-          data?._embedded
-            ?.request;
-
-        const requestId =
-          data?.request_id ||
-          request?.id;
-
-        const changes =
-          data?.changes || [];
-
-        const archived =
-          changes.some(
-            (change) =>
-              change?.archive_status?.is_archived === true
-          );
-
-        log(
-          "ОБНОВЛЕНИЕ ЗАЯВКИ",
-          {
-            requestId,
-            botId: request?.bot_id,
-            archived,
-            changes
-          }
-        );
-
-        if (archived && requestId) {
-          const userId =
-            requestToDirectUser[requestId];
-
-          if (userId) {
-            delete activeDirectRequests[userId];
-            delete requestToDirectUser[requestId];
-
-            console.log(
-              "Активная заявка удалена из памяти:",
-              {
-                userId,
-                requestId
-              }
-            );
-          }
-        }
-
-        return;
-      }
-
-      // --------------------------------------------------------
-      // DIRECT BOT -> СОЗДАЁМ ЗАЯВКУ
-      // --------------------------------------------------------
+      // Структура вебхука:
+      // {
+      //   "_embedded": {
+      //     "context": { "company_id": "...", "user_id": "..." },
+      //     "conversation_identity": { "direct_id": "..." },
+      //     "message": { "text": "...", "author": { "user_id": "..." }, ... }
+      //   },
+      //   "event_type": "income_message"
+      // }
       //
-      // Пользователь пишет "старт" или ЛЮБОЕ другое сообщение
-      // нашему боту в разделе "Боты".
-      //
-      // Это событие отличается от сообщения внутри заявки:
-      // event_type = "income_message"
-      //
-      // Мы не пытаемся рисовать кнопки прямо в директ-чате.
-      // Вместо этого создаём настоящую заявку через API amo.
-      // После этого amo запускает обычную цепочку заявки,
-      // а когда управление передаётся нашему виджету,
-      // приходит rpa_bot_control_transferred.
-      //
-      // Именно там остаются наши существующие кнопки.
+      // Отвечаем через POST /v1.3/direct/{direct_id}/sendMessage —
+      // bot_id и request_id здесь не нужны, и возвращать управление
+      // (returnControl) тоже не нужно.
       // --------------------------------------------------------
 
-      if (
-        eventType ===
-        "income_message"
-      ) {
-        const context =
-          body._embedded
-            ?.context;
+      if (eventType === "income_message") {
+        const data = body._embedded || {};
+
+        const context = data.context || {};
 
         const conversationIdentity =
-          body._embedded
-            ?.conversation_identity;
+          data.conversation_identity || {};
 
-        const message =
-          body._embedded
-            ?.message;
-
-        const text =
-          message?.text ||
-          "";
-
-        const userId =
-          message?.author?.user_id ||
-          context?.user_id;
+        const message = data.message || {};
 
         const directId =
-          conversationIdentity?.direct_id;
+          conversationIdentity.direct_id;
+
+        const text = message.text || "";
+
+        const userKey =
+          context.user_id ||
+          (message.author && message.author.user_id);
 
         log(
-          "ПОЛУЧЕНО СООБЩЕНИЕ ОТ ДИРЕКТ-БОТА",
+          "ПРЯМОЙ КАНАЛ: ВХОДЯЩЕЕ СООБЩЕНИЕ",
           {
-            text,
-            userId,
             directId,
-            messageId: message?.id
+            userKey,
+            text
           }
         );
 
-        if (!userId) {
+        if (!directId || !userKey) {
           console.error(
-            "DIRECT BOT: не удалось определить user_id."
+            "Не удалось определить direct_id или user_id из вебхука."
           );
 
           return;
         }
 
-        try {
-          const result =
-            await createRpaRequestFromDirectMessage(
-              userId
-            );
-
-          if (
-            result.alreadyExists ||
-            result.alreadyInProgress
-          ) {
-            console.log(
-              "Новая заявка не создавалась:",
-              result
-            );
-
-            return;
-          }
-
-          console.log(
-            "DIRECT BOT: заявка создана.",
-            result.requestId
-          );
-
-          // Ничего больше здесь не отправляем.
-          // Следующий шаг выполняет сам бот-заявка:
-          // его цепочка дойдёт до виджета,
-          // после чего придёт rpa_bot_control_transferred.
-        } catch (error) {
-          console.error(
-            "Ошибка запуска заявки из директ-бота:",
-            error.response
-              ? JSON.stringify(error.response.data)
-              : error.stack || error.message
-          );
-
-          // В случае ошибки пытаемся сообщить пользователю
-          // обычным сообщением в директ.
-          try {
-            const errorText =
-              "❌ Не удалось запустить бота-заявку. " +
-              "Попробуйте ещё раз или обратитесь к администратору.";
-
-            const directUrl =
-              `https://api.amo.tm/v1.3/direct/${userId}/sendMessage`;
-
-            await axios.post(
-              directUrl,
-              {
-                text: errorText
-              },
-              {
-                headers: {
-                  Authorization:
-                    `Bearer ${amomessengerAccessToken}`,
-                  "Content-Type":
-                    "application/json"
-                },
-                timeout: 30000,
-                validateStatus: () => true
-              }
-            );
-          } catch (sendError) {
-            console.error(
-              "Не удалось отправить сообщение об ошибке в директ:",
-              sendError.message
-            );
-          }
-        }
+        await processUserMessage({
+          text,
+          userKey,
+          send: (msgText, buttons) =>
+            sendDirectMessage(directId, msgText, buttons),
+          finish: async () => {},
+          showMenuOnUnknown: true
+        });
 
         return;
       }
 
       // --------------------------------------------------------
-      // CONTROL TRANSFERRED
+      // CONTROL TRANSFERRED (RPA-канал через виджет)
       // --------------------------------------------------------
 
       if (
@@ -2528,20 +2559,15 @@ app.post(
           botId,
           requestId,
           receiverUserId,
-          "Выберите задачу для выполнения:",
-          [
-            "Подтвердить замер",
-            "Провести замер",
-            "Загрузить фотоотчет",
-            "Внести правки"
-          ]
+          MAIN_MENU_TEXT,
+          MAIN_MENU_BUTTONS
         );
 
         return;
       }
 
       // --------------------------------------------------------
-      // INCOME MESSAGE
+      // INCOME MESSAGE (RPA-канал через виджет)
       // --------------------------------------------------------
 
       if (
@@ -2595,486 +2621,33 @@ app.post(
           receiverUserId
         );
 
-        // ------------------------------------------------------
-        // ОЖИДАЕМ КОММЕНТАРИЙ (после "Перенос замера" / "Отказ")
-        // ------------------------------------------------------
-        //
-        // Если для этого пользователя мы ждём комментарий — значит,
-        // текущее сообщение это НЕ команда/кнопка, а сам комментарий.
-        // Обрабатываем его в первую очередь, до любых других проверок.
-
-        const pendingComment =
-          userPendingComment[receiverUserId];
-
-        if (pendingComment) {
-          const comment = text.trim();
-
-          console.log(
-            "=========================================="
-          );
-
-          console.log(
-            "ПОЛУЧЕН КОММЕНТАРИЙ:",
-            pendingComment.displayResult,
-            comment
-          );
-
-          console.log(
-            "=========================================="
-          );
-
-          if (!comment) {
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "Комментарий не может быть пустым. Укажите комментарий"
-            );
-
-            return;
-          }
-
-          try {
-            // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
-            // через amoCRM — иначе процесс Sensei в сделке остановится.
-            await senseiCompleteTask(
-              pendingComment.lead_id,
-              pendingComment.task_id,
-              pendingComment.resultCaption
-            );
-
-            try {
-              await addLeadNote(
-                pendingComment.lead_id,
-                comment
-              );
-            } catch (noteError) {
-              console.error(
-                "Не удалось добавить комментарий к сделке:",
-                noteError.message
-              );
-            }
-
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              `Текущая задача amoCRM закрыта с результатом ` +
-                `"${pendingComment.displayResult}".`
-            );
-          } catch (error) {
-            console.error(
-              "Ошибка завершения задачи через Sensei:",
-              error.message
-            );
-
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "❌ Не удалось завершить задачу в Sensei. " +
-                "Подробности есть в логах Render. Попробуйте ещё раз " +
-                "или обратитесь к администратору."
-            );
-          }
-
-          delete userPendingComment[receiverUserId];
-          delete userSelectedMeasurement[receiverUserId];
-
-          // Возвращаемся к шагу поиска других задач замера и
-          // показываем список (или сообщение, что задач больше нет).
-
-          const shouldReturnControl =
-            await searchAndPresentMeasurements(
-              botId,
-              requestId,
-              receiverUserId
-            );
-
-          if (shouldReturnControl) {
-            await returnControl(
-              botId,
-              requestId
-            );
-          }
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ПОДТВЕРДИТЬ ЗАМЕР
-        // ------------------------------------------------------
-
         if (
-          text.trim() ===
-          "Подтвердить замер"
+          !botId ||
+          !requestId ||
+          !receiverUserId
         ) {
-          console.log(
-            "=========================================="
-          );
-
-          console.log(
-            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ПОДТВЕРДИТЬ ЗАМЕР"
-          );
-
-          console.log(
-            "=========================================="
-          );
-
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "⏳ Проверяю задачи на подтверждение замера..."
-          );
-
-          const shouldReturnControl =
-            await searchAndPresentMeasurements(
-              botId,
-              requestId,
-              receiverUserId
-            );
-
-          if (shouldReturnControl) {
-            await returnControl(
-              botId,
-              requestId
-            );
-          }
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ДРУГИЕ КНОПКИ
-        // ------------------------------------------------------
-
-        if (
-          text.trim() ===
-          "Провести замер"
-        ) {
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "Функция «Провести замер» пока находится в разработке."
-          );
-
-          await returnControl(
-            botId,
-            requestId
+          console.error(
+            "Не удалось определить параметры запроса (RPA)."
           );
 
           return;
         }
 
-        if (
-          text.trim() ===
-          "Загрузить фотоотчет"
-        ) {
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "Функция «Загрузить фотоотчет» пока находится в разработке."
-          );
-
-          await returnControl(
-            botId,
-            requestId
-          );
-
-          return;
-        }
-
-        if (
-          text.trim() ===
-          "Внести правки"
-        ) {
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "Функция «Внести правки» пока находится в разработке."
-          );
-
-          await returnControl(
-            botId,
-            requestId
-          );
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ЗАМЕР ПОДТВЕРЖДЕН
-        // (нажатие на кнопку после показа деталей замера)
-        // ------------------------------------------------------
-
-        if (
-          text.trim() ===
-          "Замер подтвержден"
-        ) {
-          console.log(
-            "=========================================="
-          );
-
-          console.log(
-            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ЗАМЕР ПОДТВЕРЖДЕН"
-          );
-
-          console.log(
-            "=========================================="
-          );
-
-          const stored =
-            userSelectedMeasurement[receiverUserId];
-
-          if (!stored) {
-            await sendMessengerMessage(
+        await processUserMessage({
+          text,
+          userKey: receiverUserId,
+          send: (msgText, buttons) =>
+            sendMessengerMessage(
               botId,
               requestId,
               receiverUserId,
-              "Не нашёл, какой замер вы подтверждаете. " +
-                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-                "и выберите нужную задачу из списка."
-            );
-
-            await returnControl(
-              botId,
-              requestId
-            );
-
-            return;
-          }
-
-          try {
-            // Важно: завершаем задачу ЧЕРЕЗ API SENSEI, а не напрямую
-            // через amoCRM — иначе процесс Sensei в сделке остановится.
-            await senseiCompleteTask(
-              stored.lead_id,
-              stored.task_id,
-              "Замер подтвержден"
-            );
-
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "✅ Замер подтвержден. Задача завершена."
-            );
-
-            delete userSelectedMeasurement[
-              receiverUserId
-            ];
-          } catch (error) {
-            console.error(
-              "Ошибка завершения задачи через Sensei:",
-              error.message
-            );
-
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "❌ Не удалось завершить задачу в Sensei. " +
-                "Подробности есть в логах Render. Попробуйте ещё раз " +
-                "или обратитесь к администратору."
-            );
-          }
-
-          await returnControl(
-            botId,
-            requestId
-          );
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ПЕРЕНОС ЗАМЕРА
-        // ------------------------------------------------------
-
-        if (
-          text.trim() ===
-          "Перенос замера"
-        ) {
-          const stored =
-            userSelectedMeasurement[receiverUserId];
-
-          if (!stored) {
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "Не нашёл, какой замер вы переносите. " +
-                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-                "и выберите нужную задачу из списка."
-            );
-
-            await returnControl(
-              botId,
-              requestId
-            );
-
-            return;
-          }
-
-          userPendingComment[receiverUserId] = {
-            task_id: stored.task_id,
-            lead_id: stored.lead_id,
-            resultCaption: "Перенос замера",
-            displayResult: "Перенос замера"
-          };
-
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "Укажите комментарий"
-          );
-
-          // Управление НЕ возвращаем — ждём текст комментария
-          // следующим сообщением.
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ОТКАЗ
-        // ------------------------------------------------------
-
-        if (
-          text.trim() ===
-          "Отказ"
-        ) {
-          const stored =
-            userSelectedMeasurement[receiverUserId];
-
-          if (!stored) {
-            await sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              "Не нашёл, от какого замера вы отказываетесь. " +
-                "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-                "и выберите нужную задачу из списка."
-            );
-
-            await returnControl(
-              botId,
-              requestId
-            );
-
-            return;
-          }
-
-          userPendingComment[receiverUserId] = {
-            task_id: stored.task_id,
-            lead_id: stored.lead_id,
-            resultCaption: "Отказался от замера",
-            displayResult: "Отказался от замера"
-          };
-
-          await sendMessengerMessage(
-            botId,
-            requestId,
-            receiverUserId,
-            "Укажите комментарий"
-          );
-
-          // Управление НЕ возвращаем — ждём текст комментария
-          // следующим сообщением.
-
-          return;
-        }
-
-        // ------------------------------------------------------
-        // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
-        // (нажатие на одну из кнопок из списка замеров, п.5)
-        // ------------------------------------------------------
-
-        const selectedContract = text.trim();
-
-        if (selectedContract) {
-          try {
-            const result =
-              await findMeasurementTasks();
-
-            const selected =
-              result.measurements.find(
-                (item) =>
-                  String(item.contract_number).trim() ===
-                  selectedContract
-              );
-
-            if (selected) {
-              console.log(
-                "=========================================="
-              );
-
-              console.log(
-                "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
-                selectedContract
-              );
-
-              console.log(
-                "=========================================="
-              );
-
-              const detailMessage =
-                `Дата замера: ${selected.measure_date || "—"}\n` +
-                `Время замера: ${selected.measure_time || "—"}\n` +
-                `Адрес замера: ${selected.address || "—"}\n` +
-                `Продукт: ${selected.product || "—"}\n` +
-                `Имя контакта: ${selected.contact_name || "—"}\n` +
-                `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
-                `№ договора: ${selected.contract_number || "—"}\n` +
-                `Ссылка на сделку: ${selected.lead_link}`;
-
-              // Запоминаем, какой именно замер (задача + сделка)
-              // выбрал этот пользователь — понадобится, когда он
-              // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
-              userSelectedMeasurement[receiverUserId] = {
-                task_id: selected.task_id,
-                lead_id: selected.lead_id,
-                contract_number: selected.contract_number
-              };
-
-              await sendMessengerMessage(
-                botId,
-                requestId,
-                receiverUserId,
-                detailMessage,
-                [
-                  "Замер подтвержден",
-                  "Перенос замера",
-                  "Отказ"
-                ]
-              );
-
-              // Управление НЕ возвращаем — ждём, что пользователь
-              // нажмёт одну из кнопок выше.
-
-              return;
-            }
-          } catch (error) {
-            console.error(
-              "Ошибка при выборе замера:",
-              error.message
-            );
-          }
-        }
-
-        console.log(
-          "Неизвестная команда:",
-          text
-        );
-
-        await returnControl(
-          botId,
-          requestId
-        );
+              msgText,
+              buttons
+            ),
+          finish: () =>
+            returnControl(botId, requestId),
+          showMenuOnUnknown: false
+        });
 
         return;
       }
@@ -3182,18 +2755,6 @@ app.listen(
       amomessengerAccessToken
         ? "ДА"
         : "НЕТ"
-    );
-
-    console.log(
-      "amoMessenger RPA bot title:",
-      AMOMESSENGER_RPA_BOT_TITLE
-    );
-
-    console.log(
-      "amoMessenger RPA bot ID:",
-      amomessengerRpaBotId
-        ? amomessengerRpaBotId
-        : "будет найден автоматически"
     );
 
     console.log(
