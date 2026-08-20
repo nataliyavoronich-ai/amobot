@@ -58,12 +58,36 @@ const ENGINEER_ENUM_ID = 1059150;
 
 const MEASUREMENT_TASK_TYPE_ID = 2746005;
 
+// Тип задачи "Провести зам.(и)" — используется в функции "Провести замер"
+const CONDUCT_TASK_TYPE_ID = 2746009;
+
+// Тип задачи "Рез-т замера(и)" — появляется в сделке автоматически
+// после того, как бот завершает задачу "Провести зам.(и)" через Sensei
+// с результатом "Замер состоялся"
+const RESULT_TASK_TYPE_ID = 2746013;
+
 // Поля сделки, которые нужно выводить в сообщениях бота
 const CONTRACT_NUMBER_FIELD_ID = 412776; // № договора (текст)
 const MEASURE_DATE_FIELD_ID = 175370; // Дата замера (дата)
 const MEASURE_TIME_FIELD_ID = 413828; // Время замера (список)
 const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстовая область)
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
+const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
+
+// Поля-ссылки на папки Яндекс.Диска (заполняются ботом автоматически)
+const REPORTS_LINK_FIELD_ID = 555436; // "Отчеты и проекты"
+const PHOTO_LINK_FIELD_ID = 543238; // "Фото проема №1" (папка "Фотоотчет")
+const MEASURE_SHEET_LINK_FIELD_ID = 543236; // "Замерный лист"
+const VIDEO_LINK_FIELD_ID = 554160; // "Видеоотчет"
+const CONTRACT_LINK_FIELD_ID = 543254; // "Договор (Подписан)"
+
+// Токен Яндекс.Диска (OAuth-токен приложения Яндекс.Диска).
+// Как его получить — см. инструкцию, которую я прислал отдельно.
+// Переменную YANDEX_DISK_TOKEN нужно задать в Environment Variables на Render.
+const YANDEX_DISK_TOKEN = process.env.YANDEX_DISK_TOKEN || "";
+
+// Корневая папка на Яндекс.Диске, внутри которой бот создаёт папки сделок
+const YANDEX_DISK_ROOT_FOLDER = "amoCRM";
 
 // Часовой пояс Москвы
 const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
@@ -129,6 +153,35 @@ const userSelectedMeasurement = {};
 // запоминаем, какое именно действие и по какой задаче/сделке нужно
 // выполнить, когда комментарий придёт.
 const userPendingComment = {};
+
+// ------------------------------------------------------------
+// СОСТОЯНИЕ ДЛЯ СЦЕНАРИЯ "ПРОВЕСТИ ЗАМЕР"
+// ------------------------------------------------------------
+
+// Запоминаем, какой список замеров пользователь видел последним —
+// из "Подтвердить замер" (confirm) или из "Провести замер" (conduct).
+// Это нужно, чтобы при нажатии на кнопку с номером договора понять,
+// в каком списке искать этот номер и какой сценарий запускать дальше.
+const userLastSearchMode = {};
+
+// Выбранный пользователем замер из списка "Провести замер"
+// (task_id задачи "Провести зам.(и)" + lead_id + номер договора).
+const userSelectedConductMeasurement = {};
+
+// После нажатия "Замер состоялся" бот ждёт, пока в сделке появится
+// новая задача "Рез-т замера(и)" (id типа 2746013). Здесь храним
+// lead_id/task_id этой новой задачи, когда она найдена, — до тех
+// пор, пока пользователь не выберет результат замера.
+const userPendingResultTask = {};
+
+// После нажатия "Заключен договор" бот просит загрузить фото и
+// ждёт фотографии + нажатие кнопки "Готово". Здесь храним, в какую
+// папку на Яндекс.Диске сохранять фото для этой сделки.
+const userPendingPhotoUpload = {};
+
+// Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"),
+// чтобы не запрашивать одного и того же пользователя много раз подряд.
+const amoCrmUsersCache = {};
 
 // ID аккаунта amoCRM, нужен для заголовка X-Account при обращении
 // к API Sensei. Получаем один раз и кэшируем.
@@ -331,6 +384,125 @@ async function amoCrmPost(url, body) {
 }
 
 // ============================================================
+// PATCH amoCRM (используется для записи ссылок на папки Диска
+// в поля сделки)
+// ============================================================
+
+async function amoCrmPatch(url, body) {
+  if (!amocrmAccessToken) {
+    throw new Error(
+      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  try {
+    const response = await axios.patch(url, body, {
+      headers: {
+        Authorization: `Bearer ${amocrmAccessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/hal+json"
+      },
+      timeout: 60000,
+      validateStatus: () => true
+    });
+
+    if (response.status === 401) {
+      console.log(
+        "amoCRM вернул 401 (PATCH). Пробуем обновить токен..."
+      );
+
+      try {
+        await refreshAmoCrmToken();
+
+        const retry = await axios.patch(url, body, {
+          headers: {
+            Authorization: `Bearer ${amocrmAccessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/hal+json"
+          },
+          timeout: 60000,
+          validateStatus: () => true
+        });
+
+        return retry;
+      } catch (refreshError) {
+        return response;
+      }
+    }
+
+    return response;
+  } catch (error) {
+    console.error("amoCRM PATCH ERROR:", error.message);
+
+    throw error;
+  }
+}
+
+// Обновляет заданный набор custom-полей сделки одним запросом.
+// fieldsMap: { fieldId: "значение", ... }
+async function updateLeadCustomFields(leadId, fieldsMap) {
+  const customFieldsValues = Object.keys(fieldsMap).map(
+    (fieldId) => ({
+      field_id: Number(fieldId),
+      values: [{ value: fieldsMap[fieldId] }]
+    })
+  );
+
+  if (customFieldsValues.length === 0) {
+    return null;
+  }
+
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
+
+  const response = await amoCrmPatch(url, {
+    custom_fields_values: customFieldsValues
+  });
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoCRM lead PATCH HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
+}
+
+// ============================================================
+// ИМЯ ОТВЕТСТВЕННОГО МЕНЕДЖЕРА ПО СДЕЛКЕ
+// ============================================================
+//
+// В amoCRM у сделки есть стандартное поле responsible_user_id —
+// это ID пользователя-менеджера. Само имя нужно запросить отдельно
+// через /api/v4/users/{id}. Кэшируем, чтобы не делать лишних запросов.
+
+async function getUserName(userId) {
+  if (!userId) {
+    return "";
+  }
+
+  if (amoCrmUsersCache[userId]) {
+    return amoCrmUsersCache[userId];
+  }
+
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/users/${userId}`;
+
+  const response = await amoCrmGet(url, {});
+
+  if (response.status !== 200 || !response.data) {
+    return "";
+  }
+
+  const name = response.data.name || "";
+
+  amoCrmUsersCache[userId] = name;
+
+  return name;
+}
+
+// ============================================================
 // ДОБАВЛЕНИЕ КОММЕНТАРИЯ (ПРИМЕЧАНИЯ) К СДЕЛКЕ
 // ============================================================
 //
@@ -524,6 +696,186 @@ async function senseiCompleteTask(
   }
 
   return response.data;
+}
+
+// ============================================================
+// ЯНДЕКС.ДИСК: СОЗДАНИЕ ПАПОК И ЗАГРУЗКА ФАЙЛОВ
+// ============================================================
+//
+// Документация Яндекс.Диска: https://yandex.ru/dev/disk/api/
+// Все запросы идут с заголовком Authorization: OAuth <токен>.
+
+function yandexDiskHeaders() {
+  return {
+    Authorization: `OAuth ${YANDEX_DISK_TOKEN}`
+  };
+}
+
+// Создаёт папку по указанному пути (path без ведущего "disk:/").
+// Если папка уже существует — это не ошибка, просто ничего не делаем.
+async function ydEnsureFolder(path) {
+  if (!YANDEX_DISK_TOKEN) {
+    throw new Error(
+      "YANDEX_DISK_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  const response = await axios.put(
+    "https://cloud-api.yandex.net/v1/disk/resources",
+    null,
+    {
+      params: { path },
+      headers: yandexDiskHeaders(),
+      timeout: 30000,
+      validateStatus: () => true
+    }
+  );
+
+  // 201 — папка создана, 409 — уже существует. Оба варианта — успех.
+  if (
+    response.status !== 201 &&
+    response.status !== 409
+  ) {
+    throw new Error(
+      `Яндекс.Диск: не удалось создать папку "${path}". ` +
+      `HTTP ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+
+  return true;
+}
+
+// Создаёт всю цепочку папок по пути ("a/b/c" создаст a, затем a/b,
+// затем a/b/c) — Яндекс.Диск не создаёт вложенные папки одним запросом.
+async function ydEnsureFolderPath(fullPath) {
+  const parts = fullPath.split("/").filter(Boolean);
+
+  let current = "";
+
+  for (const part of parts) {
+    current = current ? `${current}/${part}` : part;
+
+    await ydEnsureFolder(current);
+  }
+
+  return fullPath;
+}
+
+// Ссылка для открытия папки в браузере в веб-интерфейсе Яндекс.Диска
+// (открывается у того, кто залогинен под тем же Яндекс-аккаунтом).
+function ydFolderWebUrl(path) {
+  const encoded = path
+    .split("/")
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join("/");
+
+  return `https://disk.yandex.ru/client/disk/${encoded}`;
+}
+
+// Загружает файл на Диск напрямую по его URL (Яндекс сам скачивает
+// файл с этого адреса — не нужно скачивать его на сервер бота).
+// Используется, например, для фото, присланных в amoMessenger —
+// у них уже есть прямая ссылка на файл.
+async function ydUploadFromUrl(path, fileUrl) {
+  if (!YANDEX_DISK_TOKEN) {
+    throw new Error(
+      "YANDEX_DISK_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  const response = await axios.post(
+    "https://cloud-api.yandex.net/v1/disk/resources/upload",
+    null,
+    {
+      params: {
+        path,
+        url: fileUrl
+      },
+      headers: yandexDiskHeaders(),
+      timeout: 30000,
+      validateStatus: () => true
+    }
+  );
+
+  if (response.status !== 202 && response.status !== 201) {
+    throw new Error(
+      `Яндекс.Диск: не удалось начать загрузку файла в "${path}". ` +
+      `HTTP ${response.status}: ${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
+}
+
+// Гарантирует, что для сделки на Яндекс.Диске создана вся структура
+// папок ("amoCRM/Сделка (id)/Отчеты и проекты/..."), и что ссылки на
+// эти папки записаны в соответствующие поля сделки (если ещё не
+// записаны). Возвращает пути к каждой подпапке.
+async function ensureLeadYandexFolders(lead) {
+  const leadId = lead.id;
+
+  const leadFolderPath =
+    `${YANDEX_DISK_ROOT_FOLDER}/Сделка (${leadId})`;
+
+  const reportsPath = `${leadFolderPath}/Отчеты и проекты`;
+  const photoPath = `${reportsPath}/Фотоотчет`;
+  const measureSheetPath = `${reportsPath}/Замерный лист`;
+  const videoPath = `${reportsPath}/Видео`;
+  const contractPath = `${reportsPath}/Договор`;
+
+  console.log("Проверяю/создаю папки на Яндекс.Диске для сделки", leadId);
+
+  await ydEnsureFolderPath(reportsPath);
+  await ydEnsureFolder(photoPath);
+  await ydEnsureFolder(measureSheetPath);
+  await ydEnsureFolder(videoPath);
+  await ydEnsureFolder(contractPath);
+
+  // Обновляем в сделке только те поля-ссылки, которые ещё пустые —
+  // чтобы не перезаписывать вручную поставленные значения.
+  const fieldsToUpdate = {};
+
+  if (getFieldValues(lead, REPORTS_LINK_FIELD_ID).length === 0) {
+    fieldsToUpdate[REPORTS_LINK_FIELD_ID] = ydFolderWebUrl(reportsPath);
+  }
+
+  if (getFieldValues(lead, PHOTO_LINK_FIELD_ID).length === 0) {
+    fieldsToUpdate[PHOTO_LINK_FIELD_ID] = ydFolderWebUrl(photoPath);
+  }
+
+  if (getFieldValues(lead, MEASURE_SHEET_LINK_FIELD_ID).length === 0) {
+    fieldsToUpdate[MEASURE_SHEET_LINK_FIELD_ID] =
+      ydFolderWebUrl(measureSheetPath);
+  }
+
+  if (getFieldValues(lead, VIDEO_LINK_FIELD_ID).length === 0) {
+    fieldsToUpdate[VIDEO_LINK_FIELD_ID] = ydFolderWebUrl(videoPath);
+  }
+
+  if (getFieldValues(lead, CONTRACT_LINK_FIELD_ID).length === 0) {
+    fieldsToUpdate[CONTRACT_LINK_FIELD_ID] = ydFolderWebUrl(contractPath);
+  }
+
+  if (Object.keys(fieldsToUpdate).length > 0) {
+    try {
+      await updateLeadCustomFields(leadId, fieldsToUpdate);
+    } catch (error) {
+      console.error(
+        "Не удалось записать ссылки на папки Диска в сделку:",
+        error.message
+      );
+    }
+  }
+
+  return {
+    leadFolderPath,
+    reportsPath,
+    photoPath,
+    measureSheetPath,
+    videoPath,
+    contractPath
+  };
 }
 
 // ============================================================
@@ -1390,6 +1742,244 @@ async function findMeasurementTasks() {
 }
 
 // ============================================================
+// ПОИСК ЗАДАЧ "ПРОВЕСТИ ЗАМЕР" (тип 2746009), БЕЗ ФИЛЬТРА ПО ДАТЕ
+// ============================================================
+
+async function loadConductTasks() {
+  const allTasks = [];
+
+  let page = 1;
+
+  while (true) {
+    const url =
+      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
+    const params = {
+      limit: 250,
+      page,
+      "filter[task_type][0]": CONDUCT_TASK_TYPE_ID,
+      "filter[is_completed]": 0
+    };
+
+    const response = await amoCrmGet(url, params);
+
+    if (response.status === 204) {
+      break;
+    }
+
+    if (response.status !== 200) {
+      throw new Error(
+        `amoCRM tasks (conduct) HTTP ${response.status}`
+      );
+    }
+
+    const tasks =
+      response.data &&
+      Array.isArray(response.data._embedded?.tasks)
+        ? response.data._embedded.tasks
+        : [];
+
+    allTasks.push(...tasks);
+
+    if (tasks.length < 250) {
+      break;
+    }
+
+    page++;
+
+    if (page > 20) {
+      break;
+    }
+  }
+
+  return allTasks;
+}
+
+async function findConductMeasurementTasks() {
+  console.log("");
+  console.log("ПОИСК ЗАДАЧ ПРОВЕСТИ ЗАМЕР (тип " + CONDUCT_TASK_TYPE_ID + ")");
+
+  const tasks = await loadConductTasks();
+
+  const measurements = [];
+
+  for (const task of tasks) {
+    if (
+      !task.entity_id ||
+      task.entity_type !== "leads" ||
+      Number(task.task_type_id) !== Number(CONDUCT_TASK_TYPE_ID) ||
+      task.is_completed !== false
+    ) {
+      continue;
+    }
+
+    const lead = await getLead(task.entity_id);
+
+    if (!lead) {
+      continue;
+    }
+
+    if (!leadBelongsToEngineer(lead)) {
+      continue;
+    }
+
+    let contactName = "";
+    let contactPhones = [];
+
+    const mainContactId = getMainContactId(lead);
+
+    if (mainContactId) {
+      const contact = await getContact(mainContactId);
+
+      if (contact) {
+        contactName = contact.name || "";
+        contactPhones = getContactPhones(contact);
+      }
+    }
+
+    const managerName = await getUserName(lead.responsible_user_id);
+
+    measurements.push({
+      task_id: Number(task.id),
+      lead_id: Number(task.entity_id),
+      lead_link:
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
+      measure_date: formatDateFieldValue(lead, MEASURE_DATE_FIELD_ID),
+      address: getFieldValueJoined(lead, ADDRESS_FIELD_ID),
+      manager_name: managerName,
+      budget:
+        lead.price !== undefined && lead.price !== null
+          ? String(lead.price)
+          : "",
+      discount: getFieldValueJoined(lead, DISCOUNT_FIELD_ID),
+      product: getFieldValueJoined(lead, PRODUCT_FIELD_ID),
+      contract_number: getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID),
+      contact_name: contactName,
+      contact_phones: contactPhones.join(", ")
+    });
+  }
+
+  console.log(`ИТОГО ЗАМЕРОВ (Провести замер): ${measurements.length}`);
+
+  return { measurements };
+}
+
+function formatConductMeasurementLine(item, index) {
+  return (
+    `${index + 1}. ` +
+    `Дата замера: ${item.measure_date || "—"}; ` +
+    `Адрес замера: ${item.address || "—"}; ` +
+    `Ответственный менеджер: ${item.manager_name || "—"}; ` +
+    `Бюджет: ${item.budget || "—"}; ` +
+    `Скидка ОП: ${item.discount || "—"}; ` +
+    `Продукт: ${item.product || "—"}; ` +
+    `Имя клиента: ${item.contact_name || "—"}; ` +
+    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}; ` +
+    `№ договора: ${item.contract_number || "—"}; ` +
+    `Ссылка на сделку: ${item.lead_link}\n`
+  );
+}
+
+function formatConductMeasurementDetail(item) {
+  return (
+    `Дата замера: ${item.measure_date || "—"}\n` +
+    `Адрес замера: ${item.address || "—"}\n` +
+    `Ответственный менеджер: ${item.manager_name || "—"}\n` +
+    `Бюджет: ${item.budget || "—"}\n` +
+    `Скидка ОП: ${item.discount || "—"}\n` +
+    `Продукт: ${item.product || "—"}\n` +
+    `Имя клиента: ${item.contact_name || "—"}\n` +
+    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}\n` +
+    `№ договора: ${item.contract_number || "—"}\n` +
+    `Ссылка на сделку: ${item.lead_link}`
+  );
+}
+
+// Общая функция поиска + показа списка для "Провести замер",
+// по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
+async function searchAndPresentConductMeasurements(send) {
+  let shouldFinish = true;
+
+  try {
+    const result = await findConductMeasurementTasks();
+
+    if (result.measurements.length === 0) {
+      await send("📋 Замеров для проведения не найдено.");
+    } else {
+      let message = "📋 Найдены замеры:\n\n";
+
+      result.measurements.forEach((item, index) => {
+        message += formatConductMeasurementLine(item, index);
+      });
+
+      const buttons = result.measurements.map(
+        (item) =>
+          item.contract_number || `Задача ${item.task_id}`
+      );
+
+      await send(message, buttons);
+
+      shouldFinish = false;
+    }
+  } catch (error) {
+    console.error(
+      "Ошибка поиска замеров (Провести замер):",
+      error.message
+    );
+
+    try {
+      await send(
+        "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
+      );
+    } catch (sendError) {
+      console.error("Ошибка отправки ошибки:", sendError.message);
+    }
+  }
+
+  return shouldFinish;
+}
+
+// Ждём (до 30 секунд), пока в сделке появится задача типа
+// "Рез-т замера(и)" (id 2746013), которую ставит Sensei после того,
+// как мы завершили задачу "Провести зам.(и)" с результатом
+// "Замер состоялся". Проверяем каждые 3 секунды, максимум 10 раз.
+async function waitForResultTask(leadId) {
+  const url = `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    const response = await amoCrmGet(url, {
+      limit: 50,
+      "filter[entity_type]": "leads",
+      "filter[entity_id][0]": leadId,
+      "filter[task_type][0]": RESULT_TASK_TYPE_ID,
+      "filter[is_completed]": 0
+    });
+
+    if (response.status === 200) {
+      const tasks =
+        response.data &&
+        Array.isArray(response.data._embedded?.tasks)
+          ? response.data._embedded.tasks
+          : [];
+
+      const found = tasks.find(
+        (t) =>
+          Number(t.task_type_id) === Number(RESULT_TASK_TYPE_ID) &&
+          t.is_completed === false
+      );
+
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+// ============================================================
 // DEBUG: STATUS
 // ============================================================
 
@@ -1412,7 +2002,13 @@ app.get("/status", (req, res) => {
     engineer_enum_id:
       ENGINEER_ENUM_ID,
     task_type_id:
-      MEASUREMENT_TASK_TYPE_ID
+      MEASUREMENT_TASK_TYPE_ID,
+    conduct_task_type_id:
+      CONDUCT_TASK_TYPE_ID,
+    result_task_type_id:
+      RESULT_TASK_TYPE_ID,
+    yandex_disk_token:
+      YANDEX_DISK_TOKEN ? "ДА" : "НЕТ"
   });
 });
 
@@ -2009,7 +2605,8 @@ async function processUserMessage({
   userKey,
   send,
   finish,
-  showMenuOnUnknown
+  showMenuOnUnknown,
+  imageUrls
 }) {
   const trimmedText = (text || "").trim();
 
@@ -2109,10 +2706,77 @@ async function processUserMessage({
   }
 
   // ------------------------------------------------------
+  // ОЖИДАЕМ ФОТО ДОГОВОРА (после кнопки "Заключен договор")
+  // ------------------------------------------------------
+
+  const pendingPhoto = userPendingPhotoUpload[userKey];
+
+  if (pendingPhoto) {
+    // Кнопка "Готово" — пользователь закончил загрузку фото
+    if (trimmedText === "Готово") {
+      await send("✅ Фото сохранены. Спасибо!");
+
+      delete userPendingPhotoUpload[userKey];
+
+      await finish();
+
+      return;
+    }
+
+    if (imageUrls && imageUrls.length > 0) {
+      let uploaded = 0;
+
+      for (const url of imageUrls) {
+        try {
+          const fileName =
+            `photo_${Date.now()}_${uploaded + 1}.jpg`;
+
+          await ydUploadFromUrl(
+            `${pendingPhoto.contract_path}/${fileName}`,
+            url
+          );
+
+          uploaded++;
+        } catch (error) {
+          console.error(
+            "Ошибка загрузки фото на Яндекс.Диск:",
+            error.message
+          );
+        }
+      }
+
+      if (uploaded > 0) {
+        await send(
+          `Фото получено (${uploaded}). Когда закончите — нажмите «Готово».`,
+          ["Готово"]
+        );
+      } else {
+        await send(
+          "❌ Не удалось сохранить фото на Яндекс.Диске. " +
+            "Попробуйте ещё раз или нажмите «Готово», чтобы закончить.",
+          ["Готово"]
+        );
+      }
+
+      return;
+    }
+
+    // Пока ждём фото, любое другое сообщение — просто напоминание
+    await send(
+      "Загрузите фото договора и нажмите «Готово», когда закончите.",
+      ["Готово"]
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
   // ПОДТВЕРДИТЬ ЗАМЕР
   // ------------------------------------------------------
 
   if (trimmedText === "Подтвердить замер") {
+    userLastSearchMode[userKey] = "confirm";
+
     console.log(
       "=========================================="
     );
@@ -2144,11 +2808,30 @@ async function processUserMessage({
   // ------------------------------------------------------
 
   if (trimmedText === "Провести замер") {
-    await send(
-      "Функция «Провести замер» пока находится в разработке."
+    console.log(
+      "=========================================="
     );
 
-    await finish();
+    console.log(
+      "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ПРОВЕСТИ ЗАМЕР"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    userLastSearchMode[userKey] = "conduct";
+
+    await send(
+      "⏳ Проверяю задачи на проведение замера..."
+    );
+
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
@@ -2306,69 +2989,288 @@ async function processUserMessage({
   }
 
   // ------------------------------------------------------
+  // ЗАМЕР СОСТОЯЛСЯ (сценарий "Провести замер")
+  // ------------------------------------------------------
+
+  if (trimmedText === "Замер состоялся") {
+    const stored = userSelectedConductMeasurement[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл, какой замер вы отмечаете. " +
+          "Пожалуйста, начните заново: нажмите «Провести замер» " +
+          "и выберите нужную задачу из списка."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.task_id,
+        "Замер состоялся"
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Замер состоялся):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userSelectedConductMeasurement[userKey];
+
+    await send(
+      "⏳ Ожидаю, пока в сделке появится следующая задача..."
+    );
+
+    const resultTask = await waitForResultTask(stored.lead_id);
+
+    if (!resultTask) {
+      await send(
+        "❌ Не дождался появления задачи «Рез-т замера(и)» в сделке " +
+          "(прошло 30 секунд). Проверьте сделку в amoCRM вручную " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingResultTask[userKey] = {
+      lead_id: stored.lead_id,
+      result_task_id: Number(resultTask.id)
+    };
+
+    await send("Укажите результат замера", [
+      "Заключен договор",
+      "Нужно подготовить КП и/или черновой проект",
+      "Думает (свяжусь сам)",
+      "Думает/отказ (передать менеджеру)"
+    ]);
+
+    return;
+  }
+
+  if (trimmedText === "Замер не состоялся") {
+    await send(
+      "Функция «Замер не состоялся» пока находится в разработке."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ЗАКЛЮЧЕН ДОГОВОР
+  // ------------------------------------------------------
+
+  if (trimmedText === "Заключен договор") {
+    const stored = userPendingResultTask[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл задачу «Рез-т замера(и)» для этой сделки. " +
+          "Пожалуйста, начните заново: нажмите «Провести замер»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Заключен договор"
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Заключен договор):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    let folders;
+
+    try {
+      const lead = await getLead(stored.lead_id);
+
+      folders = await ensureLeadYandexFolders(lead);
+    } catch (error) {
+      console.error(
+        "Ошибка подготовки папок на Яндекс.Диске:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+          "Подробности есть в логах Render."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingPhotoUpload[userKey] = {
+      lead_id: stored.lead_id,
+      contract_path: folders.contractPath
+    };
+
+    delete userPendingResultTask[userKey];
+
+    await send("Загрузите фото договора", ["Готово"]);
+
+    return;
+  }
+
+  if (
+    trimmedText === "Нужно подготовить КП и/или черновой проект" ||
+    trimmedText === "Думает (свяжусь сам)" ||
+    trimmedText === "Думает/отказ (передать менеджеру)"
+  ) {
+    await send(
+      `Функция «${trimmedText}» пока находится в разработке.`
+    );
+
+    await finish();
+
+    return;
+  }
+
+  // ------------------------------------------------------
   // ВЫБОР КОНКРЕТНОГО ЗАМЕРА ПО НОМЕРУ ДОГОВОРА
   // (нажатие на одну из кнопок из списка замеров, п.5)
+  //
+  // Список может быть либо из "Подтвердить замер" (confirm),
+  // либо из "Провести замер" (conduct) — смотрим, какой список
+  // пользователь видел последним, чтобы искать номер договора
+  // в нужном месте и показать нужный набор кнопок дальше.
   // ------------------------------------------------------
 
   if (trimmedText) {
-    try {
-      const result = await findMeasurementTasks();
+    const mode = userLastSearchMode[userKey];
 
-      const selected = result.measurements.find(
-        (item) =>
-          String(item.contract_number).trim() ===
-          trimmedText
-      );
+    if (mode === "conduct") {
+      try {
+        const result = await findConductMeasurementTasks();
 
-      if (selected) {
-        console.log(
-          "=========================================="
+        const selected = result.measurements.find(
+          (item) =>
+            String(item.contract_number).trim() === trimmedText
         );
 
-        console.log(
-          "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
-          trimmedText
+        if (selected) {
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР (Провести замер):",
+            trimmedText
+          );
+
+          userSelectedConductMeasurement[userKey] = {
+            task_id: selected.task_id,
+            lead_id: selected.lead_id,
+            contract_number: selected.contract_number
+          };
+
+          await send(formatConductMeasurementDetail(selected), [
+            "Замер состоялся",
+            "Замер не состоялся"
+          ]);
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка при выборе замера (Провести замер):",
+          error.message
         );
-
-        console.log(
-          "=========================================="
-        );
-
-        const detailMessage =
-          `Дата замера: ${selected.measure_date || "—"}\n` +
-          `Время замера: ${selected.measure_time || "—"}\n` +
-          `Адрес замера: ${selected.address || "—"}\n` +
-          `Продукт: ${selected.product || "—"}\n` +
-          `Имя контакта: ${selected.contact_name || "—"}\n` +
-          `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
-          `№ договора: ${selected.contract_number || "—"}\n` +
-          `Ссылка на сделку: ${selected.lead_link}`;
-
-        // Запоминаем, какой именно замер (задача + сделка)
-        // выбрал этот пользователь — понадобится, когда он
-        // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
-        userSelectedMeasurement[userKey] = {
-          task_id: selected.task_id,
-          lead_id: selected.lead_id,
-          contract_number: selected.contract_number
-        };
-
-        await send(detailMessage, [
-          "Замер подтвержден",
-          "Перенос замера",
-          "Отказ"
-        ]);
-
-        // Управление НЕ возвращаем — ждём, что пользователь
-        // нажмёт одну из кнопок выше.
-
-        return;
       }
-    } catch (error) {
-      console.error(
-        "Ошибка при выборе замера:",
-        error.message
-      );
+    } else {
+      try {
+        const result = await findMeasurementTasks();
+
+        const selected = result.measurements.find(
+          (item) =>
+            String(item.contract_number).trim() ===
+            trimmedText
+        );
+
+        if (selected) {
+          console.log(
+            "=========================================="
+          );
+
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР:",
+            trimmedText
+          );
+
+          console.log(
+            "=========================================="
+          );
+
+          const detailMessage =
+            `Дата замера: ${selected.measure_date || "—"}\n` +
+            `Время замера: ${selected.measure_time || "—"}\n` +
+            `Адрес замера: ${selected.address || "—"}\n` +
+            `Продукт: ${selected.product || "—"}\n` +
+            `Имя контакта: ${selected.contact_name || "—"}\n` +
+            `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
+            `№ договора: ${selected.contract_number || "—"}\n` +
+            `Ссылка на сделку: ${selected.lead_link}`;
+
+          // Запоминаем, какой именно замер (задача + сделка)
+          // выбрал этот пользователь — понадобится, когда он
+          // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
+          userSelectedMeasurement[userKey] = {
+            task_id: selected.task_id,
+            lead_id: selected.lead_id,
+            contract_number: selected.contract_number
+          };
+
+          await send(detailMessage, [
+            "Замер подтвержден",
+            "Перенос замера",
+            "Отказ"
+          ]);
+
+          // Управление НЕ возвращаем — ждём, что пользователь
+          // нажмёт одну из кнопок выше.
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка при выборе замера:",
+          error.message
+        );
+      }
     }
   }
 
@@ -2388,6 +3290,60 @@ async function processUserMessage({
   }
 
   await finish();
+}
+
+// ============================================================
+// ИЗВЛЕЧЕНИЕ ССЫЛОК НА ФОТО ИЗ СООБЩЕНИЯ ВЕБХУКА
+// ============================================================
+//
+// ВАЖНО: точная структура, в которой amoMessenger присылает
+// прикреплённые фото в вебхуке, заранее неизвестна (в открытой
+// документации это не описано детально). Поэтому здесь используется
+// "защищённый" способ — бот сам обходит весь объект входящего
+// сообщения и ищет любые строки, похожие на прямую ссылку на
+// изображение (заканчивающиеся на .jpg/.jpeg/.png/.gif/.webp).
+//
+// Полное содержимое вебхука в любом случае пишется в лог Render
+// (см. лог "AMOMESSENGER WEBHOOK" при получении сообщения) — если
+// после первого реального теста с фото окажется, что бот не находит
+// ссылку, нужно открыть этот лог, найти там, в каком именно поле
+// пришла ссылка на фото, и сообщить мне — я поправлю функцию точно
+// под этот формат.
+
+function extractImageUrlsFromMessage(message) {
+  const urls = [];
+
+  function walk(value) {
+    if (!value) {
+      return;
+    }
+
+    if (typeof value === "string") {
+      if (
+        /^https?:\/\/\S+\.(jpe?g|png|gif|webp)(\?\S*)?$/i.test(
+          value.trim()
+        )
+      ) {
+        urls.push(value.trim());
+      }
+
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach(walk);
+
+      return;
+    }
+
+    if (typeof value === "object") {
+      Object.values(value).forEach(walk);
+    }
+  }
+
+  walk(message);
+
+  return [...new Set(urls)];
 }
 
 // ============================================================
@@ -2482,13 +3438,20 @@ app.post(
           return;
         }
 
+        const imageUrls = extractImageUrlsFromMessage(message);
+
+        if (imageUrls.length > 0) {
+          log("НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ", imageUrls);
+        }
+
         await processUserMessage({
           text,
           userKey,
           send: (msgText, buttons) =>
             sendDirectMessage(directId, msgText, buttons),
           finish: async () => {},
-          showMenuOnUnknown: true
+          showMenuOnUnknown: true,
+          imageUrls
         });
 
         return;
@@ -2633,6 +3596,13 @@ app.post(
           return;
         }
 
+        const imageUrls =
+          extractImageUrlsFromMessage(incomeMessage);
+
+        if (imageUrls.length > 0) {
+          log("НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ (RPA)", imageUrls);
+        }
+
         await processUserMessage({
           text,
           userKey: receiverUserId,
@@ -2646,7 +3616,8 @@ app.post(
             ),
           finish: () =>
             returnControl(botId, requestId),
-          showMenuOnUnknown: false
+          showMenuOnUnknown: false,
+          imageUrls
         });
 
         return;
