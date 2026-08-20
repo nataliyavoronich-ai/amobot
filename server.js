@@ -179,6 +179,8 @@ const userPendingResultTask = {};
 // папку на Яндекс.Диске сохранять фото для этой сделки.
 const userPendingPhotoUpload = {};
 
+const userPhotoUploadQueue = {};
+
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"),
 // чтобы не запрашивать одного и того же пользователя много раз подряд.
 const amoCrmUsersCache = {};
@@ -2905,49 +2907,140 @@ async function processUserMessage({
       return;
     }
 
-    if (imageUrls && imageUrls.length > 0) {
-      let uploaded = 0;
+   if (
+  imageUrls &&
+  imageUrls.length > 0
+) {
+  // --------------------------------------------------------
+  // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
+  //
+  // amoMessenger может прислать несколько фотографий как
+  // несколько отдельных webhook практически одновременно.
+  //
+  // Для одного пользователя мы обрабатываем их строго
+  // последовательно.
+  // --------------------------------------------------------
 
-      for (const url of imageUrls) {
-        try {
-          const fileName =
-  buildContractFileName(
-    pendingPhoto.contract_date_text,
-    pendingPhoto.next_file_number
-  );
+  const previousQueue =
+    userPhotoUploadQueue[userKey] ||
+    Promise.resolve();
 
-await ydUploadFromUrl(
-  `${pendingPhoto.contract_path}/${fileName}`,
-  url
-);
+  const currentQueue =
+    previousQueue
+      .catch(() => {
+        // Не даём ошибке предыдущей загрузки
+        // остановить очередь.
+      })
+      .then(async () => {
+        // ВАЖНО:
+        // Получаем актуальное состояние внутри очереди,
+        // а не используем pendingPhoto, полученный до ожидания.
+        const currentPendingPhoto =
+          userPendingPhotoUpload[
+            userKey
+          ];
 
-// Увеличиваем номер только после успешной загрузки.
-pendingPhoto.next_file_number++;
+        if (
+          !currentPendingPhoto
+        ) {
+          return;
+        }
 
-uploaded++;
-        } catch (error) {
-          console.error(
-            "Ошибка загрузки фото на Яндекс.Диск:",
-            error.message
+        let uploaded = 0;
+
+        for (
+          const url of imageUrls
+        ) {
+          try {
+            // Берём номер непосредственно перед загрузкой.
+            const currentNumber =
+              currentPendingPhoto
+                .next_file_number;
+
+            const fileName =
+              buildContractFileName(
+                currentPendingPhoto
+                  .contract_date_text,
+                currentNumber
+              );
+
+            console.log(
+              "Загружаю фото договора:",
+              {
+                userKey,
+                url,
+                fileName,
+                number:
+                  currentNumber
+              }
+            );
+
+            await ydUploadFromUrl(
+              `${currentPendingPhoto.contract_path}/${fileName}`,
+              url
+            );
+
+            // Номер увеличиваем только после успешного
+            // запуска загрузки на Яндекс.Диск.
+            currentPendingPhoto
+              .next_file_number =
+                currentNumber + 1;
+
+            uploaded++;
+
+            console.log(
+              "Фото успешно отправлено на Яндекс.Диск:",
+              fileName
+            );
+          } catch (error) {
+            console.error(
+              "Ошибка загрузки фото на Яндекс.Диск:",
+              error.message
+            );
+          }
+        }
+
+        if (
+          uploaded > 0
+        ) {
+          await send(
+            `Фото получено (${uploaded}). ` +
+            "Когда закончите — нажмите «Готово».",
+            ["Готово"]
+          );
+        } else {
+          await send(
+            "❌ Не удалось сохранить фото на Яндекс.Диске. " +
+            "Попробуйте ещё раз или нажмите «Готово», " +
+            "чтобы закончить.",
+            ["Готово"]
           );
         }
-      }
+      });
 
-      if (uploaded > 0) {
-        await send(
-          `Фото получено (${uploaded}). Когда закончите — нажмите «Готово».`,
-          ["Готово"]
-        );
-      } else {
-        await send(
-          "❌ Не удалось сохранить фото на Яндекс.Диске. " +
-            "Попробуйте ещё раз или нажмите «Готово», чтобы закончить.",
-          ["Готово"]
-        );
-      }
+  userPhotoUploadQueue[
+    userKey
+  ] =
+    currentQueue;
 
-      return;
+  try {
+    await currentQueue;
+  } finally {
+    // Удаляем очередь только если она всё ещё является
+    // последней очередью этого пользователя.
+    if (
+      userPhotoUploadQueue[
+        userKey
+      ] === currentQueue
+    ) {
+      delete userPhotoUploadQueue[
+        userKey
+      ];
     }
+  }
+
+  return;
+}
 
     // Пока ждём фото, любое другое сообщение — просто напоминание
     await send(
@@ -3555,40 +3648,170 @@ return;
 // пришла ссылка на фото, и сообщить мне — я поправлю функцию точно
 // под этот формат.
 
+// ============================================================
+// ИЗВЛЕЧЕНИЕ ССЫЛОК НА ФОТО ИЗ СООБЩЕНИЯ AMOMESSENGER
+// ============================================================
+
 function extractImageUrlsFromMessage(message) {
   const urls = [];
+
+  if (!message) {
+    return urls;
+  }
+
+  // --------------------------------------------------------
+  // ПРЯМОЕ ИЗВЛЕЧЕНИЕ ИЗ attachments
+  //
+  // Реальный webhook amoMessenger приходит в формате:
+  //
+  // attachments: [
+  //   {
+  //     type: "photo",
+  //     photo: {
+  //       filename: "...",
+  //       link: "[https://...](https://...)"
+  //     }
+  //   }
+  // ]
+  // --------------------------------------------------------
+
+  if (
+    Array.isArray(message.attachments)
+  ) {
+    for (
+      const attachment of message.attachments
+    ) {
+      if (
+        attachment &&
+        attachment.type === "photo" &&
+        attachment.photo &&
+        attachment.photo.link
+      ) {
+        const cleanUrl =
+          normalizeAmoMessengerFileUrl(
+            attachment.photo.link
+          );
+
+        if (cleanUrl) {
+          urls.push(
+            cleanUrl
+          );
+        }
+      }
+    }
+  }
+
+  // --------------------------------------------------------
+  // ДОПОЛНИТЕЛЬНЫЙ ПОИСК НА СЛУЧАЙ ДРУГОЙ СТРУКТУРЫ WEBHOOK
+  // --------------------------------------------------------
 
   function walk(value) {
     if (!value) {
       return;
     }
 
-    if (typeof value === "string") {
-      if (
-        /^https?:\/\/\S+\.(jpe?g|png|gif|webp)(\?\S*)?$/i.test(
-          value.trim()
-        )
-      ) {
-        urls.push(value.trim());
+    if (
+      typeof value === "string"
+    ) {
+      const cleanUrl =
+        normalizeAmoMessengerFileUrl(
+          value
+        );
+
+      if (cleanUrl) {
+        urls.push(
+          cleanUrl
+        );
       }
 
       return;
     }
 
-    if (Array.isArray(value)) {
-      value.forEach(walk);
+    if (
+      Array.isArray(value)
+    ) {
+      for (
+        const item of value
+      ) {
+        walk(item);
+      }
 
       return;
     }
 
-    if (typeof value === "object") {
-      Object.values(value).forEach(walk);
+    if (
+      typeof value === "object"
+    ) {
+      for (
+        const item of Object.values(value)
+      ) {
+        walk(item);
+      }
     }
   }
 
   walk(message);
 
-  return [...new Set(urls)];
+  return [
+    ...new Set(urls)
+  ];
+}
+
+
+// ============================================================
+// ОЧИСТКА ССЫЛКИ AMOMESSENGER
+// ============================================================
+
+function normalizeAmoMessengerFileUrl(
+  value
+) {
+  if (
+    !value ||
+    typeof value !== "string"
+  ) {
+    return null;
+  }
+
+  const text =
+    value.trim();
+
+  // --------------------------------------------------------
+  // Формат Markdown:
+  //
+  // [https://example.com/file.jpg](https://example.com/file.jpg)
+  //
+  // Берём URL из круглых скобок.
+  // --------------------------------------------------------
+
+  const markdownMatch =
+    text.match(
+      /\]\((https?:\/\/[^)\s]+)\)/
+    );
+
+  if (
+    markdownMatch &&
+    markdownMatch[1]
+  ) {
+    return markdownMatch[1];
+  }
+
+  // --------------------------------------------------------
+  // Обычная прямая ссылка.
+  // --------------------------------------------------------
+
+  const directMatch =
+    text.match(
+      /(https?:\/\/[^\s\])]+)/
+    );
+
+  if (
+    directMatch &&
+    directMatch[1]
+  ) {
+    return directMatch[1];
+  }
+
+  return null;
 }
 
 // ============================================================
