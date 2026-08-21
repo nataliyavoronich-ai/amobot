@@ -66,6 +66,11 @@ const CONDUCT_TASK_TYPE_ID = 2746009;
 // с результатом "Замер состоялся"
 const RESULT_TASK_TYPE_ID = 2746013;
 
+// Тип задачи "Указать рез-т(и)" — появляется в сделке автоматически
+// после того, как бот завершает задачу "Рез-т замера(и)" через Sensei
+// с результатом "Нужно подготовить КП и/или черновой проект"
+const KP_TASK_TYPE_ID = 2774021;
+
 // Поля сделки, которые нужно выводить в сообщениях бота
 const CONTRACT_NUMBER_FIELD_ID = 412776; // № договора (текст)
 const MEASURE_DATE_FIELD_ID = 175370; // Дата замера (дата)
@@ -234,6 +239,13 @@ const userSelectedConductMeasurement = {};
 // пор, пока пользователь не выберет результат замера.
 const userPendingResultTask = {};
 
+// После нажатия "Нужно подготовить КП и/или черновой проект" бот
+// ждёт, пока в сделке появится новая задача "Указать рез-т(и)"
+// (id 2774021). Здесь храним lead_id/task_id этой новой задачи —
+// до тех пор, пока пользователь не выберет, что именно нужно
+// подготовить клиенту.
+const userPendingKpTask = {};
+
 // После нажатия "Заключен договор" бот просит загрузить фото и
 // ждёт фотографии + нажатие кнопки "Готово". Здесь храним, в какую
 // папку на Яндекс.Диске сохранять фото для этой сделки.
@@ -252,6 +264,7 @@ function resetUserState(userKey) {
   delete userLastSearchMode[userKey];
   delete userSelectedConductMeasurement[userKey];
   delete userPendingResultTask[userKey];
+  delete userPendingKpTask[userKey];
   delete userPendingPhotoUpload[userKey];
   delete userPhotoUploadQueue[userKey];
 }
@@ -2316,7 +2329,7 @@ async function searchAndPresentConductMeasurements(send) {
 // "Рез-т замера(и)" (id 2746013), которую ставит Sensei после того,
 // как мы завершили задачу "Провести зам.(и)" с результатом
 // "Замер состоялся". Проверяем каждые 3 секунды, максимум 10 раз.
-async function waitForResultTask(leadId) {
+async function waitForTaskOfType(leadId, taskTypeId) {
   const url = `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
 
   for (let attempt = 0; attempt < 10; attempt++) {
@@ -2326,7 +2339,7 @@ async function waitForResultTask(leadId) {
       limit: 50,
       "filter[entity_type]": "leads",
       "filter[entity_id][0]": leadId,
-      "filter[task_type][0]": RESULT_TASK_TYPE_ID,
+      "filter[task_type][0]": taskTypeId,
       "filter[is_completed]": 0
     });
 
@@ -2339,7 +2352,7 @@ async function waitForResultTask(leadId) {
 
       const found = tasks.find(
         (t) =>
-          Number(t.task_type_id) === Number(RESULT_TASK_TYPE_ID) &&
+          Number(t.task_type_id) === Number(taskTypeId) &&
           t.is_completed === false
       );
 
@@ -2350,6 +2363,10 @@ async function waitForResultTask(leadId) {
   }
 
   return null;
+}
+
+async function waitForResultTask(leadId) {
+  return waitForTaskOfType(leadId, RESULT_TASK_TYPE_ID);
 }
 
 // ============================================================
@@ -2380,6 +2397,8 @@ app.get("/status", (req, res) => {
       CONDUCT_TASK_TYPE_ID,
     result_task_type_id:
       RESULT_TASK_TYPE_ID,
+        kp_task_type_id:
+      KP_TASK_TYPE_ID,
     yandex_disk_token:
       YANDEX_DISK_TOKEN ? "ДА" : "НЕТ"
   });
@@ -3055,9 +3074,12 @@ async function processUserMessage({
       "=========================================="
     );
 
-    if (!comment) {
+        if (!comment) {
+      const promptLabel =
+        pendingComment.promptText || "Укажите комментарий";
+
       await send(
-        "Комментарий не может быть пустым. Укажите комментарий"
+        `Комментарий не может быть пустым. ${promptLabel}`
       );
 
       return;
@@ -3104,11 +3126,14 @@ async function processUserMessage({
     delete userPendingComment[userKey];
     delete userSelectedMeasurement[userKey];
 
-    // Возвращаемся к шагу поиска других задач замера и
-    // показываем список (или сообщение, что задач больше нет).
+    // Возвращаемся к шагу поиска: для сценария "Подтвердить замер" —
+    // это список подтверждения, а для сценария "Провести замер"
+    // (например, после "Замер не состоялся") — список проведения.
 
     const shouldFinish =
-      await searchAndPresentMeasurements(send);
+      pendingComment.afterSearchMode === "conduct"
+        ? await searchAndPresentConductMeasurements(send)
+        : await searchAndPresentMeasurements(send);
 
     if (shouldFinish) {
       await finish();
@@ -3648,7 +3673,6 @@ async function processUserMessage({
 
     return;
   }
-
   const notConductedMeasurementId = parseTaggedButton(
     trimmedText,
     "Замер не состоялся"
@@ -3670,11 +3694,22 @@ async function processUserMessage({
       return;
     }
 
-    await send(
-      "Функция «Замер не состоялся» пока находится в разработке."
-    );
+    userPendingComment[userKey] = {
+      task_id: stored.task_id,
+      lead_id: stored.lead_id,
+      resultCaption: "Замер не состоялся (указать причину)",
+      displayResult: "Замер не состоялся",
+      promptText: "Укажите причину",
+      afterSearchMode: "conduct"
+    };
 
-    await finish();
+    delete userSelectedConductMeasurement[userKey];
+
+    await send("Укажите причину");
+
+    // Управление НЕ возвращаем — ждём следующим сообщением текст
+    // причины (его обработает тот же блок, что и "Перенос замера" /
+    // "Отказ", см. userPendingComment выше по коду).
 
     return;
   }
@@ -3815,16 +3850,199 @@ await send(
 return;
   }
 
+    // ------------------------------------------------------
+  // ДУМАЕТ (СВЯЖУСЬ САМ) / ДУМАЕТ-ОТКАЗ (ПЕРЕДАТЬ МЕНЕДЖЕРУ)
+  // ------------------------------------------------------
+
   if (
-    trimmedText === "Нужно подготовить КП и/или черновой проект" ||
     trimmedText === "Думает (свяжусь сам)" ||
     trimmedText === "Думает/отказ (передать менеджеру)"
   ) {
+    const stored = userPendingResultTask[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл задачу «Рез-т замера(и)» для этой сделки. " +
+          "Пожалуйста, начните заново: нажмите «Провести замер»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        trimmedText
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (" + trimmedText + "):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingResultTask[userKey];
+
     await send(
-      `Функция «${trimmedText}» пока находится в разработке.`
+      `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    await finish();
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // НУЖНО ПОДГОТОВИТЬ КП И/ИЛИ ЧЕРНОВОЙ ПРОЕКТ
+  // ------------------------------------------------------
+
+  if (trimmedText === "Нужно подготовить КП и/или черновой проект") {
+    const stored = userPendingResultTask[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл задачу «Рез-т замера(и)» для этой сделки. " +
+          "Пожалуйста, начните заново: нажмите «Провести замер»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.result_task_id,
+        "Нужно подготовить КП и/или черновой проект"
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Нужно подготовить КП):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingResultTask[userKey];
+
+    await send("⏳ Ожидаю, пока в сделке появится следующая задача...");
+
+    const kpTask = await waitForTaskOfType(
+      stored.lead_id,
+      KP_TASK_TYPE_ID
+    );
+
+    if (!kpTask) {
+      await send(
+        "❌ Не дождался появления задачи «Указать рез-т(и)» в сделке " +
+          "(прошло 30 секунд). Проверьте сделку в amoCRM вручную " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    userPendingKpTask[userKey] = {
+      lead_id: stored.lead_id,
+      kp_task_id: Number(kpTask.id)
+    };
+
+    await send("Укажите что нужно подготовить клиенту", [
+      "КП",
+      "Черновой проект",
+      "КП + черновой проект"
+    ]);
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ВЫБОР: КП / ЧЕРНОВОЙ ПРОЕКТ / КП + ЧЕРНОВОЙ ПРОЕКТ
+  // ------------------------------------------------------
+
+  if (
+    trimmedText === "КП" ||
+    trimmedText === "Черновой проект" ||
+    trimmedText === "КП + черновой проект"
+  ) {
+    const stored = userPendingKpTask[userKey];
+
+    if (!stored) {
+      await send(
+        "Не нашёл задачу «Указать рез-т(и)» для этой сделки. " +
+          "Пожалуйста, начните заново: нажмите «Провести замер»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        stored.lead_id,
+        stored.kp_task_id,
+        trimmedText
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Указать рез-т):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingKpTask[userKey];
+
+    await send(
+      `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
+    );
+
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
