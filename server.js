@@ -2079,6 +2079,120 @@ function formatConductMeasurementDetail(item) {
   );
 }
 
+// ============================================================
+// "ПРИВЯЗКА" КНОПОК К КОНКРЕТНОМУ ЗАМЕРУ
+// ============================================================
+//
+// В API amoMessenger нет метода для того, чтобы погасить/убрать
+// inline-кнопки уже отправленного сообщения (есть только sendMessage
+// и returnControl — см. https://developers.amo.tm/docs/). Поэтому
+// старые кнопки в чате физически остаются кликабельными и после
+// того, как появился новый список/новая карточка замера.
+//
+// Чтобы бот не выполнил действие "не над тем" замером, если
+// пользователь всё-таки нажмёт кнопку из УЖЕ НЕАКТУАЛЬНОГО
+// сообщения, в текст кнопки зашивается идентификатор замера
+// (номер договора, либо, если его нет, id задачи). При получении
+// нажатия бот сверяет идентификатор из кнопки с тем замером,
+// который сейчас реально сохранён как "текущий" для пользователя —
+// и если они не совпадают (или "текущего" уже нет), не выполняет
+// действие вслепую, а сообщает, что кнопка устарела.
+
+function buildMeasurementIdentifier(item) {
+  return item && item.contract_number
+    ? `№${item.contract_number}`
+    : `задача ${item && item.task_id}`;
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildTaggedButton(label, identifier) {
+  return `${label} (${identifier})`;
+}
+
+// Возвращает идентификатор, зашитый в кнопку, если trimmedText —
+// это именно кнопка с данным label; иначе null (значит, это не
+// нажатие данной кнопки вообще).
+function parseTaggedButton(text, label) {
+  const pattern = new RegExp(
+    `^${escapeRegExp(label)} \\((.+)\\)$`
+  );
+
+  const match = String(text || "").match(pattern);
+
+  return match ? match[1] : null;
+}
+
+function formatMeasurementDetail(item) {
+  return (
+    `Дата замера: ${item.measure_date || "—"}\n` +
+    `Время замера: ${item.measure_time || "—"}\n` +
+    `Адрес замера: ${item.address || "—"}\n` +
+    `Продукт: ${item.product || "—"}\n` +
+    `Имя контакта: ${item.contact_name || "—"}\n` +
+    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}\n` +
+    `№ договора: ${item.contract_number || "—"}\n` +
+    `Ссылка на сделку: ${item.lead_link}`
+  );
+}
+
+function buildMeasurementActionButtons(item) {
+  const id = buildMeasurementIdentifier(item);
+
+  return [
+    buildTaggedButton("Замер подтвержден", id),
+    buildTaggedButton("Перенос замера", id),
+    buildTaggedButton("Отказ", id)
+  ];
+}
+
+function buildConductActionButtons(item) {
+  const id = buildMeasurementIdentifier(item);
+
+  return [
+    buildTaggedButton("Замер состоялся", id),
+    buildTaggedButton("Замер не состоялся", id)
+  ];
+}
+
+// Сообщает пользователю, что нажатая кнопка относится к уже
+// неактуальному сообщению, и (если для него есть текущий сохранённый
+// замер) заново показывает его карточку со свежими, актуальными
+// кнопками — чтобы можно было сразу продолжить работу с правильным
+// замером, не начиная поиск заново.
+async function sendStaleButtonNotice(send, currentStoredItem, kind) {
+  if (currentStoredItem) {
+    await send(
+      "⚠️ Это кнопка из уже неактуального сообщения — сейчас в работе " +
+        "другой замер. Вот его карточка ещё раз:"
+    );
+
+    if (kind === "conduct") {
+      await send(
+        formatConductMeasurementDetail(currentStoredItem),
+        buildConductActionButtons(currentStoredItem)
+      );
+    } else {
+      await send(
+        formatMeasurementDetail(currentStoredItem),
+        buildMeasurementActionButtons(currentStoredItem)
+      );
+    }
+
+    return;
+  }
+
+  await send(
+    "⚠️ Это кнопка из уже неактуального сообщения — замер уже " +
+      "обработан или сессия обновилась. Пожалуйста, начните заново: " +
+      (kind === "conduct"
+        ? "нажмите «Провести замер»."
+        : "нажмите «Подтвердить замер».")
+  );
+}
+
 // Общая функция поиска + показа списка для "Провести замер",
 // по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
 async function searchAndPresentConductMeasurements(send) {
@@ -3142,7 +3256,12 @@ async function processUserMessage({
   // (нажатие на кнопку после показа деталей замера)
   // ------------------------------------------------------
 
-  if (trimmedText === "Замер подтвержден") {
+  const confirmedMeasurementId = parseTaggedButton(
+    trimmedText,
+    "Замер подтвержден"
+  );
+
+  if (confirmedMeasurementId !== null) {
     console.log(
       "=========================================="
     );
@@ -3157,14 +3276,20 @@ async function processUserMessage({
 
     const stored = userSelectedMeasurement[userKey];
 
-    if (!stored) {
-      await send(
-        "Не нашёл, какой замер вы подтверждаете. " +
-          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-          "и выберите нужную задачу из списка."
-      );
+    if (
+      !stored ||
+      buildMeasurementIdentifier(stored) !== confirmedMeasurementId
+    ) {
+      await sendStaleButtonNotice(send, stored, "confirm");
 
-      await finish();
+      // Если реально сохранённого замера нет — сессии ждать больше
+      // нечего, отдаём управление. Если он есть — мы только что
+      // заново показали его карточку с актуальными кнопками, и
+      // управление возвращать рано: ждём, что пользователь нажмёт
+      // одну из них.
+      if (!stored) {
+        await finish();
+      }
 
       return;
     }
@@ -3194,9 +3319,23 @@ async function processUserMessage({
           "Подробности есть в логах Render. Попробуйте ещё раз " +
           "или обратитесь к администратору."
       );
+
+      await finish();
+
+      return;
     }
 
-    await finish();
+    // Как и после переноса/отказа — возвращаемся к шагу поиска
+    // остальных задач замера и показываем список (или сообщение,
+    // что задач больше нет), вместо того чтобы сразу отдавать
+    // управление amoMessenger.
+
+    const shouldFinish =
+      await searchAndPresentMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
@@ -3205,17 +3344,23 @@ async function processUserMessage({
   // ПЕРЕНОС ЗАМЕРА
   // ------------------------------------------------------
 
-  if (trimmedText === "Перенос замера") {
+  const rescheduleMeasurementId = parseTaggedButton(
+    trimmedText,
+    "Перенос замера"
+  );
+
+  if (rescheduleMeasurementId !== null) {
     const stored = userSelectedMeasurement[userKey];
 
-    if (!stored) {
-      await send(
-        "Не нашёл, какой замер вы переносите. " +
-          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-          "и выберите нужную задачу из списка."
-      );
+    if (
+      !stored ||
+      buildMeasurementIdentifier(stored) !== rescheduleMeasurementId
+    ) {
+      await sendStaleButtonNotice(send, stored, "confirm");
 
-      await finish();
+      if (!stored) {
+        await finish();
+      }
 
       return;
     }
@@ -3239,17 +3384,23 @@ async function processUserMessage({
   // ОТКАЗ
   // ------------------------------------------------------
 
-  if (trimmedText === "Отказ") {
+  const declineMeasurementId = parseTaggedButton(
+    trimmedText,
+    "Отказ"
+  );
+
+  if (declineMeasurementId !== null) {
     const stored = userSelectedMeasurement[userKey];
 
-    if (!stored) {
-      await send(
-        "Не нашёл, от какого замера вы отказываетесь. " +
-          "Пожалуйста, начните заново: нажмите «Подтвердить замер» " +
-          "и выберите нужную задачу из списка."
-      );
+    if (
+      !stored ||
+      buildMeasurementIdentifier(stored) !== declineMeasurementId
+    ) {
+      await sendStaleButtonNotice(send, stored, "confirm");
 
-      await finish();
+      if (!stored) {
+        await finish();
+      }
 
       return;
     }
@@ -3273,17 +3424,23 @@ async function processUserMessage({
   // ЗАМЕР СОСТОЯЛСЯ (сценарий "Провести замер")
   // ------------------------------------------------------
 
-  if (trimmedText === "Замер состоялся") {
+  const conductedMeasurementId = parseTaggedButton(
+    trimmedText,
+    "Замер состоялся"
+  );
+
+  if (conductedMeasurementId !== null) {
     const stored = userSelectedConductMeasurement[userKey];
 
-    if (!stored) {
-      await send(
-        "Не нашёл, какой замер вы отмечаете. " +
-          "Пожалуйста, начните заново: нажмите «Провести замер» " +
-          "и выберите нужную задачу из списка."
-      );
+    if (
+      !stored ||
+      buildMeasurementIdentifier(stored) !== conductedMeasurementId
+    ) {
+      await sendStaleButtonNotice(send, stored, "conduct");
 
-      await finish();
+      if (!stored) {
+        await finish();
+      }
 
       return;
     }
@@ -3346,7 +3503,27 @@ async function processUserMessage({
     return;
   }
 
-  if (trimmedText === "Замер не состоялся") {
+  const notConductedMeasurementId = parseTaggedButton(
+    trimmedText,
+    "Замер не состоялся"
+  );
+
+  if (notConductedMeasurementId !== null) {
+    const stored = userSelectedConductMeasurement[userKey];
+
+    if (
+      !stored ||
+      buildMeasurementIdentifier(stored) !== notConductedMeasurementId
+    ) {
+      await sendStaleButtonNotice(send, stored, "conduct");
+
+      if (!stored) {
+        await finish();
+      }
+
+      return;
+    }
+
     await send(
       "Функция «Замер не состоялся» пока находится в разработке."
     );
@@ -3530,16 +3707,16 @@ return;
             trimmedText
           );
 
-          userSelectedConductMeasurement[userKey] = {
-            task_id: selected.task_id,
-            lead_id: selected.lead_id,
-            contract_number: selected.contract_number
-          };
+          // Запоминаем весь замер целиком (а не только id) — это
+          // нужно, чтобы при устаревшем нажатии кнопки можно было
+          // заново показать актуальную карточку (см.
+          // sendStaleButtonNotice).
+          userSelectedConductMeasurement[userKey] = selected;
 
-          await send(formatConductMeasurementDetail(selected), [
-            "Замер состоялся",
-            "Замер не состоялся"
-          ]);
+          await send(
+            formatConductMeasurementDetail(selected),
+            buildConductActionButtons(selected)
+          );
 
           return;
         }
@@ -3573,30 +3750,20 @@ return;
             "=========================================="
           );
 
-          const detailMessage =
-            `Дата замера: ${selected.measure_date || "—"}\n` +
-            `Время замера: ${selected.measure_time || "—"}\n` +
-            `Адрес замера: ${selected.address || "—"}\n` +
-            `Продукт: ${selected.product || "—"}\n` +
-            `Имя контакта: ${selected.contact_name || "—"}\n` +
-            `№ телефона (-ов) контакта: ${selected.contact_phones || "—"}\n` +
-            `№ договора: ${selected.contract_number || "—"}\n` +
-            `Ссылка на сделку: ${selected.lead_link}`;
+          const detailMessage = formatMeasurementDetail(selected);
 
-          // Запоминаем, какой именно замер (задача + сделка)
-          // выбрал этот пользователь — понадобится, когда он
-          // нажмёт "Замер подтвержден" / "Перенос замера" / "Отказ".
-          userSelectedMeasurement[userKey] = {
-            task_id: selected.task_id,
-            lead_id: selected.lead_id,
-            contract_number: selected.contract_number
-          };
+          // Запоминаем весь замер целиком (задача, сделка и все
+          // данные для карточки) — это нужно, чтобы при устаревшем
+          // нажатии кнопки можно было заново показать актуальную
+          // карточку (см. sendStaleButtonNotice), а также когда
+          // пользователь нажмёт "Замер подтвержден" / "Перенос
+          // замера" / "Отказ".
+          userSelectedMeasurement[userKey] = selected;
 
-          await send(detailMessage, [
-            "Замер подтвержден",
-            "Перенос замера",
-            "Отказ"
-          ]);
+          await send(
+            detailMessage,
+            buildMeasurementActionButtons(selected)
+          );
 
           // Управление НЕ возвращаем — ждём, что пользователь
           // нажмёт одну из кнопок выше.
