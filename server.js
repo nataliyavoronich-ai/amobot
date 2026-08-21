@@ -3780,11 +3780,12 @@ await showReportUploadEntry(
 );
 
 return;
+    }
 
-   if (
-  imageUrls &&
-  imageUrls.length > 0
-) {
+    if (
+      imageUrls &&
+      imageUrls.length > 0
+    ) {
   // --------------------------------------------------------
   // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
   //
