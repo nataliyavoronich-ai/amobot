@@ -106,6 +106,66 @@ const MAIN_MENU_BUTTONS = [
 ];
 
 // ============================================================
+// КОМАНДЫ ЗАПУСКА/ПЕРЕЗАПУСКА АЛГОРИТМА
+// ============================================================
+//
+// Главное меню теперь показывается ТОЛЬКО по этим командам —
+// а не по любому сообщению, как было раньше. Любая из этих команд,
+// на каком бы шаге пользователь ни находился (ожидание кнопки,
+// ожидание комментария, ожидание фото и т.д.), полностью
+// перезапускает сценарий: весь временный стейт пользователя
+// сбрасывается, и снова показывается главное меню.
+
+const START_COMMANDS = new Set([
+  "старт",
+  "start",
+  "/старт",
+  "/start",
+  "начать",
+  "/начать"
+]);
+
+function isStartCommand(text) {
+  return START_COMMANDS.has(
+    String(text || "").trim().toLowerCase()
+  );
+}
+
+// ============================================================
+// ПОСЛЕДНЕЕ СООБЩЕНИЕ БОТА (для повтора при "неизвестной команде")
+// ============================================================
+//
+// В API amoMessenger нет способа погасить/убрать кнопки уже
+// отправленного сообщения (см. https://developers.amo.tm/docs/ —
+// только sendMessage и returnControl). Поэтому, если пользователь
+// отвечает не тем, что бот ожидает на текущем шаге, самое полезное,
+// что можно сделать — предупредить его и заново прислать то самое
+// сообщение бота, на которое он неправильно отреагировал (вместе
+// с его кнопками), чтобы не заставлять его гадать. Здесь запоминаем
+// последнее отправленное ботом сообщение (текст + кнопки) для
+// каждого пользователя.
+
+const userLastBotMessage = {};
+
+// Оборачивает функцию отправки `send(text, buttons)`, чтобы после
+// каждой успешной отправки автоматически обновлять
+// userLastBotMessage — используется во всех входных точках бота
+// (RPA-канал и прямой канал), поэтому оборачивать нужно один раз,
+// до передачи `send` в processUserMessage/другие функции.
+function wrapSendWithLastMessageTracking(userKey, rawSend) {
+  return async (text, buttons) => {
+    const result = await rawSend(text, buttons);
+
+    userLastBotMessage[userKey] = {
+      text,
+      buttons: buttons || null
+    };
+
+    return result;
+  };
+}
+
+// ============================================================
 // ХРАНИЛИЩЕ ТОКЕНОВ
 // ============================================================
 
@@ -180,6 +240,21 @@ const userPendingResultTask = {};
 const userPendingPhotoUpload = {};
 
 const userPhotoUploadQueue = {};
+
+// Сбрасывает весь временный стейт конкретного пользователя —
+// используется, когда пользователь запускает/перезапускает
+// сценарий командой старт/start/начать (см. START_COMMANDS):
+// команда должна перезапустить алгоритм независимо от того, на
+// каком шаге пользователь сейчас находится.
+function resetUserState(userKey) {
+  delete userSelectedMeasurement[userKey];
+  delete userPendingComment[userKey];
+  delete userLastSearchMode[userKey];
+  delete userSelectedConductMeasurement[userKey];
+  delete userPendingResultTask[userKey];
+  delete userPendingPhotoUpload[userKey];
+  delete userPhotoUploadQueue[userKey];
+}
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"),
 // чтобы не запрашивать одного и того же пользователя много раз подряд.
@@ -2888,22 +2963,27 @@ async function searchAndPresentMeasurements(send) {
 //   text               — текст входящего сообщения
 //   userKey            — ключ пользователя для хранения состояния
 //                         (userSelectedMeasurement / userPendingComment)
-//   send(text, buttons)— функция отправки ответа пользователю
+//   send(text, buttons)— функция отправки ответа пользователю (должна
+//                         быть обёрнута через
+//                         wrapSendWithLastMessageTracking, чтобы работал
+//                         повтор последнего сообщения при "неизвестной
+//                         команде")
 //   finish()           — что делать по завершении шага:
 //                         для RPA-канала — returnControl,
 //                         для прямого канала — ничего не делать
-//   showMenuOnUnknown  — если true, на нераспознанный текст показываем
-//                         главное меню (нужно для запуска бота ЛЮБЫМ
-//                         сообщением по прямому каналу). Если false —
-//                         на нераспознанный текст просто завершаем шаг
-//                         (как было раньше в RPA-канале).
+//
+// Главное меню запускается ТОЛЬКО командами из START_COMMANDS
+// (старт, start, /старт, /start, начать, /начать) — см. обработку в
+// самом начале функции. Любая другая команда, не соответствующая
+// текущему шагу сценария, приводит к сообщению "Неизвестная
+// команда..." и повтору последнего сообщения бота (см. конец
+// функции).
 
 async function processUserMessage({
   text,
   userKey,
   send,
   finish,
-  showMenuOnUnknown,
   imageUrls
 }) {
   const trimmedText = (text || "").trim();
@@ -2913,6 +2993,40 @@ async function processUserMessage({
     userKey,
     trimmedText
   );
+
+  // ------------------------------------------------------
+  // СТАРТ / ПЕРЕЗАПУСК АЛГОРИТМА
+  // ------------------------------------------------------
+  //
+  // Команда старт/start/начать (в любом регистре, с "/" или без)
+  // полностью перезапускает сценарий, вне зависимости от того, на
+  // каком шаге пользователь сейчас находится (ожидание кнопки,
+  // комментария, фото и т.д.) — поэтому проверяем её самой первой,
+  // до всех остальных проверок состояния.
+
+  if (isStartCommand(trimmedText)) {
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "ПОЛЬЗОВАТЕЛЬ ЗАПУСТИЛ/ПЕРЕЗАПУСТИЛ АЛГОРИТМ:",
+      trimmedText
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    resetUserState(userKey);
+
+    await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
+
+    // Управление не возвращаем — ждём, что пользователь выберет
+    // один из пунктов главного меню.
+
+    return;
+  }
 
   // ------------------------------------------------------
   // ОЖИДАЕМ КОММЕНТАРИЙ (после "Перенос замера" / "Отказ")
@@ -3816,21 +3930,38 @@ return;
   }
 
   // ------------------------------------------------------
-  // НЕИЗВЕСТНАЯ КОМАНДА / ЗАПУСК БОТА ЛЮБЫМ СООБЩЕНИЕМ
+  // НЕИЗВЕСТНАЯ КОМАНДА
   // ------------------------------------------------------
+  //
+  // Сообщение пользователя не подошло ни к одному из ожидаемых на
+  // текущем шаге вариантов. Убрать кнопки из уже отправленных
+  // сообщений API amoMessenger не позволяет (нет editMessage/
+  // deleteMessage — см. https://developers.amo.tm/docs/), поэтому
+  // предупреждаем и заново присылаем то самое сообщение бота, на
+  // которое пользователь отреагировал не тем, чем нужно.
 
   console.log(
-    "Неизвестная команда или запуск бота:",
+    "Неизвестная команда:",
     trimmedText
   );
 
-  if (showMenuOnUnknown) {
-    await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
+  await send(
+    "⚠️ Неизвестная команда. Следуйте, пожалуйста, алгоритму бота " +
+      "или начните сначала командой `/старт`"
+  );
 
-    return;
+  const lastMessage = userLastBotMessage[userKey];
+
+  if (lastMessage) {
+    await send(
+      lastMessage.text,
+      lastMessage.buttons || undefined
+    );
   }
 
-  await finish();
+  // Управление не возвращаем — ждём, что пользователь ответит тем,
+  // что действительно ожидается на текущем шаге (или запустит
+  // сценарий заново командой /старт).
 }
 
 // ============================================================
@@ -4118,10 +4249,12 @@ app.post(
         await processUserMessage({
           text,
           userKey,
-          send: (msgText, buttons) =>
-            sendDirectMessage(directId, msgText, buttons),
+          send: wrapSendWithLastMessageTracking(
+            userKey,
+            (msgText, buttons) =>
+              sendDirectMessage(directId, msgText, buttons)
+          ),
           finish: async () => {},
-          showMenuOnUnknown: true,
           imageUrls
         });
 
@@ -4189,13 +4322,22 @@ app.post(
           return;
         }
 
-        await sendMessengerMessage(
-          botId,
-          requestId,
+        // На случай, если у пользователя остался "подвисший" стейт
+        // от предыдущей сессии — свежая передача управления от
+        // виджета тоже стартует сценарий с чистого листа.
+        resetUserState(receiverUserId);
+
+        await wrapSendWithLastMessageTracking(
           receiverUserId,
-          MAIN_MENU_TEXT,
-          MAIN_MENU_BUTTONS
-        );
+          (msgText, buttons) =>
+            sendMessengerMessage(
+              botId,
+              requestId,
+              receiverUserId,
+              msgText,
+              buttons
+            )
+        )(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
 
         return;
       }
@@ -4277,17 +4419,19 @@ app.post(
         await processUserMessage({
           text,
           userKey: receiverUserId,
-          send: (msgText, buttons) =>
-            sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              msgText,
-              buttons
-            ),
+          send: wrapSendWithLastMessageTracking(
+            receiverUserId,
+            (msgText, buttons) =>
+              sendMessengerMessage(
+                botId,
+                requestId,
+                receiverUserId,
+                msgText,
+                buttons
+              )
+          ),
           finish: () =>
             returnControl(botId, requestId),
-          showMenuOnUnknown: false,
           imageUrls
         });
 
