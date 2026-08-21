@@ -190,7 +190,19 @@ let amomessengerAccessToken =
 
 let amomessengerRefreshToken =
   process.env.AMOMESSENGER_REFRESH_TOKEN || "";
+// ============================================================
+// UPSTASH REDIS
+// Постоянное хранение OAuth-токенов
+// ============================================================
 
+const UPSTASH_REDIS_REST_URL =
+  process.env.UPSTASH_REDIS_REST_URL;
+
+const UPSTASH_REDIS_REST_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN;
+
+const REDIS_TOKEN_KEY =
+  "amobot:oauth_tokens";
 let amocrmAccessToken =
   process.env.AMOCRM_ACCESS_TOKEN || "";
 
@@ -325,7 +337,162 @@ function log(title, data) {
 
   console.log("==========================================");
 }
+// ============================================================
+// UPSTASH REDIS: СОХРАНЕНИЕ И ЗАГРУЗКА ТОКЕНОВ
+// ============================================================
 
+function upstashIsConfigured() {
+  return Boolean(
+    UPSTASH_REDIS_REST_URL &&
+    UPSTASH_REDIS_REST_TOKEN
+  );
+}
+
+
+async function saveTokensToRedis() {
+  if (!upstashIsConfigured()) {
+    console.log(
+      "Upstash Redis не настроен. Токены сохраняются только в памяти."
+    );
+
+    return;
+  }
+
+  const tokens = {
+    amocrm_access_token:
+      amocrmAccessToken || "",
+
+    amocrm_refresh_token:
+      amocrmRefreshToken || "",
+
+    amomessenger_access_token:
+      amomessengerAccessToken || "",
+
+    amomessenger_refresh_token:
+      amomessengerRefreshToken || ""
+  };
+
+  try {
+    const response =
+      await axios.post(
+        `${UPSTASH_REDIS_REST_URL}/set/${REDIS_TOKEN_KEY}`,
+        JSON.stringify(tokens),
+        {
+          headers: {
+            Authorization:
+              `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+            "Content-Type":
+              "application/json"
+          },
+          timeout: 30000
+        }
+      );
+
+    if (response.status >= 400) {
+      throw new Error(
+        `Upstash HTTP ${response.status}`
+      );
+    }
+
+    console.log(
+      "OAuth-токены сохранены в Upstash Redis."
+    );
+  } catch (error) {
+    console.error(
+      "Ошибка сохранения токенов в Upstash:",
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
+    );
+
+    throw error;
+  }
+}
+
+
+async function loadTokensFromRedis() {
+  if (!upstashIsConfigured()) {
+    console.log(
+      "Upstash Redis не настроен. Используем токены из Environment Variables."
+    );
+
+    return false;
+  }
+
+  try {
+    const response =
+      await axios.get(
+        `${UPSTASH_REDIS_REST_URL}/get/${REDIS_TOKEN_KEY}`,
+        {
+          headers: {
+            Authorization:
+              `Bearer ${UPSTASH_REDIS_REST_TOKEN}`
+          },
+          timeout: 30000
+        }
+      );
+
+    const rawValue =
+      response.data &&
+      response.data.result;
+
+    if (!rawValue) {
+      console.log(
+        "В Upstash Redis пока нет сохранённых OAuth-токенов."
+      );
+
+      return false;
+    }
+
+    const tokens =
+      typeof rawValue === "string"
+        ? JSON.parse(rawValue)
+        : rawValue;
+
+    if (
+      tokens.amocrm_access_token
+    ) {
+      amocrmAccessToken =
+        tokens.amocrm_access_token;
+    }
+
+    if (
+      tokens.amocrm_refresh_token
+    ) {
+      amocrmRefreshToken =
+        tokens.amocrm_refresh_token;
+    }
+
+    if (
+      tokens.amomessenger_access_token
+    ) {
+      amomessengerAccessToken =
+        tokens.amomessenger_access_token;
+    }
+
+    if (
+      tokens.amomessenger_refresh_token
+    ) {
+      amomessengerRefreshToken =
+        tokens.amomessenger_refresh_token;
+    }
+
+    console.log(
+      "OAuth-токены успешно загружены из Upstash Redis."
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "Ошибка загрузки токенов из Upstash:",
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
+    );
+
+    return false;
+  }
+}
 function getMoscowDate() {
   const now = new Date();
 
@@ -401,6 +568,73 @@ async function refreshAmoCrmToken() {
       "AMOCRM_REFRESH_TOKEN не задан"
     );
   }
+
+  log("Обновляем токен amoCRM");
+
+  const url =
+    "https://" +
+    AMOCRM_SUBDOMAIN +
+    ".amocrm.ru/oauth2/access_token";
+
+  try {
+    const response = await axios.post(
+      url,
+      {
+        client_id:
+          AMOCRM_CLIENT_ID,
+
+        client_secret:
+          AMOCRM_CLIENT_SECRET,
+
+        grant_type:
+          "refresh_token",
+
+        refresh_token:
+          amocrmRefreshToken,
+
+        redirect_uri:
+          AMOCRM_REDIRECT_URI
+      },
+      {
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+
+        timeout: 30000
+      }
+    );
+
+    amocrmAccessToken =
+      response.data.access_token;
+
+    if (
+      response.data.refresh_token
+    ) {
+      amocrmRefreshToken =
+        response.data.refresh_token;
+    }
+
+    await saveTokensToRedis();
+
+    console.log(
+      "amoCRM access token обновлён и сохранён в Upstash."
+    );
+
+    return amocrmAccessToken;
+  } catch (error) {
+    console.error(
+      "Ошибка обновления amoCRM token:",
+      error.response
+        ? JSON.stringify(
+            error.response.data
+          )
+        : error.message
+    );
+
+    throw error;
+  }
+}
 
   log("Обновляем токен amoCRM");
 
@@ -1774,36 +2008,65 @@ async function sendDirectMessage(
     };
   }
 
-  console.log("");
-  console.log("amoMessenger POST (DIRECT)");
-  console.log(url);
-  console.log("BODY:");
-  console.log(JSON.stringify(body, null, 2));
+  async function sendRequest() {
+    console.log("");
+    console.log("amoMessenger POST (DIRECT)");
+    console.log(url);
+    console.log("BODY:");
+    console.log(JSON.stringify(body, null, 2));
 
-  const response = await axios.post(url, body, {
-    headers: {
-      Authorization: `Bearer ${amomessengerAccessToken}`,
-      "Content-Type": "application/json"
-    },
-    timeout: 30000,
-    validateStatus: () => true
-  });
+    const response = await axios.post(
+      url,
+      body,
+      {
+        headers: {
+          Authorization:
+            `Bearer ${amomessengerAccessToken}`,
+          "Content-Type":
+            "application/json"
+        },
+        timeout: 30000,
+        validateStatus: () => true
+      }
+    );
 
-  console.log(
-    "amoMessenger DIRECT response:",
-    response.status,
-    JSON.stringify(response.data)
-  );
+    console.log(
+      "amoMessenger DIRECT response:",
+      response.status,
+      JSON.stringify(response.data)
+    );
 
+    return response;
+  }
+
+  // Первая попытка отправки.
+  let response =
+    await sendRequest();
+
+  // Если access token устарел — обновляем его
+  // и повторяем отправку сообщения ОДИН раз.
   if (
     response.status === 401 ||
     response.status === 403
   ) {
     console.log(
-      "amoMessenger token недействителен (DIRECT)."
+      "amoMessenger token недействителен. " +
+      "Пробуем автоматически обновить токен..."
     );
+
+    await refreshAmoMessengerToken();
+
+    console.log(
+      "Повторяем отправку сообщения " +
+      "с новым токеном amoMessenger..."
+    );
+
+    response =
+      await sendRequest();
   }
 
+  // Если после обновления токена ошибка осталась —
+  // возвращаем ошибку, чтобы не делать бесконечные попытки.
   if (response.status >= 400) {
     throw new Error(
       `amoMessenger DIRECT HTTP ${response.status}`
@@ -2954,14 +3217,16 @@ app.get("/amocrm/callback", async (req, res) => {
     );
 
     amocrmAccessToken =
-      response.data.access_token;
+  response.data.access_token;
 
-    amocrmRefreshToken =
-      response.data.refresh_token;
+amocrmRefreshToken =
+  response.data.refresh_token;
 
-    console.log(
-      "amoCRM токены успешно получены."
-    );
+await saveTokensToRedis();
+
+console.log(
+  "amoCRM токены успешно получены и сохранены в Upstash."
+);
 
     res.send(`
       <!DOCTYPE html>
@@ -3190,7 +3455,81 @@ app.get(
     res.redirect(url);
   }
 );
+// ============================================================
+// ОБНОВЛЕНИЕ AMOMESSENGER ACCESS TOKEN
+// ============================================================
 
+async function refreshAmoMessengerToken() {
+  if (!amomessengerRefreshToken) {
+    throw new Error(
+      "AMOMESSENGER_REFRESH_TOKEN не задан"
+    );
+  }
+
+  console.log(
+    "Обновляем токен amoMessenger..."
+  );
+
+  try {
+    const response =
+      await axios.post(
+        "https://id.amo.tm/oauth2/access_token",
+        {
+          grant_type:
+            "refresh_token",
+
+          client_id:
+            AMOMESSENGER_CLIENT_ID,
+
+          client_secret:
+            AMOMESSENGER_CLIENT_SECRET,
+
+          refresh_token:
+            amomessengerRefreshToken,
+
+          redirect_uri:
+            AMOMESSENGER_REDIRECT_URI
+        },
+        {
+          headers: {
+            "Content-Type":
+              "application/json"
+          },
+
+          timeout: 30000
+        }
+      );
+
+    amomessengerAccessToken =
+      response.data.access_token;
+
+    if (
+      response.data.refresh_token
+    ) {
+      amomessengerRefreshToken =
+        response.data.refresh_token;
+    }
+
+    await saveTokensToRedis();
+
+    console.log(
+      "amoMessenger токен обновлён и сохранён в Upstash."
+    );
+
+    return amomessengerAccessToken;
+  } catch (error) {
+    console.error(
+      "Ошибка обновления amoMessenger token:",
+      error.response
+        ? JSON.stringify(
+            error.response.data
+          )
+        : error.message
+    );
+
+    throw error;
+  }
+}
 // ============================================================
 // AMOMESSENGER OAUTH CALLBACK
 // ============================================================
@@ -3256,14 +3595,16 @@ app.get(
       );
 
       amomessengerAccessToken =
-        response.data.access_token;
+  response.data.access_token;
 
-      amomessengerRefreshToken =
-        response.data.refresh_token;
+amomessengerRefreshToken =
+  response.data.refresh_token;
 
-      console.log(
-        "amoMessenger токены сохранены."
-      );
+await saveTokensToRedis();
+
+console.log(
+  "amoMessenger токены сохранены в Upstash."
+);
 
       res.send(`
         <!DOCTYPE html>
@@ -5863,7 +6204,24 @@ app.use(
 // ============================================================
 // START
 // ============================================================
+// ============================================================
+// ЗАГРУЗКА АКТУАЛЬНЫХ ТОКЕНОВ ИЗ UPSTASH ПРИ СТАРТЕ
+// ============================================================
 
+async function startServer() {
+  await loadTokensFromRedis();
+
+  app.listen(
+    PORT,
+    () => {
+      console.log(
+        `Server started on port ${PORT}`
+      );
+    }
+  );
+}
+
+startServer();
 app.listen(
   PORT,
   () => {
