@@ -78,7 +78,11 @@ const MEASURE_TIME_FIELD_ID = 413828; // Время замера (список)
 const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстовая область)
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
+// Тип задачи "Загруз. отчет(и)"
+const REPORT_TASK_TYPE_ID = 2746017;
 
+// Поле контакта "Email рабочий"
+const WORK_EMAIL_FIELD_ID = 141995;
 // Поля-ссылки на папки Яндекс.Диска (заполняются ботом автоматически)
 const REPORTS_LINK_FIELD_ID = 555436; // "Отчеты и проекты"
 const PHOTO_LINK_FIELD_ID = 543238; // "Фото проема №1" (папка "Фотоотчет")
@@ -246,12 +250,32 @@ const userPendingResultTask = {};
 // подготовить клиенту.
 const userPendingKpTask = {};
 
-// После нажатия "Заключен договор" бот просит загрузить фото и
-// ждёт фотографии + нажатие кнопки "Готово". Здесь храним, в какую
-// папку на Яндекс.Диске сохранять фото для этой сделки.
+// После нажатия "Заключен договор" бот просит загрузить фото договора.
 const userPendingPhotoUpload = {};
 
 const userPhotoUploadQueue = {};
+
+
+// ============================================================
+// СОСТОЯНИЯ ДЛЯ СЦЕНАРИЯ "ЗАГРУЗИТЬ ФОТООТЧЕТ"
+// ============================================================
+
+// Выбранная задача "Загруз. отчет(и)".
+const userSelectedReport = {};
+
+// Текущий этап загрузки:
+// photo / measure_sheet / video.
+const userPendingReportUpload = {};
+
+// Очередь нужна для корректной обработки нескольких файлов,
+// которые amoMessenger может прислать почти одновременно.
+const userReportUploadQueue = {};
+
+// Ожидание изменения бюджета.
+const userPendingBudgetEdit = {};
+
+// Ожидание изменения e-mail.
+const userPendingEmailEdit = {};
 
 // Сбрасывает весь временный стейт конкретного пользователя —
 // используется, когда пользователь запускает/перезапускает
@@ -267,6 +291,11 @@ function resetUserState(userKey) {
   delete userPendingKpTask[userKey];
   delete userPendingPhotoUpload[userKey];
   delete userPhotoUploadQueue[userKey];
+    delete userSelectedReport[userKey];
+  delete userPendingReportUpload[userKey];
+  delete userReportUploadQueue[userKey];
+  delete userPendingBudgetEdit[userKey];
+  delete userPendingEmailEdit[userKey];
 }
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"),
@@ -1034,7 +1063,422 @@ function buildContractFileName(
     `${suffix}.jpg`
   );
 }
+// ============================================================
+// НОВАЯ ЛОГИКА ЗАГРУЗКИ ОТЧЕТА
+// ============================================================
 
+function buildReportFileName(
+  prefix,
+  dateText,
+  number
+) {
+  const suffix =
+    Number(number) > 0
+      ? ` (${Number(number)})`
+      : "";
+
+  return (
+    `${prefix} ${dateText}` +
+    `${suffix}.jpg`
+  );
+}
+
+
+// ============================================================
+// ПОИСК ЗАДАЧ "ЗАГРУЗ. ОТЧЕТ(И)"
+// ============================================================
+
+async function loadReportTasks() {
+  const allTasks = [];
+
+  let page = 1;
+
+  while (true) {
+    const url =
+      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
+    const response =
+      await amoCrmGet(
+        url,
+        {
+          limit: 250,
+          page,
+          "filter[task_type][0]":
+            REPORT_TASK_TYPE_ID,
+          "filter[is_completed]": 0
+        }
+      );
+
+    if (response.status === 204) {
+      break;
+    }
+
+    if (response.status !== 200) {
+      throw new Error(
+        `amoCRM tasks (report) HTTP ${response.status}`
+      );
+    }
+
+    const tasks =
+      response.data &&
+      Array.isArray(
+        response.data._embedded?.tasks
+      )
+        ? response.data._embedded.tasks
+        : [];
+
+    allTasks.push(...tasks);
+
+    if (tasks.length < 250) {
+      break;
+    }
+
+    page++;
+
+    if (page > 20) {
+      break;
+    }
+  }
+
+  return allTasks;
+}
+
+
+async function findReportTasks() {
+  console.log(
+    "ПОИСК ЗАДАЧ ЗАГРУЗ. ОТЧЕТ(И)"
+  );
+
+  const tasks =
+    await loadReportTasks();
+
+  const measurements = [];
+
+  for (const task of tasks) {
+    if (
+      !task.entity_id ||
+      task.entity_type !== "leads" ||
+      Number(task.task_type_id) !==
+        Number(REPORT_TASK_TYPE_ID) ||
+      task.is_completed !== false
+    ) {
+      continue;
+    }
+
+    const lead =
+      await getLead(task.entity_id);
+
+    if (!lead) {
+      continue;
+    }
+
+    if (!leadBelongsToEngineer(lead)) {
+      continue;
+    }
+
+    const contactId =
+      getMainContactId(lead);
+
+    let contactName = "";
+    let contactPhones = [];
+    let contact = null;
+
+    if (contactId) {
+      contact =
+        await getContact(contactId);
+
+      if (contact) {
+        contactName =
+          contact.name || "";
+
+        contactPhones =
+          getContactPhones(contact);
+      }
+    }
+
+    const managerName =
+      await getUserName(
+        lead.responsible_user_id
+      );
+
+    measurements.push({
+      task_id:
+        Number(task.id),
+
+      lead_id:
+        Number(task.entity_id),
+
+      contact_id:
+        contactId
+          ? Number(contactId)
+          : null,
+
+      lead_link:
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
+
+      measure_date:
+        formatDateFieldValue(
+          lead,
+          MEASURE_DATE_FIELD_ID
+        ),
+
+      address:
+        getFieldValueJoined(
+          lead,
+          ADDRESS_FIELD_ID
+        ),
+
+      manager_name:
+        managerName,
+
+      budget:
+        lead.price !== undefined &&
+        lead.price !== null
+          ? String(lead.price)
+          : "",
+
+      discount:
+        getFieldValueJoined(
+          lead,
+          DISCOUNT_FIELD_ID
+        ),
+
+      product:
+        getFieldValueJoined(
+          lead,
+          PRODUCT_FIELD_ID
+        ),
+
+      contract_number:
+        getFieldValueJoined(
+          lead,
+          CONTRACT_NUMBER_FIELD_ID
+        ),
+
+      contact_name:
+        contactName,
+
+      contact_phones:
+        contactPhones.join(", ")
+    });
+  }
+
+  console.log(
+    `ИТОГО ЗАДАЧ ОТЧЕТА: ${measurements.length}`
+  );
+
+  return {
+    measurements
+  };
+}
+
+
+function formatReportMeasurementLine(
+  item,
+  index
+) {
+  return (
+    `${index + 1}. ` +
+    `Дата замера: ${item.measure_date || "—"}; ` +
+    `Адрес замера: ${item.address || "—"}; ` +
+    `Ответственный менеджер: ${item.manager_name || "—"}; ` +
+    `Бюджет: ${item.budget || "—"}; ` +
+    `Скидка ОП: ${item.discount || "—"}; ` +
+    `Продукт: ${item.product || "—"}; ` +
+    `Имя клиента: ${item.contact_name || "—"}; ` +
+    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}; ` +
+    `№ договора: ${item.contract_number || "—"}; ` +
+    `Ссылка на сделку: ${item.lead_link}\n`
+  );
+}
+
+
+async function searchAndPresentReportTasks(
+  userKey,
+  send
+) {
+  let shouldFinish = true;
+
+  try {
+    const result =
+      await findReportTasks();
+
+    userLastSearchMode[userKey] =
+      "report";
+
+    if (
+      result.measurements.length === 0
+    ) {
+      await send(
+        "📋 Замеров для загрузки фотоотчета не найдено."
+      );
+    } else {
+      let message =
+        "📋 Найдены замеры:\n\n";
+
+      result.measurements.forEach(
+        (item, index) => {
+          message +=
+            formatReportMeasurementLine(
+              item,
+              index
+            );
+        }
+      );
+
+      const buttons =
+        result.measurements.map(
+          (item) =>
+            item.contract_number ||
+            `Задача ${item.task_id}`
+        );
+
+      await send(
+        message,
+        buttons
+      );
+
+      shouldFinish = false;
+    }
+  } catch (error) {
+    console.error(
+      "Ошибка поиска задач отчета:",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось получить список задач для загрузки отчета."
+    );
+  }
+
+  return shouldFinish;
+}
+
+
+// ============================================================
+// ОБЩАЯ ТОЧКА ПЕРЕХОДА К ЗАГРУЗКЕ ОТЧЕТА
+// ============================================================
+
+async function showReportUploadEntry(
+  send
+) {
+  await send(
+    "Загрузите отчет и замерный лист",
+    [
+      "Перейти к загрузке отчета"
+    ]
+  );
+}
+
+
+// ============================================================
+// ПОЛУЧЕНИЕ EMAIL РАБОЧЕГО
+// ============================================================
+
+function getWorkEmail(
+  contact
+) {
+  if (
+    !contact ||
+    !Array.isArray(
+      contact.custom_fields_values
+    )
+  ) {
+    return "";
+  }
+
+  const field =
+    contact.custom_fields_values.find(
+      (item) =>
+        Number(item.field_id) ===
+        Number(WORK_EMAIL_FIELD_ID)
+    );
+
+  if (
+    !field ||
+    !Array.isArray(field.values)
+  ) {
+    return "";
+  }
+
+  return field.values
+    .map((item) => item.value)
+    .filter(Boolean)
+    .join(", ");
+}
+
+
+// ============================================================
+// ЗАПИСЬ EMAIL В КОНТАКТ
+// ============================================================
+
+async function updateWorkEmail(
+  contactId,
+  email
+) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/contacts/${contactId}`;
+
+  const response =
+    await amoCrmPatch(
+      url,
+      {
+        custom_fields_values: [
+          {
+            field_id:
+              WORK_EMAIL_FIELD_ID,
+            values: [
+              {
+                value: email
+              }
+            ]
+          }
+        ]
+      }
+    );
+
+  if (
+    response.status >= 400
+  ) {
+    throw new Error(
+      `amoCRM contact PATCH HTTP ${response.status}`
+    );
+  }
+
+  return response.data;
+}
+
+
+// ============================================================
+// ОБНОВЛЕНИЕ БЮДЖЕТА
+// ============================================================
+
+async function updateLeadBudget(
+  leadId,
+  budget
+) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
+
+  const response =
+    await amoCrmPatch(
+      url,
+      {
+        price:
+          Number(budget)
+      }
+    );
+
+  if (
+    response.status >= 400
+  ) {
+    throw new Error(
+      `amoCRM lead PATCH HTTP ${response.status}`
+    );
+  }
+
+  return response.data;
+}
 // Загружает файл на Диск напрямую по его URL (Яндекс сам скачивает
 // файл с этого адреса — не нужно скачивать его на сервер бота).
 // Используется, например, для фото, присланных в amoMessenger —
@@ -3145,7 +3589,169 @@ async function processUserMessage({
   // ------------------------------------------------------
   // ОЖИДАЕМ ФОТО ДОГОВОРА (после кнопки "Заключен договор")
   // ------------------------------------------------------
+// ------------------------------------------------------
+// ЗАГРУЗКА ФОТО / ЗАМЕРНОГО ЛИСТА / ВИДЕО
+// ------------------------------------------------------
 
+const pendingReport =
+  userPendingReportUpload[userKey];
+
+if (
+  pendingReport &&
+  imageUrls &&
+  imageUrls.length > 0
+) {
+  const previousQueue =
+    userReportUploadQueue[userKey] ||
+    Promise.resolve();
+
+  const currentQueue =
+    previousQueue
+      .catch(() => {})
+      .then(async () => {
+        const current =
+          userPendingReportUpload[
+            userKey
+          ];
+
+        if (!current) {
+          return;
+        }
+
+        let uploaded = 0;
+
+        for (
+          const url of imageUrls
+        ) {
+          let prefix;
+
+          if (
+            current.mode ===
+            "photo"
+          ) {
+            prefix =
+              "Фотоотчет";
+          } else if (
+            current.mode ===
+            "measure_sheet"
+          ) {
+            prefix =
+              "Замерный лист";
+          } else {
+            prefix =
+              "Видео";
+          }
+
+          const fileName =
+            buildReportFileName(
+              prefix,
+              current.date_text,
+              current.next_file_number
+            );
+
+          await ydUploadFromUrl(
+            `${current.folder_path}/${fileName}`,
+            url
+          );
+
+          current.next_file_number++;
+
+          current.uploaded_count++;
+
+          uploaded++;
+        }
+
+        const lead =
+          await getLead(
+            current.lead_id
+          );
+
+        const folders =
+          await ensureLeadYandexFolders(
+            lead
+          );
+
+        if (
+          current.mode ===
+          "photo"
+        ) {
+          current.links.photo =
+            await ydGetFolderPublicUrl(
+              folders.photoPath
+            );
+
+          await send(
+            `Файлы получены (${current.uploaded_count}).`,
+            [
+              "Перейти к загрузке замерн.листа",
+              "Вернуться к списку замеров"
+            ]
+          );
+        }
+
+        if (
+          current.mode ===
+          "measure_sheet"
+        ) {
+          current.links.measure_sheet =
+            await ydGetFolderPublicUrl(
+              folders.measureSheetPath
+            );
+
+          await send(
+            `Файлы получены (${current.uploaded_count}).`,
+            [
+              "Перейти к загрузке видео",
+              "Завершить отчет"
+            ]
+          );
+        }
+
+        if (
+          current.mode ===
+          "video"
+        ) {
+          current.links.video =
+            await ydGetFolderPublicUrl(
+              folders.videoPath
+            );
+
+          await send(
+            `Файлы получены (${current.uploaded_count}).`,
+            [
+              "Завершить отчет"
+            ]
+          );
+        }
+      });
+
+  userReportUploadQueue[userKey] =
+    currentQueue;
+
+  try {
+    await currentQueue;
+  } catch (error) {
+    console.error(
+      "Ошибка загрузки файлов отчета:",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось загрузить файл. Попробуйте отправить его ещё раз."
+    );
+  } finally {
+    if (
+      userReportUploadQueue[userKey] ===
+      currentQueue
+    ) {
+      delete userReportUploadQueue[
+        userKey
+      ];
+    }
+  }
+
+  return;
+}
   const pendingPhoto = userPendingPhotoUpload[userKey];
 
   if (pendingPhoto) {
@@ -3163,14 +3769,17 @@ async function processUserMessage({
         return;
       }
 
-      await send("✅ Фото сохранены. Спасибо!");
+await send(
+  "✅ Фото сохранены. Спасибо!"
+);
 
-      delete userPendingPhotoUpload[userKey];
+delete userPendingPhotoUpload[userKey];
 
-      await finish();
+await showReportUploadEntry(
+  send
+);
 
-      return;
-    }
+return;
 
    if (
   imageUrls &&
@@ -3392,26 +4001,505 @@ async function processUserMessage({
       "⏳ Проверяю задачи на проведение замера..."
     );
 
-    const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
+    await showReportUploadEntry(
+  send
+);
 
-    if (shouldFinish) {
-      await finish();
-    }
-
-    return;
+return;
   }
 
-  if (trimmedText === "Загрузить фотоотчет") {
-    await send(
-      "Функция «Загрузить фотоотчет» пока находится в разработке."
+if (
+  trimmedText ===
+  "Загрузить фотоотчет"
+) {
+  await send(
+    "⏳ Проверяю задачи для загрузки фотоотчета..."
+  );
+
+  const shouldFinish =
+    await searchAndPresentReportTasks(
+      userKey,
+      send
     );
 
+  if (shouldFinish) {
     await finish();
+  }
+
+  return;
+}
+// ------------------------------------------------------
+// ПЕРЕЙТИ К ЗАГРУЗКЕ ОТЧЕТА
+// ------------------------------------------------------
+
+if (
+  trimmedText ===
+  "Перейти к загрузке отчета"
+) {
+  await send(
+    "⏳ Проверяю задачи для загрузки фотоотчета..."
+  );
+
+  const shouldFinish =
+    await searchAndPresentReportTasks(
+      userKey,
+      send
+    );
+
+  if (shouldFinish) {
+    await finish();
+  }
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ВЕРНУТЬСЯ К СПИСКУ ЗАМЕРОВ
+// ------------------------------------------------------
+
+if (
+  trimmedText ===
+  "Вернуться к списку замеров"
+) {
+  delete userSelectedReport[userKey];
+  delete userPendingReportUpload[userKey];
+
+  const shouldFinish =
+    await searchAndPresentReportTasks(
+      userKey,
+      send
+    );
+
+  if (shouldFinish) {
+    await finish();
+  }
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ПЕРЕЙТИ К ЗАГРУЗКЕ ЗАМЕРНОГО ЛИСТА
+// ------------------------------------------------------
+
+if (
+  trimmedText ===
+  "Перейти к загрузке замерн.листа"
+) {
+  const selected =
+    userSelectedReport[userKey];
+
+  if (!selected) {
+    await send(
+      "Не найдена выбранная сделка. Вернитесь к списку замеров."
+    );
 
     return;
   }
 
+  const lead =
+    await getLead(
+      selected.lead_id
+    );
+
+  const folders =
+    await ensureLeadYandexFolders(
+      lead
+    );
+
+  const now =
+    getMoscowDate();
+
+  const dateText =
+    `${String(now.getUTCDate()).padStart(2, "0")}.` +
+    `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
+    `${now.getUTCFullYear()}`;
+
+  const previous =
+    userPendingReportUpload[userKey] ||
+    {};
+
+  userPendingReportUpload[userKey] = {
+    ...previous,
+
+    lead_id:
+      selected.lead_id,
+
+    task_id:
+      selected.task_id,
+
+    mode:
+      "measure_sheet",
+
+    folder_path:
+      folders.measureSheetPath,
+
+    date_text:
+      dateText,
+
+    next_file_number:
+      0,
+
+    uploaded_count:
+      0,
+
+    links:
+      previous.links || {}
+  };
+
+  await send(
+    "Загрузите замерный лист"
+  );
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ПЕРЕЙТИ К ЗАГРУЗКЕ ВИДЕО
+// ------------------------------------------------------
+
+if (
+  trimmedText ===
+  "Перейти к загрузке видео"
+) {
+  const selected =
+    userSelectedReport[userKey];
+
+  const pending =
+    userPendingReportUpload[userKey];
+
+  if (
+    !selected ||
+    !pending
+  ) {
+    await send(
+      "Не найдена выбранная сделка."
+    );
+
+    return;
+  }
+
+  const lead =
+    await getLead(
+      selected.lead_id
+    );
+
+  const folders =
+    await ensureLeadYandexFolders(
+      lead
+    );
+
+  const now =
+    getMoscowDate();
+
+  const dateText =
+    `${String(now.getUTCDate()).padStart(2, "0")}.` +
+    `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
+    `${now.getUTCFullYear()}`;
+
+  pending.mode =
+    "video";
+
+  pending.folder_path =
+    folders.videoPath;
+
+  pending.date_text =
+    dateText;
+
+  pending.next_file_number =
+    0;
+
+  pending.uploaded_count =
+    0;
+
+  await send(
+    "Загрузите видео"
+  );
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ЗАВЕРШИТЬ ОТЧЕТ
+// ------------------------------------------------------
+
+if (
+  trimmedText ===
+  "Завершить отчет"
+) {
+  const selected =
+    userSelectedReport[userKey];
+
+  const pending =
+    userPendingReportUpload[userKey];
+
+  if (!selected) {
+    await send(
+      "Не найдена выбранная сделка."
+    );
+
+    return;
+  }
+
+  try {
+    await senseiCompleteTask(
+      selected.lead_id,
+      selected.task_id,
+      "Отчет загружен"
+    );
+  } catch (error) {
+    console.error(
+      "Ошибка завершения задачи отчета:",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось завершить задачу."
+    );
+
+    return;
+  }
+
+  if (
+    pending &&
+    pending.links
+  ) {
+    const lines = [
+      "Ссылки на папки в yandex:"
+    ];
+
+    if (
+      pending.links.photo
+    ) {
+      lines.push(
+        `Фотоотчет: ${pending.links.photo}`
+      );
+    }
+
+    if (
+      pending.links.measure_sheet
+    ) {
+      lines.push(
+        `Замерный лист: ${pending.links.measure_sheet}`
+      );
+    }
+
+    if (
+      pending.links.video
+    ) {
+      lines.push(
+        `Видео: ${pending.links.video}`
+      );
+    }
+
+    if (
+      lines.length > 1
+    ) {
+      try {
+        await addLeadNote(
+          selected.lead_id,
+          lines.join("\n")
+        );
+      } catch (error) {
+        console.error(
+          "Ошибка добавления примечания:",
+          error.message
+        );
+      }
+    }
+  }
+
+  delete userPendingReportUpload[userKey];
+
+  userPendingBudgetEdit[userKey] = {
+    lead_id:
+      selected.lead_id,
+
+    task_id:
+      selected.task_id,
+
+    contact_id:
+      selected.contact_id
+  };
+
+  await send(
+    `Бюджет сделки: ${selected.budget || "пусто"}\n` +
+    "Внесите изменения",
+    [
+      "Без изменений"
+    ]
+  );
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ОЖИДАНИЕ ИЗМЕНЕНИЯ БЮДЖЕТА
+// ------------------------------------------------------
+
+const pendingBudget =
+  userPendingBudgetEdit[userKey];
+
+if (pendingBudget) {
+  if (
+    trimmedText ===
+    "Без изменений"
+  ) {
+    delete userPendingBudgetEdit[userKey];
+
+    userPendingEmailEdit[userKey] =
+      pendingBudget;
+
+    const contact =
+      pendingBudget.contact_id
+        ? await getContact(
+            pendingBudget.contact_id
+          )
+        : null;
+
+    await send(
+      `E-mail клиента: ${getWorkEmail(contact) || "пусто"}\n` +
+      "Внесите изменения",
+      [
+        "Без изменений"
+      ]
+    );
+
+    return;
+  }
+
+  if (
+    !/^\d+$/.test(
+      trimmedText
+    )
+  ) {
+    await send(
+      "Введите сообщение, состоящие только из цифр"
+    );
+
+    return;
+  }
+
+  try {
+    await updateLeadBudget(
+      pendingBudget.lead_id,
+      trimmedText
+    );
+  } catch (error) {
+    console.error(
+      "Ошибка изменения бюджета:",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось изменить бюджет."
+    );
+
+    return;
+  }
+
+  delete userPendingBudgetEdit[userKey];
+
+  userPendingEmailEdit[userKey] =
+    pendingBudget;
+
+  const contact =
+    pendingBudget.contact_id
+      ? await getContact(
+          pendingBudget.contact_id
+        )
+      : null;
+
+  await send(
+    `E-mail клиента: ${getWorkEmail(contact) || "пусто"}\n` +
+    "Внесите изменения",
+    [
+      "Без изменений"
+    ]
+  );
+
+  return;
+}
+
+
+// ------------------------------------------------------
+// ОЖИДАНИЕ ИЗМЕНЕНИЯ EMAIL
+// ------------------------------------------------------
+
+const pendingEmail =
+  userPendingEmailEdit[userKey];
+
+if (pendingEmail) {
+  if (
+    trimmedText ===
+    "Без изменений"
+  ) {
+    delete userPendingEmailEdit[userKey];
+
+    await searchAndPresentReportTasks(
+      userKey,
+      send
+    );
+
+    return;
+  }
+
+  if (
+    !trimmedText.includes("@") ||
+    !trimmedText.includes(".")
+  ) {
+    await send(
+      "Введите корректный e-mail"
+    );
+
+    return;
+  }
+
+  if (
+    !pendingEmail.contact_id
+  ) {
+    await send(
+      "❌ У сделки не найден контакт."
+    );
+
+    return;
+  }
+
+  try {
+    await updateWorkEmail(
+      pendingEmail.contact_id,
+      trimmedText
+    );
+  } catch (error) {
+    console.error(
+      "Ошибка изменения e-mail:",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось изменить e-mail."
+    );
+
+    return;
+  }
+
+  delete userPendingEmailEdit[userKey];
+
+  await send(
+    "Правки внесены"
+  );
+
+  await searchAndPresentReportTasks(
+    userKey,
+    send
+  );
+
+  return;
+}
   if (trimmedText === "Внести правки") {
     await send(
       "Функция «Внести правки» пока находится в разработке."
@@ -3900,14 +4988,11 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
+    await showReportUploadEntry(
+  send
+);
 
-    if (shouldFinish) {
-      await finish();
-    }
-
-    return;
+return;
   }
 
   // ------------------------------------------------------
@@ -4037,14 +5122,11 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
+    await showReportUploadEntry(
+  send
+);
 
-    if (shouldFinish) {
-      await finish();
-    }
-
-    return;
+return;
   }
 
   // ------------------------------------------------------
@@ -4059,7 +5141,90 @@ return;
 
   if (trimmedText) {
     const mode = userLastSearchMode[userKey];
+    if (mode === "report") {
+      try {
+        const result =
+          await findReportTasks();
 
+        const selected =
+          result.measurements.find(
+            (item) =>
+              String(
+                item.contract_number ||
+                `Задача ${item.task_id}`
+              ).trim() === trimmedText
+          );
+
+        if (selected) {
+          userSelectedReport[userKey] =
+            selected;
+
+          const lead =
+            await getLead(
+              selected.lead_id
+            );
+
+          const folders =
+            await ensureLeadYandexFolders(
+              lead
+            );
+
+          const now =
+            getMoscowDate();
+
+          const dateText =
+            `${String(now.getUTCDate()).padStart(2, "0")}.` +
+            `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
+            `${now.getUTCFullYear()}`;
+
+          userPendingReportUpload[userKey] = {
+            lead_id:
+              selected.lead_id,
+
+            task_id:
+              selected.task_id,
+
+            mode:
+              "photo",
+
+            folder_path:
+              folders.photoPath,
+
+            date_text:
+              dateText,
+
+            next_file_number:
+              0,
+
+            uploaded_count:
+              0,
+
+            links: {}
+          };
+
+          await send(
+            "Загрузите фотоотчет",
+            [
+              "Перейти к загрузке замерн.листа",
+              "Вернуться к списку замеров"
+            ]
+          );
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка выбора задачи отчета:",
+          error.message
+        );
+
+        await send(
+          "❌ Не удалось открыть выбранную сделку."
+        );
+
+        return;
+      }
+    }
     if (mode === "conduct") {
       try {
         const result = await findConductMeasurementTasks();
