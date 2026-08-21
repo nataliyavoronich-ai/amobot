@@ -564,77 +564,8 @@ function getCurrentMoscowUnix() {
 
 async function refreshAmoCrmToken() {
   if (!amocrmRefreshToken) {
-    throw new Error(
-      "AMOCRM_REFRESH_TOKEN не задан"
-    );
+    throw new Error("AMOCRM_REFRESH_TOKEN не задан");
   }
-
-  log("Обновляем токен amoCRM");
-
-  const url =
-    "https://" +
-    AMOCRM_SUBDOMAIN +
-    ".amocrm.ru/oauth2/access_token";
-
-  try {
-    const response = await axios.post(
-      url,
-      {
-        client_id:
-          AMOCRM_CLIENT_ID,
-
-        client_secret:
-          AMOCRM_CLIENT_SECRET,
-
-        grant_type:
-          "refresh_token",
-
-        refresh_token:
-          amocrmRefreshToken,
-
-        redirect_uri:
-          AMOCRM_REDIRECT_URI
-      },
-      {
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        timeout: 30000
-      }
-    );
-
-    amocrmAccessToken =
-      response.data.access_token;
-
-    if (
-      response.data.refresh_token
-    ) {
-      amocrmRefreshToken =
-        response.data.refresh_token;
-    }
-
-    await saveTokensToRedis();
-
-    console.log(
-      "amoCRM access token обновлён и сохранён в Upstash."
-    );
-
-    return amocrmAccessToken;
-  } catch (error) {
-    console.error(
-      "Ошибка обновления amoCRM token:",
-      error.response
-        ? JSON.stringify(
-            error.response.data
-          )
-        : error.message
-    );
-
-    throw error;
-  }
-}
 
   log("Обновляем токен amoCRM");
 
@@ -654,9 +585,7 @@ async function refreshAmoCrmToken() {
         redirect_uri: AMOCRM_REDIRECT_URI
       },
       {
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         timeout: 30000
       }
     );
@@ -667,15 +596,15 @@ async function refreshAmoCrmToken() {
       amocrmRefreshToken = response.data.refresh_token;
     }
 
-    console.log("amoCRM access token обновлён.");
+    await saveTokensToRedis();
+
+    console.log("amoCRM access token обновлён и сохранён в Upstash.");
 
     return amocrmAccessToken;
   } catch (error) {
     console.error(
       "Ошибка обновления amoCRM token:",
-      error.response
-        ? JSON.stringify(error.response.data)
-        : error.message
+      error.response ? JSON.stringify(error.response.data) : error.message
     );
 
     throw error;
