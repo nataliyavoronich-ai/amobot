@@ -6143,79 +6143,23 @@ async function startServer() {
   app.listen(
     PORT,
     () => {
-      console.log(
-        `Server started on port ${PORT}`
-      );
+      console.log("");
+      console.log("==========================================");
+      console.log("amoMessenger BOT STARTED");
+      console.log("==========================================");
+
+      console.log("PORT:", PORT);
+      console.log("amoCRM:", `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`);
+      console.log("Timezone:", "Europe/Moscow");
+      console.log("Engineer:", ENGINEER_NAME);
+      console.log("Engineer field:", ENGINEER_FIELD_ID);
+      console.log("Engineer enum:", ENGINEER_ENUM_ID);
+      console.log("Measurement task type:", MEASUREMENT_TASK_TYPE_ID);
+      console.log("amoCRM token:", amocrmAccessToken ? "ДА" : "НЕТ");
+      console.log("amoMessenger token:", amomessengerAccessToken ? "ДА" : "НЕТ");
+      console.log("==========================================");
     }
   );
 }
 
 startServer();
-app.listen(
-  PORT,
-  () => {
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "amoMessenger BOT STARTED"
-    );
-    console.log(
-      "=========================================="
-    );
-
-    console.log(
-      "PORT:",
-      PORT
-    );
-
-    console.log(
-      "amoCRM:",
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`
-    );
-
-    console.log(
-      "Timezone:",
-      "Europe/Moscow"
-    );
-
-    console.log(
-      "Engineer:",
-      ENGINEER_NAME
-    );
-
-    console.log(
-      "Engineer field:",
-      ENGINEER_FIELD_ID
-    );
-
-    console.log(
-      "Engineer enum:",
-      ENGINEER_ENUM_ID
-    );
-
-    console.log(
-      "Measurement task type:",
-      MEASUREMENT_TASK_TYPE_ID
-    );
-
-    console.log(
-      "amoCRM token:",
-      amocrmAccessToken
-        ? "ДА"
-        : "НЕТ"
-    );
-
-    console.log(
-      "amoMessenger token:",
-      amomessengerAccessToken
-        ? "ДА"
-        : "НЕТ"
-    );
-
-    console.log(
-      "=========================================="
-    );
-  }
-);
