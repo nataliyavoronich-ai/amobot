@@ -58,6 +58,9 @@ const RESULT_TASK_TYPE_ID = 2746013;
 // Тип задачи "Указать рез-т(и)" 
 const KP_TASK_TYPE_ID = 2774021;
 
+// Тип задачи "Загруз. отчет(и)" — сценарий "Загрузить фотоотчет"
+const REPORT_TASK_TYPE_ID = 2746017;
+
 // Поля сделки, которые нужно выводить в сообщениях бота
 const CONTRACT_NUMBER_FIELD_ID = 412776; // № договора (текст)
 const MEASURE_DATE_FIELD_ID = 175370; // Дата замера (дата)
@@ -174,6 +177,28 @@ const userPendingKpTask = {};
 const userPendingPhotoUpload = {};
 const userPhotoUploadQueue = {};
 
+// ------------------------------------------------------------
+// СОСТОЯНИЕ ДЛЯ СЦЕНАРИЯ "ЗАГРУЗИТЬ ФОТООТЧЕТ"
+// ------------------------------------------------------------
+
+// После завершения фото договора / "Думает" / "Думает-отказ" / выбора результата КП
+// бот показывает кнопку "Перейти к загрузке отчета". Здесь храним сделку,
+// к которой эта кнопка относится, до тех пор пока пользователь её не нажал.
+const userPendingReportStart = {};
+
+// Выбранный пользователем замер в сценарии "Загрузить фотоотчет"
+// (после выбора сделки из списка задач "Загруз. отчет(и)").
+const userSelectedReportMeasurement = {};
+
+// Пользователь находится на экране "Загрузите фотоотчет" (после выбора сделки
+// или после нажатия "Перейти к загрузке отчета") и видит кнопки
+// "Перейти к загрузке замерн.листа" / "Вернуться к списку замеров".
+const userPendingReportHub = {};
+
+// Ожидание загрузки файлов замерного листа + очередь обработки файлов.
+const userPendingMeasureSheetUpload = {};
+const userMeasureSheetUploadQueue = {};
+
 // Сбрасывает весь временный стейт конкретного пользователя
 function resetUserState(userKey) {
   delete userSelectedMeasurement[userKey];
@@ -184,6 +209,11 @@ function resetUserState(userKey) {
   delete userPendingKpTask[userKey];
   delete userPendingPhotoUpload[userKey];
   delete userPhotoUploadQueue[userKey];
+  delete userPendingReportStart[userKey];
+  delete userSelectedReportMeasurement[userKey];
+  delete userPendingReportHub[userKey];
+  delete userPendingMeasureSheetUpload[userKey];
+  delete userMeasureSheetUploadQueue[userKey];
 }
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"), чтобы не запрашивать одного и того же пользователя много раз подряд.
@@ -264,6 +294,17 @@ function yesterdayMoscowStartUnix() {
 
 function getCurrentMoscowUnix() {
   return Math.floor(Date.now() / 1000);
+}
+
+// Сегодняшняя дата по Москве в формате ДД.ММ.ГГГГ (для имён файлов)
+function todayMoscowDateText() {
+  const now = getMoscowDate();
+
+  const day = String(now.getUTCDate()).padStart(2, "0");
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const year = now.getUTCFullYear();
+
+  return `${day}.${month}.${year}`;
 }
 
 // ============================================================
@@ -724,8 +765,12 @@ async function ydGetFolderPublicUrl(path) {
 // ОПРЕДЕЛЕНИЕ НОМЕРА СЛЕДУЮЩЕГО ФАЙЛА ДОГОВОРА
 // ============================================================
 
-async function ydGetNextContractFileNumber(
+// Универсальная версия: работает для любого префикса имени документа
+// ("Договор", "Замерный лист" и т.д.), чтобы одной и той же логикой
+// можно было пользоваться для разных типов загружаемых файлов.
+async function ydGetNextDocumentFileNumber(
   folderPath,
+  prefix,
   dateText
 ) {
   const response = await axios.get(
@@ -758,6 +803,12 @@ async function ydGetNextContractFileNumber(
       ? response.data._embedded.items
       : [];
 
+    const escapedPrefix =
+    String(prefix).replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
+
     const escapedDate =
     dateText.replace(
       /[.*+?^${}()|[\]\\]/g,
@@ -766,7 +817,7 @@ async function ydGetNextContractFileNumber(
 
   const pattern =
     new RegExp(
-      `^Договор ${escapedDate}` +
+      `^${escapedPrefix} ${escapedDate}` +
       `(?: \\((\\d+)\\))?` +
       `(?:\\.[^.]*)?$`,
       "i"
@@ -805,10 +856,26 @@ async function ydGetNextContractFileNumber(
 }
 
 // ============================================================
-// ФОРМИРОВАНИЕ ИМЕНИ ФАЙЛА ДОГОВОРА
+// ОПРЕДЕЛЕНИЕ НОМЕРА СЛЕДУЮЩЕГО ФАЙЛА ДОГОВОРА (обёртка для совместимости)
 // ============================================================
 
-function buildContractFileName(
+async function ydGetNextContractFileNumber(
+  folderPath,
+  dateText
+) {
+  return ydGetNextDocumentFileNumber(
+    folderPath,
+    "Договор",
+    dateText
+  );
+}
+
+// ============================================================
+// ФОРМИРОВАНИЕ ИМЕНИ ФАЙЛА ДОКУМЕНТА (УНИВЕРСАЛЬНАЯ ФУНКЦИЯ)
+// ============================================================
+
+function buildDocumentFileName(
+  prefix,
   dateText,
   number
 ) {
@@ -818,9 +885,23 @@ function buildContractFileName(
       : "";
 
   return (
-    `Договор ${dateText}` +
+    `${prefix} ${dateText}` +
     `${suffix}.jpg`
   );
+}
+
+function buildContractFileName(
+  dateText,
+  number
+) {
+  return buildDocumentFileName("Договор", dateText, number);
+}
+
+function buildMeasureSheetFileName(
+  dateText,
+  number
+) {
+  return buildDocumentFileName("Замерный лист", dateText, number);
 }
 
 async function ydUploadFromUrl(path, fileUrl) {
@@ -1863,6 +1944,134 @@ function formatConductMeasurementDetail(item) {
   );
 }
 
+// ------------------------------------------------------------
+// ПОИСК ЗАДАЧ "ЗАГРУЗ. ОТЧЕТ(И)" (тип 2746017), СЦЕНАРИЙ
+// "ЗАГРУЗИТЬ ФОТООТЧЕТ". Поля карточки полностью совпадают
+// с задачами "Провести замер", поэтому переиспользуем те же
+// функции форматирования строки списка (formatConductMeasurementLine).
+// ------------------------------------------------------------
+
+async function loadReportTasks() {
+  return loadAllTasksPaginated(
+    {
+      "filter[task_type][0]": REPORT_TASK_TYPE_ID,
+      "filter[is_completed]": 0
+    },
+    { verbose: false, errorLabel: "report" }
+  );
+}
+
+async function findReportMeasurementTasks() {
+  console.log("");
+  console.log("ПОИСК ЗАДАЧ ЗАГРУЗ. ОТЧЕТ (тип " + REPORT_TASK_TYPE_ID + ")");
+
+  const tasks = await loadReportTasks();
+
+  const measurements = [];
+
+  for (const task of tasks) {
+    if (
+      !task.entity_id ||
+      task.entity_type !== "leads" ||
+      Number(task.task_type_id) !== Number(REPORT_TASK_TYPE_ID) ||
+      task.is_completed !== false
+    ) {
+      continue;
+    }
+
+    const lead = await getLead(task.entity_id);
+
+    if (!lead) {
+      continue;
+    }
+
+    if (!leadBelongsToEngineer(lead)) {
+      continue;
+    }
+
+    let contactName = "";
+    let contactPhones = [];
+
+    const mainContactId = getMainContactId(lead);
+
+    if (mainContactId) {
+      const contact = await getContact(mainContactId);
+
+      if (contact) {
+        contactName = contact.name || "";
+        contactPhones = getContactPhones(contact);
+      }
+    }
+
+    const managerName = await getUserName(lead.responsible_user_id);
+
+    measurements.push({
+      task_id: Number(task.id),
+      lead_id: Number(task.entity_id),
+      lead_link:
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
+      measure_date: formatDateFieldValue(lead, MEASURE_DATE_FIELD_ID),
+      address: getFieldValueJoined(lead, ADDRESS_FIELD_ID),
+      manager_name: managerName,
+      budget:
+        lead.price !== undefined && lead.price !== null
+          ? String(lead.price)
+          : "",
+      discount: getFieldValueJoined(lead, DISCOUNT_FIELD_ID),
+      product: getFieldValueJoined(lead, PRODUCT_FIELD_ID),
+      contract_number: getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID),
+      contact_name: contactName,
+      contact_phones: contactPhones.join(", ")
+    });
+  }
+
+  console.log(`ИТОГО ЗАМЕРОВ (Загрузить фотоотчет): ${measurements.length}`);
+
+  return { measurements };
+}
+
+async function searchAndPresentReportMeasurements(send) {
+  return runMeasurementSearchAndPresent(send, {
+    searchFn: findReportMeasurementTasks,
+    emptyMessage: "📋 Задач на загрузку отчета не найдено.",
+    formatLine: formatConductMeasurementLine,
+    errorLogLabel: " (Загрузить фотоотчет)"
+  });
+}
+
+// Ищет уже существующую (не ожидая появления) незавершённую задачу заданного
+// типа в сделке. В отличие от waitForTaskOfType не ждёт и не повторяет попытки —
+// используется там, где задача уже должна существовать на момент вызова.
+async function findExistingTaskOfType(leadId, taskTypeId) {
+  const url = `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
+  const response = await amoCrmGet(url, {
+    limit: 50,
+    "filter[entity_type]": "leads",
+    "filter[entity_id][0]": leadId,
+    "filter[task_type][0]": taskTypeId,
+    "filter[is_completed]": 0
+  });
+
+  if (response.status !== 200) {
+    return null;
+  }
+
+  const tasks =
+    response.data &&
+    Array.isArray(response.data._embedded?.tasks)
+      ? response.data._embedded.tasks
+      : [];
+
+  return (
+    tasks.find(
+      (t) =>
+        Number(t.task_type_id) === Number(taskTypeId) &&
+        t.is_completed === false
+    ) || null
+  );
+}
+
 // ============================================================
 // "ПРИВЯЗКА" КНОПОК К КОНКРЕТНОМУ ЗАМЕРУ
 // ============================================================
@@ -2072,6 +2281,19 @@ async function waitForResultTask(leadId) {
   return waitForTaskOfType(leadId, RESULT_TASK_TYPE_ID);
 }
 
+// Показывается после загрузки фото договора и после веток
+// "Думает (свяжусь сам)" / "Думает/отказ (передать менеджеру)" /
+// выбора результата по КП — предлагает перейти к загрузке отчета
+// и замерного листа по этой же сделке.
+async function offerReportStart(send, userKey, leadId) {
+  userPendingReportStart[userKey] = { lead_id: leadId };
+
+  await send(
+    "Загрузите отчет и замерный лист",
+    ["Перейти к загрузке отчета"]
+  );
+}
+
 // ============================================================
 // DEBUG: STATUS
 // ============================================================
@@ -2102,6 +2324,8 @@ app.get("/status", (req, res) => {
       RESULT_TASK_TYPE_ID,
         kp_task_type_id:
       KP_TASK_TYPE_ID,
+    report_task_type_id:
+      REPORT_TASK_TYPE_ID,
     yandex_disk_token:
       YANDEX_DISK_TOKEN ? "ДА" : "НЕТ"
   });
@@ -2773,9 +2997,11 @@ async function processUserMessage({
 
       await send("✅ Фото сохранены. Спасибо!");
 
+      const finishedLeadId = pendingPhoto.lead_id;
+
       delete userPendingPhotoUpload[userKey];
 
-      await finish();
+      await offerReportStart(send, userKey, finishedLeadId);
 
       return;
     }
@@ -2928,6 +3154,147 @@ async function processUserMessage({
   }
 
   // ------------------------------------------------------
+  // ОЖИДАЕМ ФАЙЛЫ ЗАМЕРНОГО ЛИСТА
+  // (после кнопки "Перейти к загрузке замерн.листа")
+  // ------------------------------------------------------
+
+  const pendingMeasureSheet = userPendingMeasureSheetUpload[userKey];
+
+  if (pendingMeasureSheet) {
+    // Пользователь нажал одну из двух кнопок завершения загрузки.
+
+    if (
+      trimmedText === "Перейти к загрузке видео" ||
+      trimmedText === "Завершить отчет"
+    ) {
+      if (!pendingMeasureSheet.has_uploaded_file) {
+        await send(
+          "Пока не получено ни одного файла замерного листа. " +
+            "Загрузите хотя бы один файл, прежде чем продолжить."
+        );
+
+        return;
+      }
+
+      // ВРЕМЕННАЯ ЗАГЛУШКА.
+      // Шаги "Перейти к загрузке видео" и "Завершить отчет"
+      // будут реализованы отдельно в одном из следующих обновлений.
+      await send(
+        `Функция «${trimmedText}» пока находится в разработке.`
+      );
+
+      await finish();
+
+      return;
+    }
+
+    if (imageUrls && imageUrls.length > 0) {
+      // --------------------------------------------------------
+      // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ (по аналогии с фото договора)
+      // --------------------------------------------------------
+
+      const previousQueue =
+        userMeasureSheetUploadQueue[userKey] || Promise.resolve();
+
+      const currentQueue = previousQueue
+        .catch(() => {
+          // Не даём ошибке предыдущей загрузки остановить очередь.
+        })
+        .then(async () => {
+          const currentPending =
+            userPendingMeasureSheetUpload[userKey];
+
+          if (!currentPending) {
+            return;
+          }
+
+          let uploaded = 0;
+
+          for (const url of imageUrls) {
+            try {
+              const currentNumber =
+                currentPending.next_file_number;
+
+              const fileName = buildMeasureSheetFileName(
+                currentPending.date_text,
+                currentNumber
+              );
+
+              console.log("Загружаю файл замерного листа:", {
+                userKey,
+                url,
+                fileName,
+                number: currentNumber
+              });
+
+              await ydUploadFromUrl(
+                `${currentPending.measure_sheet_path}/${fileName}`,
+                url
+              );
+
+              currentPending.next_file_number = currentNumber + 1;
+
+              uploaded++;
+
+              console.log(
+                "Файл замерного листа успешно отправлен на Яндекс.Диск:",
+                fileName
+              );
+            } catch (error) {
+              console.error(
+                "Ошибка загрузки файла замерного листа на Яндекс.Диск:",
+                error.message
+              );
+            }
+          }
+
+          if (uploaded > 0) {
+            currentPending.has_uploaded_file = true;
+
+            await send(
+              `Файл(ы) получено (${uploaded}). Когда закончите — выберите действие:`,
+              ["Перейти к загрузке видео", "Завершить отчет"]
+            );
+          } else if (currentPending.has_uploaded_file) {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте ещё раз или выберите действие:",
+              ["Перейти к загрузке видео", "Завершить отчет"]
+            );
+          } else {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте загрузить его ещё раз."
+            );
+          }
+        });
+
+      userMeasureSheetUploadQueue[userKey] = currentQueue;
+
+      try {
+        await currentQueue;
+      } finally {
+        if (userMeasureSheetUploadQueue[userKey] === currentQueue) {
+          delete userMeasureSheetUploadQueue[userKey];
+        }
+      }
+
+      return;
+    }
+
+    if (pendingMeasureSheet.has_uploaded_file) {
+      await send(
+        "Загрузите замерный лист или выберите действие:",
+        ["Перейти к загрузке видео", "Завершить отчет"]
+      );
+    } else {
+      await send("Загрузите замерный лист.");
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
   // ПОДТВЕРДИТЬ ЗАМЕР
   // ------------------------------------------------------
 
@@ -2994,11 +3361,30 @@ async function processUserMessage({
   }
 
   if (trimmedText === "Загрузить фотоотчет") {
-    await send(
-      "Функция «Загрузить фотоотчет» пока находится в разработке."
+    console.log(
+      "=========================================="
     );
 
-    await finish();
+    console.log(
+      "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ: ЗАГРУЗИТЬ ФОТООТЧЕТ"
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    userLastSearchMode[userKey] = "report";
+
+    await send(
+      "⏳ Проверяю задачи на загрузку отчета..."
+    );
+
+    const shouldFinish =
+      await searchAndPresentReportMeasurements(send);
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
@@ -3451,12 +3837,7 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
-
-    if (shouldFinish) {
-      await finish();
-    }
+    await offerReportStart(send, userKey, stored.lead_id);
 
     return;
   }
@@ -3588,10 +3969,136 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
+    await offerReportStart(send, userKey, stored.lead_id);
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПЕРЕЙТИ К ЗАГРУЗКЕ ОТЧЕТА
+  // (кнопка после фото договора / "Думает" / выбора по КП)
+  // ------------------------------------------------------
+
+  if (trimmedText === "Перейти к загрузке отчета") {
+    const stored = userPendingReportStart[userKey];
+
+    if (!stored) {
+      await send(
+        "⚠️ Это кнопка из уже неактуального сообщения — сессия обновилась. " +
+          "Пожалуйста, начните заново: нажмите «Загрузить фотоотчет»."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    const reportTask = await findExistingTaskOfType(
+      stored.lead_id,
+      REPORT_TASK_TYPE_ID
+    );
+
+    if (!reportTask) {
+      await send(
+        "❌ Не нашёл задачу «Загруз. отчет(и)» в этой сделке. " +
+          "Проверьте сделку в amoCRM вручную или обратитесь к администратору."
+      );
+
+      delete userPendingReportStart[userKey];
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingReportStart[userKey];
+
+    userPendingReportHub[userKey] = {
+      lead_id: stored.lead_id,
+      report_task_id: Number(reportTask.id)
+    };
+
+    await send("Загрузите фотоотчет", [
+      "Перейти к загрузке замерн.листа",
+      "Вернуться к списку замеров"
+    ]);
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ВЕРНУТЬСЯ К СПИСКУ ЗАМЕРОВ (из экрана "Загрузите фотоотчет")
+  // ------------------------------------------------------
+
+  if (
+    trimmedText === "Вернуться к списку замеров" &&
+    userPendingReportHub[userKey]
+  ) {
+    delete userPendingReportHub[userKey];
+
+    userLastSearchMode[userKey] = "report";
+
+    const shouldFinish = await searchAndPresentReportMeasurements(send);
 
     if (shouldFinish) {
+      await finish();
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПЕРЕЙТИ К ЗАГРУЗКЕ ЗАМЕРНОГО ЛИСТА
+  // ------------------------------------------------------
+
+  if (
+    trimmedText === "Перейти к загрузке замерн.листа" &&
+    userPendingReportHub[userKey]
+  ) {
+    const stored = userPendingReportHub[userKey];
+
+    try {
+      const lead = await getLead(stored.lead_id);
+
+      if (!lead) {
+        throw new Error("Сделка не найдена");
+      }
+
+      // Папки уже должны существовать (их создаёт шаг "Заключен договор"),
+      // но на всякий случай проверяем/создаём их заново — это безопасно.
+      const folders = await ensureLeadYandexFolders(lead);
+
+      const dateText = todayMoscowDateText();
+
+      const nextFileNumber = await ydGetNextDocumentFileNumber(
+        folders.measureSheetPath,
+        "Замерный лист",
+        dateText
+      );
+
+      userPendingMeasureSheetUpload[userKey] = {
+        lead_id: stored.lead_id,
+        report_task_id: stored.report_task_id,
+        measure_sheet_path: folders.measureSheetPath,
+        date_text: dateText,
+        next_file_number: nextFileNumber,
+        has_uploaded_file: false
+      };
+
+      delete userPendingReportHub[userKey];
+
+      await send("Загрузите замерный лист");
+    } catch (error) {
+      console.error(
+        "Ошибка подготовки папки замерного листа:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+          "Подробности есть в логах Render."
+      );
+
       await finish();
     }
 
@@ -3633,6 +4140,41 @@ return;
       } catch (error) {
         console.error(
           "Ошибка при выборе замера (Провести замер):",
+          error.message
+        );
+      }
+    } else if (mode === "report") {
+      try {
+        const result = await findReportMeasurementTasks();
+
+        const selected = result.measurements.find(
+          (item) =>
+            String(item.contract_number).trim() === trimmedText
+        );
+
+        if (selected) {
+          console.log(
+            "ПОЛЬЗОВАТЕЛЬ ВЫБРАЛ ЗАМЕР (Загрузить фотоотчет):",
+            trimmedText
+          );
+
+          userSelectedReportMeasurement[userKey] = selected;
+
+          userPendingReportHub[userKey] = {
+            lead_id: selected.lead_id,
+            report_task_id: selected.task_id
+          };
+
+          await send("Загрузите фотоотчет", [
+            "Перейти к загрузке замерн.листа",
+            "Вернуться к списку замеров"
+          ]);
+
+          return;
+        }
+      } catch (error) {
+        console.error(
+          "Ошибка при выборе замера (Загрузить фотоотчет):",
           error.message
         );
       }
