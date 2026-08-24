@@ -420,46 +420,61 @@ async function refreshAmoCrmToken() {
 }
 
 // ============================================================
-// POST amoCRM
+// ОБЩИЙ HTTP-ЗАПРОС К AMOCRM (GET/POST/PATCH) С АВТО-РЕФРЕШЕМ ТОКЕНА
 // ============================================================
+//
+// Функции amoCrmGet/amoCrmPost/amoCrmPatch ниже раньше дублировали
+// один и тот же алгоритм: проверить наличие токена, выполнить
+// запрос, при 401 обновить токен и повторить запрос один раз.
+// Здесь этот алгоритм вынесен в одно место — сама логика запросов
+// (какой метод, какие заголовки/параметры используются) не менялась.
 
-async function amoCrmPost(url, body) {
+async function amoCrmRequest(
+  axiosMethod,
+  errorLabel,
+  url,
+  { params, body, headersExtra = {} } = {}
+) {
   if (!amocrmAccessToken) {
     throw new Error(
       "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
     );
   }
 
+  const buildConfig = () => ({
+    params,
+    headers: {
+      Authorization: `Bearer ${amocrmAccessToken}`,
+      Accept: "application/hal+json",
+      ...headersExtra
+    },
+    timeout: 60000,
+    validateStatus: () => true
+  });
+
+  const doRequest = () =>
+    body === undefined
+      ? axiosMethod(url, buildConfig())
+      : axiosMethod(url, body, buildConfig());
+
+  // Примечание: для GET axiosMethod принимает (url, config), а для
+  // POST/PATCH — (url, body, config). Вызывающие обёртки ниже
+  // передают сюда axios.get / axios.post / axios.patch напрямую,
+  // поэтому сигнатура совпадает автоматически в зависимости от
+  // наличия body.
+
   try {
-    const response = await axios.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
+    const response = await doRequest();
 
     if (response.status === 401) {
       console.log(
-        "amoCRM вернул 401. Пробуем обновить токен..."
+        `amoCRM вернул 401 (${errorLabel}). Пробуем обновить токен...`
       );
 
       try {
         await refreshAmoCrmToken();
 
-        const retry = await axios.post(url, body, {
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            "Content-Type": "application/json",
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
+        return await doRequest();
       } catch (refreshError) {
         return response;
       }
@@ -467,10 +482,21 @@ async function amoCrmPost(url, body) {
 
     return response;
   } catch (error) {
-    console.error("amoCRM POST ERROR:", error.message);
+    console.error(`amoCRM ${errorLabel} ERROR:`, error.message);
 
     throw error;
   }
+}
+
+// ============================================================
+// POST amoCRM
+// ============================================================
+
+async function amoCrmPost(url, body) {
+  return amoCrmRequest(axios.post, "POST", url, {
+    body,
+    headersExtra: { "Content-Type": "application/json" }
+  });
 }
 
 // ============================================================
@@ -479,53 +505,10 @@ async function amoCrmPost(url, body) {
 // ============================================================
 
 async function amoCrmPatch(url, body) {
-  if (!amocrmAccessToken) {
-    throw new Error(
-      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
-    );
-  }
-
-  try {
-    const response = await axios.patch(url, body, {
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
-
-    if (response.status === 401) {
-      console.log(
-        "amoCRM вернул 401 (PATCH). Пробуем обновить токен..."
-      );
-
-      try {
-        await refreshAmoCrmToken();
-
-        const retry = await axios.patch(url, body, {
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            "Content-Type": "application/json",
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
-      } catch (refreshError) {
-        return response;
-      }
-    }
-
-    return response;
-  } catch (error) {
-    console.error("amoCRM PATCH ERROR:", error.message);
-
-    throw error;
-  }
+  return amoCrmRequest(axios.patch, "PATCH", url, {
+    body,
+    headersExtra: { "Content-Type": "application/json" }
+  });
 }
 
 // Обновляет заданный набор custom-полей сделки одним запросом.
@@ -630,56 +613,7 @@ async function addLeadNote(leadId, text) {
 // ============================================================
 
 async function amoCrmGet(url, params) {
-  if (!amocrmAccessToken) {
-    throw new Error(
-      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
-    );
-  }
-
-  try {
-    const response = await axios.get(url, {
-      params,
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
-
-    if (response.status === 401) {
-      console.log(
-        "amoCRM вернул 401. Пробуем обновить токен..."
-      );
-
-      try {
-        await refreshAmoCrmToken();
-
-        const retry = await axios.get(url, {
-          params,
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
-      } catch (refreshError) {
-        return response;
-      }
-    }
-
-    return response;
-  } catch (error) {
-    console.error(
-      "amoCRM GET ERROR:",
-      error.message
-    );
-
-    throw error;
-  }
+  return amoCrmRequest(axios.get, "GET", url, { params });
 }
 
 // ============================================================
@@ -1227,6 +1161,23 @@ async function amoMessengerPost(
 // ОТПРАВКА СООБЩЕНИЯ (RPA-канал)
 // ============================================================
 
+// Собирает объект reply_markup из простого массива подписей кнопок —
+// используется и RPA-каналом (sendMessengerMessage), и прямым каналом
+// (sendDirectMessage), поэтому вынесено в одну общую функцию.
+function buildReplyMarkup(buttons) {
+  if (!buttons) {
+    return null;
+  }
+
+  return {
+    inline_keyboard: {
+      buttons: buttons.map((buttonText) => ({
+        text: buttonText
+      }))
+    }
+  };
+}
+
 async function sendMessengerMessage(
   botId,
   requestId,
@@ -1241,14 +1192,10 @@ async function sendMessengerMessage(
     }
   };
 
-  if (buttons) {
-    body.reply_markup = {
-      inline_keyboard: {
-        buttons: buttons.map((text) => ({
-          text
-        }))
-      }
-    };
+  const replyMarkup = buildReplyMarkup(buttons);
+
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
   }
 
   return amoMessengerPost(
@@ -1320,14 +1267,10 @@ async function sendDirectMessage(
 
   const body = { text };
 
-  if (buttons) {
-    body.reply_markup = {
-      inline_keyboard: {
-        buttons: buttons.map((text) => ({
-          text
-        }))
-      }
-    };
+  const replyMarkup = buildReplyMarkup(buttons);
+
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
   }
 
   console.log("");
@@ -1638,62 +1581,58 @@ function leadBelongsToEngineer(lead) {
 // её просто не видел. Теперь фильтрация по типу задачи, статусу
 // и диапазону дат выполняется на стороне amoCRM API, поэтому грузятся
 // только релевантные задачи и лимит страниц не может "отрезать" нужную.
-async function loadTasksDiagnostic(fromUnix, nowUnix) {
+// Общая постраничная загрузка задач amoCRM (лимит 250 на страницу,
+// не более 20 страниц как защита от бесконечного цикла). Раньше
+// этот цикл был продублирован в loadTasksDiagnostic и
+// loadConductTasks с одинаковой логикой пагинации и разными
+// фильтрами — фильтры и подробность логирования теперь задаются
+// параметрами, сам цикл вынесен сюда.
+async function loadAllTasksPaginated(filterParams, { verbose = false, errorLabel = "" } = {}) {
+  const url = `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
   const allTasks = [];
 
   let page = 1;
 
   while (true) {
-    const url =
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
-
     const params = {
       limit: 250,
       page,
-      "filter[task_type][0]": MEASUREMENT_TASK_TYPE_ID,
-      "filter[is_completed]": 0,
-      "filter[complete_till][from]": fromUnix,
-      "filter[complete_till][to]": nowUnix
+      ...filterParams
     };
 
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      `ЗАГРУЗКА ЗАДАЧ. СТРАНИЦА ${page}`
-    );
-    console.log(
-      "=========================================="
-    );
+    if (verbose) {
+      console.log("");
+      console.log("==========================================");
+      console.log(`ЗАГРУЗКА ЗАДАЧ. СТРАНИЦА ${page}`);
+      console.log("==========================================");
+    }
 
-    const response = await amoCrmGet(
-      url,
-      params
-    );
+    const response = await amoCrmGet(url, params);
 
-    console.log(
-      "amoCRM tasks response:",
-      response.status
-    );
+    if (verbose) {
+      console.log("amoCRM tasks response:", response.status);
+    }
 
     if (response.status === 204) {
-      console.log(
-        "amoCRM вернул 204 — задач больше нет."
-      );
+      if (verbose) {
+        console.log("amoCRM вернул 204 — задач больше нет.");
+      }
 
       break;
     }
 
     if (response.status !== 200) {
-      console.error(
-        "Ошибка получения задач:",
-        response.status,
-        response.data
-      );
+      if (verbose) {
+        console.error(
+          "Ошибка получения задач:",
+          response.status,
+          response.data
+        );
+      }
 
       throw new Error(
-        `amoCRM tasks HTTP ${response.status}`
+        `amoCRM tasks${errorLabel ? ` (${errorLabel})` : ""} HTTP ${response.status}`
       );
     }
 
@@ -1703,9 +1642,9 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
         ? response.data._embedded.tasks
         : [];
 
-    console.log(
-      `Получено задач на странице ${page}: ${tasks.length}`
-    );
+    if (verbose) {
+      console.log(`Получено задач на странице ${page}: ${tasks.length}`);
+    }
 
     allTasks.push(...tasks);
 
@@ -1717,20 +1656,32 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
 
     // Защита от бесконечного цикла
     if (page > 20) {
-      console.log(
-        "Остановлено после 20 страниц."
-      );
+      if (verbose) {
+        console.log("Остановлено после 20 страниц.");
+      }
 
       break;
     }
   }
 
-  console.log("");
-  console.log(
-    `ВСЕГО ЗАГРУЖЕНО ЗАДАЧ: ${allTasks.length}`
-  );
+  if (verbose) {
+    console.log("");
+    console.log(`ВСЕГО ЗАГРУЖЕНО ЗАДАЧ: ${allTasks.length}`);
+  }
 
   return allTasks;
+}
+
+async function loadTasksDiagnostic(fromUnix, nowUnix) {
+  return loadAllTasksPaginated(
+    {
+      "filter[task_type][0]": MEASUREMENT_TASK_TYPE_ID,
+      "filter[is_completed]": 0,
+      "filter[complete_till][from]": fromUnix,
+      "filter[complete_till][to]": nowUnix
+    },
+    { verbose: true }
+  );
 }
 
 // ============================================================
@@ -2018,53 +1969,13 @@ async function findMeasurementTasks() {
 // ============================================================
 
 async function loadConductTasks() {
-  const allTasks = [];
-
-  let page = 1;
-
-  while (true) {
-    const url =
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
-
-    const params = {
-      limit: 250,
-      page,
+  return loadAllTasksPaginated(
+    {
       "filter[task_type][0]": CONDUCT_TASK_TYPE_ID,
       "filter[is_completed]": 0
-    };
-
-    const response = await amoCrmGet(url, params);
-
-    if (response.status === 204) {
-      break;
-    }
-
-    if (response.status !== 200) {
-      throw new Error(
-        `amoCRM tasks (conduct) HTTP ${response.status}`
-      );
-    }
-
-    const tasks =
-      response.data &&
-      Array.isArray(response.data._embedded?.tasks)
-        ? response.data._embedded.tasks
-        : [];
-
-    allTasks.push(...tasks);
-
-    if (tasks.length < 250) {
-      break;
-    }
-
-    page++;
-
-    if (page > 20) {
-      break;
-    }
-  }
-
-  return allTasks;
+    },
+    { verbose: false, errorLabel: "conduct" }
+  );
 }
 
 async function findConductMeasurementTasks() {
@@ -2281,37 +2192,85 @@ async function sendStaleButtonNotice(send, currentStoredItem, kind) {
   );
 }
 
-// Общая функция поиска + показа списка для "Провести замер",
-// по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
-async function searchAndPresentConductMeasurements(send) {
+// Проверяет, что нажатая кнопка (buttonId — идентификатор, зашитый
+// в неё) относится к реально сохранённому текущему замеру
+// пользователя. Если это не так (кнопка устарела или замера уже
+// нет) — сама уведомляет пользователя через sendStaleButtonNotice,
+// при необходимости завершает шаг через finish() и возвращает null.
+// Если всё совпадает — возвращает сохранённый замер.
+//
+// Раньше эта проверка (получить stored, сравнить идентификатор,
+// уведомить, завершить при отсутствии stored) была продублирована
+// в каждом из обработчиков кнопок "Замер подтвержден", "Перенос
+// замера", "Отказ", "Замер состоялся", "Замер не состоялся".
+async function resolveActiveMeasurementOrNotify(
+  send,
+  finish,
+  measurementMap,
+  userKey,
+  buttonId,
+  kind
+) {
+  const stored = measurementMap[userKey];
+
+  if (!stored || buildMeasurementIdentifier(stored) !== buttonId) {
+    await sendStaleButtonNotice(send, stored, kind);
+
+    // Если реально сохранённого замера нет — сессии ждать больше
+    // нечего, отдаём управление. Если он есть — sendStaleButtonNotice
+    // уже заново показал его карточку с актуальными кнопками, и
+    // управление возвращать рано: ждём, что пользователь нажмёт
+    // одну из них.
+    if (!stored) {
+      await finish();
+    }
+
+    return null;
+  }
+
+  return stored;
+}
+
+// Общая логика "найти замеры и показать список пользователю" —
+// используется и для "Подтвердить замер" (searchAndPresentMeasurements),
+// и для "Провести замер" (searchAndPresentConductMeasurements). Раньше
+// обе функции дублировали один и тот же алгоритм (найти → построить
+// сообщение из строк → построить кнопки → отправить → обработать
+// ошибку), различаясь только текстом "нет замеров", функцией поиска
+// и функцией форматирования одной строки списка.
+async function runMeasurementSearchAndPresent(send, {
+  searchFn,
+  emptyMessage,
+  formatLine,
+  errorLogLabel
+}) {
   let shouldFinish = true;
 
   try {
-    const result = await findConductMeasurementTasks();
+    const result = await searchFn();
 
     if (result.measurements.length === 0) {
-      await send("📋 Замеров для проведения не найдено.");
+      await send(emptyMessage);
     } else {
       let message = "📋 Найдены замеры:\n\n";
 
       result.measurements.forEach((item, index) => {
-        message += formatConductMeasurementLine(item, index);
+        message += formatLine(item, index);
       });
 
       const buttons = result.measurements.map(
-        (item) =>
-          item.contract_number || `Задача ${item.task_id}`
+        (item) => item.contract_number || `Задача ${item.task_id}`
       );
 
       await send(message, buttons);
 
+      // Список с кнопками показан — НЕ отдаём управление, так как
+      // ждём, что пользователь нажмёт одну из кнопок (обработка в
+      // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
       shouldFinish = false;
     }
   } catch (error) {
-    console.error(
-      "Ошибка поиска замеров (Провести замер):",
-      error.message
-    );
+    console.error(`Ошибка поиска замеров${errorLogLabel}:`, error.message);
 
     try {
       await send(
@@ -2323,6 +2282,17 @@ async function searchAndPresentConductMeasurements(send) {
   }
 
   return shouldFinish;
+}
+
+// Общая функция поиска + показа списка для "Провести замер",
+// по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
+async function searchAndPresentConductMeasurements(send) {
+  return runMeasurementSearchAndPresent(send, {
+    searchFn: findConductMeasurementTasks,
+    emptyMessage: "📋 Замеров для проведения не найдено.",
+    formatLine: formatConductMeasurementLine,
+    errorLogLabel: " (Провести замер)"
+  });
 }
 
 // Ждём (до 30 секунд), пока в сделке появится задача типа
@@ -2911,63 +2881,27 @@ app.get(
 // (замеров не найдено или произошла ошибка), и false, если бот ждёт,
 // что пользователь нажмёт на кнопку с номером договора.
 
+function formatMeasurementLine(item, index) {
+  return (
+    `${index + 1}. ` +
+    `№ договора: ${item.contract_number || "—"}; ` +
+    `Дата замера: ${item.measure_date || "—"}; ` +
+    `Время замера: ${item.measure_time || "—"}; ` +
+    `Адрес замера: ${item.address || "—"}; ` +
+    `Продукт: ${item.product || "—"}; ` +
+    `Имя контакта: ${item.contact_name || "—"}; ` +
+    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
+    `Ссылка на сделку: ${item.lead_link}\n`
+  );
+}
+
 async function searchAndPresentMeasurements(send) {
-  let shouldFinish = true;
-
-  try {
-    const result = await findMeasurementTasks();
-
-    if (result.measurements.length === 0) {
-      await send(
-        "📋 Замеров для подтверждения не найдено."
-      );
-    } else {
-      let message = "📋 Найдены замеры:\n\n";
-
-      result.measurements.forEach((item, index) => {
-        message +=
-          `${index + 1}. ` +
-          `№ договора: ${item.contract_number || "—"}; ` +
-          `Дата замера: ${item.measure_date || "—"}; ` +
-          `Время замера: ${item.measure_time || "—"}; ` +
-          `Адрес замера: ${item.address || "—"}; ` +
-          `Продукт: ${item.product || "—"}; ` +
-          `Имя контакта: ${item.contact_name || "—"}; ` +
-          `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
-          `Ссылка на сделку: ${item.lead_link}\n`;
-      });
-
-      const buttons = result.measurements.map(
-        (item) =>
-          item.contract_number || `Задача ${item.task_id}`
-      );
-
-      await send(message, buttons);
-
-      // Список с кнопками показан — НЕ отдаём управление, так как
-      // ждём, что пользователь нажмёт одну из кнопок (обработка в
-      // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
-      shouldFinish = false;
-    }
-  } catch (error) {
-    console.error(
-      "Ошибка поиска замеров:",
-      error.message
-    );
-
-    try {
-      await send(
-        "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
-      );
-    } catch (sendError) {
-      console.error(
-        "Ошибка отправки ошибки:",
-        sendError.message
-      );
-    }
-  }
-
-  return shouldFinish;
+  return runMeasurementSearchAndPresent(send, {
+    searchFn: findMeasurementTasks,
+    emptyMessage: "📋 Замеров для подтверждения не найдено.",
+    formatLine: formatMeasurementLine,
+    errorLogLabel: ""
+  });
 }
 
 // ============================================================
@@ -3445,23 +3379,16 @@ async function processUserMessage({
       "=========================================="
     );
 
-    const stored = userSelectedMeasurement[userKey];
+    const stored = await resolveActiveMeasurementOrNotify(
+      send,
+      finish,
+      userSelectedMeasurement,
+      userKey,
+      confirmedMeasurementId,
+      "confirm"
+    );
 
-    if (
-      !stored ||
-      buildMeasurementIdentifier(stored) !== confirmedMeasurementId
-    ) {
-      await sendStaleButtonNotice(send, stored, "confirm");
-
-      // Если реально сохранённого замера нет — сессии ждать больше
-      // нечего, отдаём управление. Если он есть — мы только что
-      // заново показали его карточку с актуальными кнопками, и
-      // управление возвращать рано: ждём, что пользователь нажмёт
-      // одну из них.
-      if (!stored) {
-        await finish();
-      }
-
+    if (!stored) {
       return;
     }
 
@@ -3521,18 +3448,16 @@ async function processUserMessage({
   );
 
   if (rescheduleMeasurementId !== null) {
-    const stored = userSelectedMeasurement[userKey];
+    const stored = await resolveActiveMeasurementOrNotify(
+      send,
+      finish,
+      userSelectedMeasurement,
+      userKey,
+      rescheduleMeasurementId,
+      "confirm"
+    );
 
-    if (
-      !stored ||
-      buildMeasurementIdentifier(stored) !== rescheduleMeasurementId
-    ) {
-      await sendStaleButtonNotice(send, stored, "confirm");
-
-      if (!stored) {
-        await finish();
-      }
-
+    if (!stored) {
       return;
     }
 
@@ -3561,18 +3486,16 @@ async function processUserMessage({
   );
 
   if (declineMeasurementId !== null) {
-    const stored = userSelectedMeasurement[userKey];
+    const stored = await resolveActiveMeasurementOrNotify(
+      send,
+      finish,
+      userSelectedMeasurement,
+      userKey,
+      declineMeasurementId,
+      "confirm"
+    );
 
-    if (
-      !stored ||
-      buildMeasurementIdentifier(stored) !== declineMeasurementId
-    ) {
-      await sendStaleButtonNotice(send, stored, "confirm");
-
-      if (!stored) {
-        await finish();
-      }
-
+    if (!stored) {
       return;
     }
 
@@ -3601,18 +3524,16 @@ async function processUserMessage({
   );
 
   if (conductedMeasurementId !== null) {
-    const stored = userSelectedConductMeasurement[userKey];
+    const stored = await resolveActiveMeasurementOrNotify(
+      send,
+      finish,
+      userSelectedConductMeasurement,
+      userKey,
+      conductedMeasurementId,
+      "conduct"
+    );
 
-    if (
-      !stored ||
-      buildMeasurementIdentifier(stored) !== conductedMeasurementId
-    ) {
-      await sendStaleButtonNotice(send, stored, "conduct");
-
-      if (!stored) {
-        await finish();
-      }
-
+    if (!stored) {
       return;
     }
 
@@ -3679,18 +3600,16 @@ async function processUserMessage({
   );
 
   if (notConductedMeasurementId !== null) {
-    const stored = userSelectedConductMeasurement[userKey];
+    const stored = await resolveActiveMeasurementOrNotify(
+      send,
+      finish,
+      userSelectedConductMeasurement,
+      userKey,
+      notConductedMeasurementId,
+      "conduct"
+    );
 
-    if (
-      !stored ||
-      buildMeasurementIdentifier(stored) !== notConductedMeasurementId
-    ) {
-      await sendStaleButtonNotice(send, stored, "conduct");
-
-      if (!stored) {
-        await finish();
-      }
-
+    if (!stored) {
       return;
     }
 
