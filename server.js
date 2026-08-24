@@ -78,11 +78,7 @@ const MEASURE_TIME_FIELD_ID = 413828; // Время замера (список)
 const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстовая область)
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
-// Тип задачи "Загруз. отчет(и)"
-const REPORT_TASK_TYPE_ID = 2746017;
 
-// Поле контакта "Email рабочий"
-const WORK_EMAIL_FIELD_ID = 141995;
 // Поля-ссылки на папки Яндекс.Диска (заполняются ботом автоматически)
 const REPORTS_LINK_FIELD_ID = 555436; // "Отчеты и проекты"
 const PHOTO_LINK_FIELD_ID = 543238; // "Фото проема №1" (папка "Фотоотчет")
@@ -190,19 +186,7 @@ let amomessengerAccessToken =
 
 let amomessengerRefreshToken =
   process.env.AMOMESSENGER_REFRESH_TOKEN || "";
-// ============================================================
-// UPSTASH REDIS
-// Постоянное хранение OAuth-токенов
-// ============================================================
 
-const UPSTASH_REDIS_REST_URL =
-  process.env.UPSTASH_REDIS_REST_URL;
-
-const UPSTASH_REDIS_REST_TOKEN =
-  process.env.UPSTASH_REDIS_REST_TOKEN;
-
-const REDIS_TOKEN_KEY =
-  "amobot:oauth_tokens";
 let amocrmAccessToken =
   process.env.AMOCRM_ACCESS_TOKEN || "";
 
@@ -262,32 +246,12 @@ const userPendingResultTask = {};
 // подготовить клиенту.
 const userPendingKpTask = {};
 
-// После нажатия "Заключен договор" бот просит загрузить фото договора.
+// После нажатия "Заключен договор" бот просит загрузить фото и
+// ждёт фотографии + нажатие кнопки "Готово". Здесь храним, в какую
+// папку на Яндекс.Диске сохранять фото для этой сделки.
 const userPendingPhotoUpload = {};
 
 const userPhotoUploadQueue = {};
-
-
-// ============================================================
-// СОСТОЯНИЯ ДЛЯ СЦЕНАРИЯ "ЗАГРУЗИТЬ ФОТООТЧЕТ"
-// ============================================================
-
-// Выбранная задача "Загруз. отчет(и)".
-const userSelectedReport = {};
-
-// Текущий этап загрузки:
-// photo / measure_sheet / video.
-const userPendingReportUpload = {};
-
-// Очередь нужна для корректной обработки нескольких файлов,
-// которые amoMessenger может прислать почти одновременно.
-const userReportUploadQueue = {};
-
-// Ожидание изменения бюджета.
-const userPendingBudgetEdit = {};
-
-// Ожидание изменения e-mail.
-const userPendingEmailEdit = {};
 
 // Сбрасывает весь временный стейт конкретного пользователя —
 // используется, когда пользователь запускает/перезапускает
@@ -303,11 +267,6 @@ function resetUserState(userKey) {
   delete userPendingKpTask[userKey];
   delete userPendingPhotoUpload[userKey];
   delete userPhotoUploadQueue[userKey];
-    delete userSelectedReport[userKey];
-  delete userPendingReportUpload[userKey];
-  delete userReportUploadQueue[userKey];
-  delete userPendingBudgetEdit[userKey];
-  delete userPendingEmailEdit[userKey];
 }
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"),
@@ -337,162 +296,7 @@ function log(title, data) {
 
   console.log("==========================================");
 }
-// ============================================================
-// UPSTASH REDIS: СОХРАНЕНИЕ И ЗАГРУЗКА ТОКЕНОВ
-// ============================================================
 
-function upstashIsConfigured() {
-  return Boolean(
-    UPSTASH_REDIS_REST_URL &&
-    UPSTASH_REDIS_REST_TOKEN
-  );
-}
-
-
-async function saveTokensToRedis() {
-  if (!upstashIsConfigured()) {
-    console.log(
-      "Upstash Redis не настроен. Токены сохраняются только в памяти."
-    );
-
-    return;
-  }
-
-  const tokens = {
-    amocrm_access_token:
-      amocrmAccessToken || "",
-
-    amocrm_refresh_token:
-      amocrmRefreshToken || "",
-
-    amomessenger_access_token:
-      amomessengerAccessToken || "",
-
-    amomessenger_refresh_token:
-      amomessengerRefreshToken || ""
-  };
-
-  try {
-    const response =
-      await axios.post(
-        `${UPSTASH_REDIS_REST_URL}/set/${REDIS_TOKEN_KEY}`,
-        JSON.stringify(tokens),
-        {
-          headers: {
-            Authorization:
-              `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-            "Content-Type":
-              "application/json"
-          },
-          timeout: 30000
-        }
-      );
-
-    if (response.status >= 400) {
-      throw new Error(
-        `Upstash HTTP ${response.status}`
-      );
-    }
-
-    console.log(
-      "OAuth-токены сохранены в Upstash Redis."
-    );
-  } catch (error) {
-    console.error(
-      "Ошибка сохранения токенов в Upstash:",
-      error.response
-        ? JSON.stringify(error.response.data)
-        : error.message
-    );
-
-    throw error;
-  }
-}
-
-
-async function loadTokensFromRedis() {
-  if (!upstashIsConfigured()) {
-    console.log(
-      "Upstash Redis не настроен. Используем токены из Environment Variables."
-    );
-
-    return false;
-  }
-
-  try {
-    const response =
-      await axios.get(
-        `${UPSTASH_REDIS_REST_URL}/get/${REDIS_TOKEN_KEY}`,
-        {
-          headers: {
-            Authorization:
-              `Bearer ${UPSTASH_REDIS_REST_TOKEN}`
-          },
-          timeout: 30000
-        }
-      );
-
-    const rawValue =
-      response.data &&
-      response.data.result;
-
-    if (!rawValue) {
-      console.log(
-        "В Upstash Redis пока нет сохранённых OAuth-токенов."
-      );
-
-      return false;
-    }
-
-    const tokens =
-      typeof rawValue === "string"
-        ? JSON.parse(rawValue)
-        : rawValue;
-
-    if (
-      tokens.amocrm_access_token
-    ) {
-      amocrmAccessToken =
-        tokens.amocrm_access_token;
-    }
-
-    if (
-      tokens.amocrm_refresh_token
-    ) {
-      amocrmRefreshToken =
-        tokens.amocrm_refresh_token;
-    }
-
-    if (
-      tokens.amomessenger_access_token
-    ) {
-      amomessengerAccessToken =
-        tokens.amomessenger_access_token;
-    }
-
-    if (
-      tokens.amomessenger_refresh_token
-    ) {
-      amomessengerRefreshToken =
-        tokens.amomessenger_refresh_token;
-    }
-
-    console.log(
-      "OAuth-токены успешно загружены из Upstash Redis."
-    );
-
-    return true;
-  } catch (error) {
-    console.error(
-      "Ошибка загрузки токенов из Upstash:",
-      error.response
-        ? JSON.stringify(error.response.data)
-        : error.message
-    );
-
-    return false;
-  }
-}
 function getMoscowDate() {
   const now = new Date();
 
@@ -564,7 +368,9 @@ function getCurrentMoscowUnix() {
 
 async function refreshAmoCrmToken() {
   if (!amocrmRefreshToken) {
-    throw new Error("AMOCRM_REFRESH_TOKEN не задан");
+    throw new Error(
+      "AMOCRM_REFRESH_TOKEN не задан"
+    );
   }
 
   log("Обновляем токен amoCRM");
@@ -585,7 +391,9 @@ async function refreshAmoCrmToken() {
         redirect_uri: AMOCRM_REDIRECT_URI
       },
       {
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json"
+        },
         timeout: 30000
       }
     );
@@ -596,16 +404,85 @@ async function refreshAmoCrmToken() {
       amocrmRefreshToken = response.data.refresh_token;
     }
 
-    await saveTokensToRedis();
-
-    console.log("amoCRM access token обновлён и сохранён в Upstash.");
+    console.log("amoCRM access token обновлён.");
 
     return amocrmAccessToken;
   } catch (error) {
     console.error(
       "Ошибка обновления amoCRM token:",
-      error.response ? JSON.stringify(error.response.data) : error.message
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
     );
+
+    throw error;
+  }
+}
+
+// ============================================================
+// ОБЩИЙ HTTP-ЗАПРОС К AMOCRM (GET/POST/PATCH) С АВТО-РЕФРЕШЕМ ТОКЕНА
+// ============================================================
+//
+// Функции amoCrmGet/amoCrmPost/amoCrmPatch ниже раньше дублировали
+// один и тот же алгоритм: проверить наличие токена, выполнить
+// запрос, при 401 обновить токен и повторить запрос один раз.
+// Здесь этот алгоритм вынесен в одно место — сама логика запросов
+// (какой метод, какие заголовки/параметры используются) не менялась.
+
+async function amoCrmRequest(
+  axiosMethod,
+  errorLabel,
+  url,
+  { params, body, headersExtra = {} } = {}
+) {
+  if (!amocrmAccessToken) {
+    throw new Error(
+      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
+    );
+  }
+
+  const buildConfig = () => ({
+    params,
+    headers: {
+      Authorization: `Bearer ${amocrmAccessToken}`,
+      Accept: "application/hal+json",
+      ...headersExtra
+    },
+    timeout: 60000,
+    validateStatus: () => true
+  });
+
+  const doRequest = () =>
+    body === undefined
+      ? axiosMethod(url, buildConfig())
+      : axiosMethod(url, body, buildConfig());
+
+  // Примечание: для GET axiosMethod принимает (url, config), а для
+  // POST/PATCH — (url, body, config). Вызывающие обёртки ниже
+  // передают сюда axios.get / axios.post / axios.patch напрямую,
+  // поэтому сигнатура совпадает автоматически в зависимости от
+  // наличия body.
+
+  try {
+    const response = await doRequest();
+
+    if (response.status === 401) {
+      console.log(
+        `amoCRM вернул 401 (${errorLabel}). Пробуем обновить токен...`
+      );
+
+      try {
+        await refreshAmoCrmToken();
+
+        return await doRequest();
+      } catch (refreshError) {
+        return response;
+      }
+    }
+
+    return response;
+  } catch (error) {
+    console.error(`amoCRM ${errorLabel} ERROR:`, error.message);
 
     throw error;
   }
@@ -616,53 +493,10 @@ async function refreshAmoCrmToken() {
 // ============================================================
 
 async function amoCrmPost(url, body) {
-  if (!amocrmAccessToken) {
-    throw new Error(
-      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
-    );
-  }
-
-  try {
-    const response = await axios.post(url, body, {
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
-
-    if (response.status === 401) {
-      console.log(
-        "amoCRM вернул 401. Пробуем обновить токен..."
-      );
-
-      try {
-        await refreshAmoCrmToken();
-
-        const retry = await axios.post(url, body, {
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            "Content-Type": "application/json",
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
-      } catch (refreshError) {
-        return response;
-      }
-    }
-
-    return response;
-  } catch (error) {
-    console.error("amoCRM POST ERROR:", error.message);
-
-    throw error;
-  }
+  return amoCrmRequest(axios.post, "POST", url, {
+    body,
+    headersExtra: { "Content-Type": "application/json" }
+  });
 }
 
 // ============================================================
@@ -671,53 +505,10 @@ async function amoCrmPost(url, body) {
 // ============================================================
 
 async function amoCrmPatch(url, body) {
-  if (!amocrmAccessToken) {
-    throw new Error(
-      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
-    );
-  }
-
-  try {
-    const response = await axios.patch(url, body, {
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        "Content-Type": "application/json",
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
-
-    if (response.status === 401) {
-      console.log(
-        "amoCRM вернул 401 (PATCH). Пробуем обновить токен..."
-      );
-
-      try {
-        await refreshAmoCrmToken();
-
-        const retry = await axios.patch(url, body, {
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            "Content-Type": "application/json",
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
-      } catch (refreshError) {
-        return response;
-      }
-    }
-
-    return response;
-  } catch (error) {
-    console.error("amoCRM PATCH ERROR:", error.message);
-
-    throw error;
-  }
+  return amoCrmRequest(axios.patch, "PATCH", url, {
+    body,
+    headersExtra: { "Content-Type": "application/json" }
+  });
 }
 
 // Обновляет заданный набор custom-полей сделки одним запросом.
@@ -822,56 +613,7 @@ async function addLeadNote(leadId, text) {
 // ============================================================
 
 async function amoCrmGet(url, params) {
-  if (!amocrmAccessToken) {
-    throw new Error(
-      "AMOCRM_ACCESS_TOKEN не задан в Environment Variables"
-    );
-  }
-
-  try {
-    const response = await axios.get(url, {
-      params,
-      headers: {
-        Authorization: `Bearer ${amocrmAccessToken}`,
-        Accept: "application/hal+json"
-      },
-      timeout: 60000,
-      validateStatus: () => true
-    });
-
-    if (response.status === 401) {
-      console.log(
-        "amoCRM вернул 401. Пробуем обновить токен..."
-      );
-
-      try {
-        await refreshAmoCrmToken();
-
-        const retry = await axios.get(url, {
-          params,
-          headers: {
-            Authorization: `Bearer ${amocrmAccessToken}`,
-            Accept: "application/hal+json"
-          },
-          timeout: 60000,
-          validateStatus: () => true
-        });
-
-        return retry;
-      } catch (refreshError) {
-        return response;
-      }
-    }
-
-    return response;
-  } catch (error) {
-    console.error(
-      "amoCRM GET ERROR:",
-      error.message
-    );
-
-    throw error;
-  }
+  return amoCrmRequest(axios.get, "GET", url, { params });
 }
 
 // ============================================================
@@ -1226,422 +968,7 @@ function buildContractFileName(
     `${suffix}.jpg`
   );
 }
-// ============================================================
-// НОВАЯ ЛОГИКА ЗАГРУЗКИ ОТЧЕТА
-// ============================================================
 
-function buildReportFileName(
-  prefix,
-  dateText,
-  number
-) {
-  const suffix =
-    Number(number) > 0
-      ? ` (${Number(number)})`
-      : "";
-
-  return (
-    `${prefix} ${dateText}` +
-    `${suffix}.jpg`
-  );
-}
-
-
-// ============================================================
-// ПОИСК ЗАДАЧ "ЗАГРУЗ. ОТЧЕТ(И)"
-// ============================================================
-
-async function loadReportTasks() {
-  const allTasks = [];
-
-  let page = 1;
-
-  while (true) {
-    const url =
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
-
-    const response =
-      await amoCrmGet(
-        url,
-        {
-          limit: 250,
-          page,
-          "filter[task_type][0]":
-            REPORT_TASK_TYPE_ID,
-          "filter[is_completed]": 0
-        }
-      );
-
-    if (response.status === 204) {
-      break;
-    }
-
-    if (response.status !== 200) {
-      throw new Error(
-        `amoCRM tasks (report) HTTP ${response.status}`
-      );
-    }
-
-    const tasks =
-      response.data &&
-      Array.isArray(
-        response.data._embedded?.tasks
-      )
-        ? response.data._embedded.tasks
-        : [];
-
-    allTasks.push(...tasks);
-
-    if (tasks.length < 250) {
-      break;
-    }
-
-    page++;
-
-    if (page > 20) {
-      break;
-    }
-  }
-
-  return allTasks;
-}
-
-
-async function findReportTasks() {
-  console.log(
-    "ПОИСК ЗАДАЧ ЗАГРУЗ. ОТЧЕТ(И)"
-  );
-
-  const tasks =
-    await loadReportTasks();
-
-  const measurements = [];
-
-  for (const task of tasks) {
-    if (
-      !task.entity_id ||
-      task.entity_type !== "leads" ||
-      Number(task.task_type_id) !==
-        Number(REPORT_TASK_TYPE_ID) ||
-      task.is_completed !== false
-    ) {
-      continue;
-    }
-
-    const lead =
-      await getLead(task.entity_id);
-
-    if (!lead) {
-      continue;
-    }
-
-    if (!leadBelongsToEngineer(lead)) {
-      continue;
-    }
-
-    const contactId =
-      getMainContactId(lead);
-
-    let contactName = "";
-    let contactPhones = [];
-    let contact = null;
-
-    if (contactId) {
-      contact =
-        await getContact(contactId);
-
-      if (contact) {
-        contactName =
-          contact.name || "";
-
-        contactPhones =
-          getContactPhones(contact);
-      }
-    }
-
-    const managerName =
-      await getUserName(
-        lead.responsible_user_id
-      );
-
-    measurements.push({
-      task_id:
-        Number(task.id),
-
-      lead_id:
-        Number(task.entity_id),
-
-      contact_id:
-        contactId
-          ? Number(contactId)
-          : null,
-
-      lead_link:
-        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
-
-      measure_date:
-        formatDateFieldValue(
-          lead,
-          MEASURE_DATE_FIELD_ID
-        ),
-
-      address:
-        getFieldValueJoined(
-          lead,
-          ADDRESS_FIELD_ID
-        ),
-
-      manager_name:
-        managerName,
-
-      budget:
-        lead.price !== undefined &&
-        lead.price !== null
-          ? String(lead.price)
-          : "",
-
-      discount:
-        getFieldValueJoined(
-          lead,
-          DISCOUNT_FIELD_ID
-        ),
-
-      product:
-        getFieldValueJoined(
-          lead,
-          PRODUCT_FIELD_ID
-        ),
-
-      contract_number:
-        getFieldValueJoined(
-          lead,
-          CONTRACT_NUMBER_FIELD_ID
-        ),
-
-      contact_name:
-        contactName,
-
-      contact_phones:
-        contactPhones.join(", ")
-    });
-  }
-
-  console.log(
-    `ИТОГО ЗАДАЧ ОТЧЕТА: ${measurements.length}`
-  );
-
-  return {
-    measurements
-  };
-}
-
-
-function formatReportMeasurementLine(
-  item,
-  index
-) {
-  return (
-    `${index + 1}. ` +
-    `Дата замера: ${item.measure_date || "—"}; ` +
-    `Адрес замера: ${item.address || "—"}; ` +
-    `Ответственный менеджер: ${item.manager_name || "—"}; ` +
-    `Бюджет: ${item.budget || "—"}; ` +
-    `Скидка ОП: ${item.discount || "—"}; ` +
-    `Продукт: ${item.product || "—"}; ` +
-    `Имя клиента: ${item.contact_name || "—"}; ` +
-    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}; ` +
-    `№ договора: ${item.contract_number || "—"}; ` +
-    `Ссылка на сделку: ${item.lead_link}\n`
-  );
-}
-
-
-async function searchAndPresentReportTasks(
-  userKey,
-  send
-) {
-  let shouldFinish = true;
-
-  try {
-    const result =
-      await findReportTasks();
-
-    userLastSearchMode[userKey] =
-      "report";
-
-    if (
-      result.measurements.length === 0
-    ) {
-      await send(
-        "📋 Замеров для загрузки фотоотчета не найдено."
-      );
-    } else {
-      let message =
-        "📋 Найдены замеры:\n\n";
-
-      result.measurements.forEach(
-        (item, index) => {
-          message +=
-            formatReportMeasurementLine(
-              item,
-              index
-            );
-        }
-      );
-
-      const buttons =
-        result.measurements.map(
-          (item) =>
-            item.contract_number ||
-            `Задача ${item.task_id}`
-        );
-
-      await send(
-        message,
-        buttons
-      );
-
-      shouldFinish = false;
-    }
-  } catch (error) {
-    console.error(
-      "Ошибка поиска задач отчета:",
-      error.message
-    );
-
-    await send(
-      "❌ Не удалось получить список задач для загрузки отчета."
-    );
-  }
-
-  return shouldFinish;
-}
-
-
-// ============================================================
-// ОБЩАЯ ТОЧКА ПЕРЕХОДА К ЗАГРУЗКЕ ОТЧЕТА
-// ============================================================
-
-async function showReportUploadEntry(
-  send
-) {
-  await send(
-    "Загрузите отчет и замерный лист",
-    [
-      "Перейти к загрузке отчета"
-    ]
-  );
-}
-
-
-// ============================================================
-// ПОЛУЧЕНИЕ EMAIL РАБОЧЕГО
-// ============================================================
-
-function getWorkEmail(
-  contact
-) {
-  if (
-    !contact ||
-    !Array.isArray(
-      contact.custom_fields_values
-    )
-  ) {
-    return "";
-  }
-
-  const field =
-    contact.custom_fields_values.find(
-      (item) =>
-        Number(item.field_id) ===
-        Number(WORK_EMAIL_FIELD_ID)
-    );
-
-  if (
-    !field ||
-    !Array.isArray(field.values)
-  ) {
-    return "";
-  }
-
-  return field.values
-    .map((item) => item.value)
-    .filter(Boolean)
-    .join(", ");
-}
-
-
-// ============================================================
-// ЗАПИСЬ EMAIL В КОНТАКТ
-// ============================================================
-
-async function updateWorkEmail(
-  contactId,
-  email
-) {
-  const url =
-    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/contacts/${contactId}`;
-
-  const response =
-    await amoCrmPatch(
-      url,
-      {
-        custom_fields_values: [
-          {
-            field_id:
-              WORK_EMAIL_FIELD_ID,
-            values: [
-              {
-                value: email
-              }
-            ]
-          }
-        ]
-      }
-    );
-
-  if (
-    response.status >= 400
-  ) {
-    throw new Error(
-      `amoCRM contact PATCH HTTP ${response.status}`
-    );
-  }
-
-  return response.data;
-}
-
-
-// ============================================================
-// ОБНОВЛЕНИЕ БЮДЖЕТА
-// ============================================================
-
-async function updateLeadBudget(
-  leadId,
-  budget
-) {
-  const url =
-    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
-
-  const response =
-    await amoCrmPatch(
-      url,
-      {
-        price:
-          Number(budget)
-      }
-    );
-
-  if (
-    response.status >= 400
-  ) {
-    throw new Error(
-      `amoCRM lead PATCH HTTP ${response.status}`
-    );
-  }
-
-  return response.data;
-}
 // Загружает файл на Диск напрямую по его URL (Яндекс сам скачивает
 // файл с этого адреса — не нужно скачивать его на сервер бота).
 // Используется, например, для фото, присланных в amoMessenger —
@@ -1834,6 +1161,23 @@ async function amoMessengerPost(
 // ОТПРАВКА СООБЩЕНИЯ (RPA-канал)
 // ============================================================
 
+// Собирает объект reply_markup из простого массива подписей кнопок —
+// используется и RPA-каналом (sendMessengerMessage), и прямым каналом
+// (sendDirectMessage), поэтому вынесено в одну общую функцию.
+function buildReplyMarkup(buttons) {
+  if (!buttons) {
+    return null;
+  }
+
+  return {
+    inline_keyboard: {
+      buttons: buttons.map((buttonText) => ({
+        text: buttonText
+      }))
+    }
+  };
+}
+
 async function sendMessengerMessage(
   botId,
   requestId,
@@ -1848,14 +1192,10 @@ async function sendMessengerMessage(
     }
   };
 
-  if (buttons) {
-    body.reply_markup = {
-      inline_keyboard: {
-        buttons: buttons.map((text) => ({
-          text
-        }))
-      }
-    };
+  const replyMarkup = buildReplyMarkup(buttons);
+
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
   }
 
   return amoMessengerPost(
@@ -1927,75 +1267,42 @@ async function sendDirectMessage(
 
   const body = { text };
 
-  if (buttons) {
-    body.reply_markup = {
-      inline_keyboard: {
-        buttons: buttons.map((text) => ({
-          text
-        }))
-      }
-    };
+  const replyMarkup = buildReplyMarkup(buttons);
+
+  if (replyMarkup) {
+    body.reply_markup = replyMarkup;
   }
 
-  async function sendRequest() {
-    console.log("");
-    console.log("amoMessenger POST (DIRECT)");
-    console.log(url);
-    console.log("BODY:");
-    console.log(JSON.stringify(body, null, 2));
+  console.log("");
+  console.log("amoMessenger POST (DIRECT)");
+  console.log(url);
+  console.log("BODY:");
+  console.log(JSON.stringify(body, null, 2));
 
-    const response = await axios.post(
-      url,
-      body,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${amomessengerAccessToken}`,
-          "Content-Type":
-            "application/json"
-        },
-        timeout: 30000,
-        validateStatus: () => true
-      }
-    );
+  const response = await axios.post(url, body, {
+    headers: {
+      Authorization: `Bearer ${amomessengerAccessToken}`,
+      "Content-Type": "application/json"
+    },
+    timeout: 30000,
+    validateStatus: () => true
+  });
 
-    console.log(
-      "amoMessenger DIRECT response:",
-      response.status,
-      JSON.stringify(response.data)
-    );
+  console.log(
+    "amoMessenger DIRECT response:",
+    response.status,
+    JSON.stringify(response.data)
+  );
 
-    return response;
-  }
-
-  // Первая попытка отправки.
-  let response =
-    await sendRequest();
-
-  // Если access token устарел — обновляем его
-  // и повторяем отправку сообщения ОДИН раз.
   if (
     response.status === 401 ||
     response.status === 403
   ) {
     console.log(
-      "amoMessenger token недействителен. " +
-      "Пробуем автоматически обновить токен..."
+      "amoMessenger token недействителен (DIRECT)."
     );
-
-    await refreshAmoMessengerToken();
-
-    console.log(
-      "Повторяем отправку сообщения " +
-      "с новым токеном amoMessenger..."
-    );
-
-    response =
-      await sendRequest();
   }
 
-  // Если после обновления токена ошибка осталась —
-  // возвращаем ошибку, чтобы не делать бесконечные попытки.
   if (response.status >= 400) {
     throw new Error(
       `amoMessenger DIRECT HTTP ${response.status}`
@@ -2274,62 +1581,58 @@ function leadBelongsToEngineer(lead) {
 // её просто не видел. Теперь фильтрация по типу задачи, статусу
 // и диапазону дат выполняется на стороне amoCRM API, поэтому грузятся
 // только релевантные задачи и лимит страниц не может "отрезать" нужную.
-async function loadTasksDiagnostic(fromUnix, nowUnix) {
+// Общая постраничная загрузка задач amoCRM (лимит 250 на страницу,
+// не более 20 страниц как защита от бесконечного цикла). Раньше
+// этот цикл был продублирован в loadTasksDiagnostic и
+// loadConductTasks с одинаковой логикой пагинации и разными
+// фильтрами — фильтры и подробность логирования теперь задаются
+// параметрами, сам цикл вынесен сюда.
+async function loadAllTasksPaginated(filterParams, { verbose = false, errorLabel = "" } = {}) {
+  const url = `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
+
   const allTasks = [];
 
   let page = 1;
 
   while (true) {
-    const url =
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
-
     const params = {
       limit: 250,
       page,
-      "filter[task_type][0]": MEASUREMENT_TASK_TYPE_ID,
-      "filter[is_completed]": 0,
-      "filter[complete_till][from]": fromUnix,
-      "filter[complete_till][to]": nowUnix
+      ...filterParams
     };
 
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      `ЗАГРУЗКА ЗАДАЧ. СТРАНИЦА ${page}`
-    );
-    console.log(
-      "=========================================="
-    );
+    if (verbose) {
+      console.log("");
+      console.log("==========================================");
+      console.log(`ЗАГРУЗКА ЗАДАЧ. СТРАНИЦА ${page}`);
+      console.log("==========================================");
+    }
 
-    const response = await amoCrmGet(
-      url,
-      params
-    );
+    const response = await amoCrmGet(url, params);
 
-    console.log(
-      "amoCRM tasks response:",
-      response.status
-    );
+    if (verbose) {
+      console.log("amoCRM tasks response:", response.status);
+    }
 
     if (response.status === 204) {
-      console.log(
-        "amoCRM вернул 204 — задач больше нет."
-      );
+      if (verbose) {
+        console.log("amoCRM вернул 204 — задач больше нет.");
+      }
 
       break;
     }
 
     if (response.status !== 200) {
-      console.error(
-        "Ошибка получения задач:",
-        response.status,
-        response.data
-      );
+      if (verbose) {
+        console.error(
+          "Ошибка получения задач:",
+          response.status,
+          response.data
+        );
+      }
 
       throw new Error(
-        `amoCRM tasks HTTP ${response.status}`
+        `amoCRM tasks${errorLabel ? ` (${errorLabel})` : ""} HTTP ${response.status}`
       );
     }
 
@@ -2339,9 +1642,9 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
         ? response.data._embedded.tasks
         : [];
 
-    console.log(
-      `Получено задач на странице ${page}: ${tasks.length}`
-    );
+    if (verbose) {
+      console.log(`Получено задач на странице ${page}: ${tasks.length}`);
+    }
 
     allTasks.push(...tasks);
 
@@ -2353,20 +1656,32 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
 
     // Защита от бесконечного цикла
     if (page > 20) {
-      console.log(
-        "Остановлено после 20 страниц."
-      );
+      if (verbose) {
+        console.log("Остановлено после 20 страниц.");
+      }
 
       break;
     }
   }
 
-  console.log("");
-  console.log(
-    `ВСЕГО ЗАГРУЖЕНО ЗАДАЧ: ${allTasks.length}`
-  );
+  if (verbose) {
+    console.log("");
+    console.log(`ВСЕГО ЗАГРУЖЕНО ЗАДАЧ: ${allTasks.length}`);
+  }
 
   return allTasks;
+}
+
+async function loadTasksDiagnostic(fromUnix, nowUnix) {
+  return loadAllTasksPaginated(
+    {
+      "filter[task_type][0]": MEASUREMENT_TASK_TYPE_ID,
+      "filter[is_completed]": 0,
+      "filter[complete_till][from]": fromUnix,
+      "filter[complete_till][to]": nowUnix
+    },
+    { verbose: true }
+  );
 }
 
 // ============================================================
@@ -2654,53 +1969,13 @@ async function findMeasurementTasks() {
 // ============================================================
 
 async function loadConductTasks() {
-  const allTasks = [];
-
-  let page = 1;
-
-  while (true) {
-    const url =
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/tasks`;
-
-    const params = {
-      limit: 250,
-      page,
+  return loadAllTasksPaginated(
+    {
       "filter[task_type][0]": CONDUCT_TASK_TYPE_ID,
       "filter[is_completed]": 0
-    };
-
-    const response = await amoCrmGet(url, params);
-
-    if (response.status === 204) {
-      break;
-    }
-
-    if (response.status !== 200) {
-      throw new Error(
-        `amoCRM tasks (conduct) HTTP ${response.status}`
-      );
-    }
-
-    const tasks =
-      response.data &&
-      Array.isArray(response.data._embedded?.tasks)
-        ? response.data._embedded.tasks
-        : [];
-
-    allTasks.push(...tasks);
-
-    if (tasks.length < 250) {
-      break;
-    }
-
-    page++;
-
-    if (page > 20) {
-      break;
-    }
-  }
-
-  return allTasks;
+    },
+    { verbose: false, errorLabel: "conduct" }
+  );
 }
 
 async function findConductMeasurementTasks() {
@@ -2917,37 +2192,85 @@ async function sendStaleButtonNotice(send, currentStoredItem, kind) {
   );
 }
 
-// Общая функция поиска + показа списка для "Провести замер",
-// по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
-async function searchAndPresentConductMeasurements(send) {
+// Проверяет, что нажатая кнопка (buttonId — идентификатор, зашитый
+// в неё) относится к реально сохранённому текущему замеру
+// пользователя. Если это не так (кнопка устарела или замера уже
+// нет) — сама уведомляет пользователя через sendStaleButtonNotice,
+// при необходимости завершает шаг через finish() и возвращает null.
+// Если всё совпадает — возвращает сохранённый замер.
+//
+// Раньше эта проверка (получить stored, сравнить идентификатор,
+// уведомить, завершить при отсутствии stored) была продублирована
+// в каждом из обработчиков кнопок "Замер подтвержден", "Перенос
+// замера", "Отказ", "Замер состоялся", "Замер не состоялся".
+async function resolveActiveMeasurementOrNotify(
+  send,
+  finish,
+  measurementMap,
+  userKey,
+  buttonId,
+  kind
+) {
+  const stored = measurementMap[userKey];
+
+  if (!stored || buildMeasurementIdentifier(stored) !== buttonId) {
+    await sendStaleButtonNotice(send, stored, kind);
+
+    // Если реально сохранённого замера нет — сессии ждать больше
+    // нечего, отдаём управление. Если он есть — sendStaleButtonNotice
+    // уже заново показал его карточку с актуальными кнопками, и
+    // управление возвращать рано: ждём, что пользователь нажмёт
+    // одну из них.
+    if (!stored) {
+      await finish();
+    }
+
+    return null;
+  }
+
+  return stored;
+}
+
+// Общая логика "найти замеры и показать список пользователю" —
+// используется и для "Подтвердить замер" (searchAndPresentMeasurements),
+// и для "Провести замер" (searchAndPresentConductMeasurements). Раньше
+// обе функции дублировали один и тот же алгоритм (найти → построить
+// сообщение из строк → построить кнопки → отправить → обработать
+// ошибку), различаясь только текстом "нет замеров", функцией поиска
+// и функцией форматирования одной строки списка.
+async function runMeasurementSearchAndPresent(send, {
+  searchFn,
+  emptyMessage,
+  formatLine,
+  errorLogLabel
+}) {
   let shouldFinish = true;
 
   try {
-    const result = await findConductMeasurementTasks();
+    const result = await searchFn();
 
     if (result.measurements.length === 0) {
-      await send("📋 Замеров для проведения не найдено.");
+      await send(emptyMessage);
     } else {
       let message = "📋 Найдены замеры:\n\n";
 
       result.measurements.forEach((item, index) => {
-        message += formatConductMeasurementLine(item, index);
+        message += formatLine(item, index);
       });
 
       const buttons = result.measurements.map(
-        (item) =>
-          item.contract_number || `Задача ${item.task_id}`
+        (item) => item.contract_number || `Задача ${item.task_id}`
       );
 
       await send(message, buttons);
 
+      // Список с кнопками показан — НЕ отдаём управление, так как
+      // ждём, что пользователь нажмёт одну из кнопок (обработка в
+      // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
       shouldFinish = false;
     }
   } catch (error) {
-    console.error(
-      "Ошибка поиска замеров (Провести замер):",
-      error.message
-    );
+    console.error(`Ошибка поиска замеров${errorLogLabel}:`, error.message);
 
     try {
       await send(
@@ -2959,6 +2282,17 @@ async function searchAndPresentConductMeasurements(send) {
   }
 
   return shouldFinish;
+}
+
+// Общая функция поиска + показа списка для "Провести замер",
+// по аналогии с searchAndPresentMeasurements для "Подтвердить замер".
+async function searchAndPresentConductMeasurements(send) {
+  return runMeasurementSearchAndPresent(send, {
+    searchFn: findConductMeasurementTasks,
+    emptyMessage: "📋 Замеров для проведения не найдено.",
+    formatLine: formatConductMeasurementLine,
+    errorLogLabel: " (Провести замер)"
+  });
 }
 
 // Ждём (до 30 секунд), пока в сделке появится задача типа
@@ -3146,16 +2480,14 @@ app.get("/amocrm/callback", async (req, res) => {
     );
 
     amocrmAccessToken =
-  response.data.access_token;
+      response.data.access_token;
 
-amocrmRefreshToken =
-  response.data.refresh_token;
+    amocrmRefreshToken =
+      response.data.refresh_token;
 
-await saveTokensToRedis();
-
-console.log(
-  "amoCRM токены успешно получены и сохранены в Upstash."
-);
+    console.log(
+      "amoCRM токены успешно получены."
+    );
 
     res.send(`
       <!DOCTYPE html>
@@ -3384,81 +2716,7 @@ app.get(
     res.redirect(url);
   }
 );
-// ============================================================
-// ОБНОВЛЕНИЕ AMOMESSENGER ACCESS TOKEN
-// ============================================================
 
-async function refreshAmoMessengerToken() {
-  if (!amomessengerRefreshToken) {
-    throw new Error(
-      "AMOMESSENGER_REFRESH_TOKEN не задан"
-    );
-  }
-
-  console.log(
-    "Обновляем токен amoMessenger..."
-  );
-
-  try {
-    const response =
-      await axios.post(
-        "https://id.amo.tm/oauth2/access_token",
-        {
-          grant_type:
-            "refresh_token",
-
-          client_id:
-            AMOMESSENGER_CLIENT_ID,
-
-          client_secret:
-            AMOMESSENGER_CLIENT_SECRET,
-
-          refresh_token:
-            amomessengerRefreshToken,
-
-          redirect_uri:
-            AMOMESSENGER_REDIRECT_URI
-        },
-        {
-          headers: {
-            "Content-Type":
-              "application/json"
-          },
-
-          timeout: 30000
-        }
-      );
-
-    amomessengerAccessToken =
-      response.data.access_token;
-
-    if (
-      response.data.refresh_token
-    ) {
-      amomessengerRefreshToken =
-        response.data.refresh_token;
-    }
-
-    await saveTokensToRedis();
-
-    console.log(
-      "amoMessenger токен обновлён и сохранён в Upstash."
-    );
-
-    return amomessengerAccessToken;
-  } catch (error) {
-    console.error(
-      "Ошибка обновления amoMessenger token:",
-      error.response
-        ? JSON.stringify(
-            error.response.data
-          )
-        : error.message
-    );
-
-    throw error;
-  }
-}
 // ============================================================
 // AMOMESSENGER OAUTH CALLBACK
 // ============================================================
@@ -3524,16 +2782,14 @@ app.get(
       );
 
       amomessengerAccessToken =
-  response.data.access_token;
+        response.data.access_token;
 
-amomessengerRefreshToken =
-  response.data.refresh_token;
+      amomessengerRefreshToken =
+        response.data.refresh_token;
 
-await saveTokensToRedis();
-
-console.log(
-  "amoMessenger токены сохранены в Upstash."
-);
+      console.log(
+        "amoMessenger токены сохранены."
+      );
 
       res.send(`
         <!DOCTYPE html>
@@ -3625,63 +2881,27 @@ app.get(
 // (замеров не найдено или произошла ошибка), и false, если бот ждёт,
 // что пользователь нажмёт на кнопку с номером договора.
 
+function formatMeasurementLine(item, index) {
+  return (
+    `${index + 1}. ` +
+    `№ договора: ${item.contract_number || "—"}; ` +
+    `Дата замера: ${item.measure_date || "—"}; ` +
+    `Время замера: ${item.measure_time || "—"}; ` +
+    `Адрес замера: ${item.address || "—"}; ` +
+    `Продукт: ${item.product || "—"}; ` +
+    `Имя контакта: ${item.contact_name || "—"}; ` +
+    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
+    `Ссылка на сделку: ${item.lead_link}\n`
+  );
+}
+
 async function searchAndPresentMeasurements(send) {
-  let shouldFinish = true;
-
-  try {
-    const result = await findMeasurementTasks();
-
-    if (result.measurements.length === 0) {
-      await send(
-        "📋 Замеров для подтверждения не найдено."
-      );
-    } else {
-      let message = "📋 Найдены замеры:\n\n";
-
-      result.measurements.forEach((item, index) => {
-        message +=
-          `${index + 1}. ` +
-          `№ договора: ${item.contract_number || "—"}; ` +
-          `Дата замера: ${item.measure_date || "—"}; ` +
-          `Время замера: ${item.measure_time || "—"}; ` +
-          `Адрес замера: ${item.address || "—"}; ` +
-          `Продукт: ${item.product || "—"}; ` +
-          `Имя контакта: ${item.contact_name || "—"}; ` +
-          `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
-          `Ссылка на сделку: ${item.lead_link}\n`;
-      });
-
-      const buttons = result.measurements.map(
-        (item) =>
-          item.contract_number || `Задача ${item.task_id}`
-      );
-
-      await send(message, buttons);
-
-      // Список с кнопками показан — НЕ отдаём управление, так как
-      // ждём, что пользователь нажмёт одну из кнопок (обработка в
-      // блоке "ВЫБОР КОНКРЕТНОГО ЗАМЕРА" ниже).
-      shouldFinish = false;
-    }
-  } catch (error) {
-    console.error(
-      "Ошибка поиска замеров:",
-      error.message
-    );
-
-    try {
-      await send(
-        "❌ Произошла ошибка при поиске задач. Подробности есть в логах Render."
-      );
-    } catch (sendError) {
-      console.error(
-        "Ошибка отправки ошибки:",
-        sendError.message
-      );
-    }
-  }
-
-  return shouldFinish;
+  return runMeasurementSearchAndPresent(send, {
+    searchFn: findMeasurementTasks,
+    emptyMessage: "📋 Замеров для подтверждения не найдено.",
+    formatLine: formatMeasurementLine,
+    errorLogLabel: ""
+  });
 }
 
 // ============================================================
@@ -3859,169 +3079,7 @@ async function processUserMessage({
   // ------------------------------------------------------
   // ОЖИДАЕМ ФОТО ДОГОВОРА (после кнопки "Заключен договор")
   // ------------------------------------------------------
-// ------------------------------------------------------
-// ЗАГРУЗКА ФОТО / ЗАМЕРНОГО ЛИСТА / ВИДЕО
-// ------------------------------------------------------
 
-const pendingReport =
-  userPendingReportUpload[userKey];
-
-if (
-  pendingReport &&
-  imageUrls &&
-  imageUrls.length > 0
-) {
-  const previousQueue =
-    userReportUploadQueue[userKey] ||
-    Promise.resolve();
-
-  const currentQueue =
-    previousQueue
-      .catch(() => {})
-      .then(async () => {
-        const current =
-          userPendingReportUpload[
-            userKey
-          ];
-
-        if (!current) {
-          return;
-        }
-
-        let uploaded = 0;
-
-        for (
-          const url of imageUrls
-        ) {
-          let prefix;
-
-          if (
-            current.mode ===
-            "photo"
-          ) {
-            prefix =
-              "Фотоотчет";
-          } else if (
-            current.mode ===
-            "measure_sheet"
-          ) {
-            prefix =
-              "Замерный лист";
-          } else {
-            prefix =
-              "Видео";
-          }
-
-          const fileName =
-            buildReportFileName(
-              prefix,
-              current.date_text,
-              current.next_file_number
-            );
-
-          await ydUploadFromUrl(
-            `${current.folder_path}/${fileName}`,
-            url
-          );
-
-          current.next_file_number++;
-
-          current.uploaded_count++;
-
-          uploaded++;
-        }
-
-        const lead =
-          await getLead(
-            current.lead_id
-          );
-
-        const folders =
-          await ensureLeadYandexFolders(
-            lead
-          );
-
-        if (
-          current.mode ===
-          "photo"
-        ) {
-          current.links.photo =
-            await ydGetFolderPublicUrl(
-              folders.photoPath
-            );
-
-          await send(
-            `Файлы получены (${current.uploaded_count}).`,
-            [
-              "Перейти к загрузке замерн.листа",
-              "Вернуться к списку замеров"
-            ]
-          );
-        }
-
-        if (
-          current.mode ===
-          "measure_sheet"
-        ) {
-          current.links.measure_sheet =
-            await ydGetFolderPublicUrl(
-              folders.measureSheetPath
-            );
-
-          await send(
-            `Файлы получены (${current.uploaded_count}).`,
-            [
-              "Перейти к загрузке видео",
-              "Завершить отчет"
-            ]
-          );
-        }
-
-        if (
-          current.mode ===
-          "video"
-        ) {
-          current.links.video =
-            await ydGetFolderPublicUrl(
-              folders.videoPath
-            );
-
-          await send(
-            `Файлы получены (${current.uploaded_count}).`,
-            [
-              "Завершить отчет"
-            ]
-          );
-        }
-      });
-
-  userReportUploadQueue[userKey] =
-    currentQueue;
-
-  try {
-    await currentQueue;
-  } catch (error) {
-    console.error(
-      "Ошибка загрузки файлов отчета:",
-      error.message
-    );
-
-    await send(
-      "❌ Не удалось загрузить файл. Попробуйте отправить его ещё раз."
-    );
-  } finally {
-    if (
-      userReportUploadQueue[userKey] ===
-      currentQueue
-    ) {
-      delete userReportUploadQueue[
-        userKey
-      ];
-    }
-  }
-
-  return;
-}
   const pendingPhoto = userPendingPhotoUpload[userKey];
 
   if (pendingPhoto) {
@@ -4039,23 +3097,19 @@ if (
         return;
       }
 
-await send(
-  "✅ Фото сохранены. Спасибо!"
-);
+      await send("✅ Фото сохранены. Спасибо!");
 
-delete userPendingPhotoUpload[userKey];
+      delete userPendingPhotoUpload[userKey];
 
-await showReportUploadEntry(
-  send
-);
+      await finish();
 
-return;
+      return;
     }
 
-    if (
-      imageUrls &&
-      imageUrls.length > 0
-    ) {
+   if (
+  imageUrls &&
+  imageUrls.length > 0
+) {
   // --------------------------------------------------------
   // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
   //
@@ -4272,505 +3326,26 @@ return;
       "⏳ Проверяю задачи на проведение замера..."
     );
 
-    await showReportUploadEntry(
-  send
-);
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
 
-return;
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
   }
 
-if (
-  trimmedText ===
-  "Загрузить фотоотчет"
-) {
-  await send(
-    "⏳ Проверяю задачи для загрузки фотоотчета..."
-  );
-
-  const shouldFinish =
-    await searchAndPresentReportTasks(
-      userKey,
-      send
+  if (trimmedText === "Загрузить фотоотчет") {
+    await send(
+      "Функция «Загрузить фотоотчет» пока находится в разработке."
     );
 
-  if (shouldFinish) {
     await finish();
-  }
-
-  return;
-}
-// ------------------------------------------------------
-// ПЕРЕЙТИ К ЗАГРУЗКЕ ОТЧЕТА
-// ------------------------------------------------------
-
-if (
-  trimmedText ===
-  "Перейти к загрузке отчета"
-) {
-  await send(
-    "⏳ Проверяю задачи для загрузки фотоотчета..."
-  );
-
-  const shouldFinish =
-    await searchAndPresentReportTasks(
-      userKey,
-      send
-    );
-
-  if (shouldFinish) {
-    await finish();
-  }
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ВЕРНУТЬСЯ К СПИСКУ ЗАМЕРОВ
-// ------------------------------------------------------
-
-if (
-  trimmedText ===
-  "Вернуться к списку замеров"
-) {
-  delete userSelectedReport[userKey];
-  delete userPendingReportUpload[userKey];
-
-  const shouldFinish =
-    await searchAndPresentReportTasks(
-      userKey,
-      send
-    );
-
-  if (shouldFinish) {
-    await finish();
-  }
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ПЕРЕЙТИ К ЗАГРУЗКЕ ЗАМЕРНОГО ЛИСТА
-// ------------------------------------------------------
-
-if (
-  trimmedText ===
-  "Перейти к загрузке замерн.листа"
-) {
-  const selected =
-    userSelectedReport[userKey];
-
-  if (!selected) {
-    await send(
-      "Не найдена выбранная сделка. Вернитесь к списку замеров."
-    );
 
     return;
   }
 
-  const lead =
-    await getLead(
-      selected.lead_id
-    );
-
-  const folders =
-    await ensureLeadYandexFolders(
-      lead
-    );
-
-  const now =
-    getMoscowDate();
-
-  const dateText =
-    `${String(now.getUTCDate()).padStart(2, "0")}.` +
-    `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
-    `${now.getUTCFullYear()}`;
-
-  const previous =
-    userPendingReportUpload[userKey] ||
-    {};
-
-  userPendingReportUpload[userKey] = {
-    ...previous,
-
-    lead_id:
-      selected.lead_id,
-
-    task_id:
-      selected.task_id,
-
-    mode:
-      "measure_sheet",
-
-    folder_path:
-      folders.measureSheetPath,
-
-    date_text:
-      dateText,
-
-    next_file_number:
-      0,
-
-    uploaded_count:
-      0,
-
-    links:
-      previous.links || {}
-  };
-
-  await send(
-    "Загрузите замерный лист"
-  );
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ПЕРЕЙТИ К ЗАГРУЗКЕ ВИДЕО
-// ------------------------------------------------------
-
-if (
-  trimmedText ===
-  "Перейти к загрузке видео"
-) {
-  const selected =
-    userSelectedReport[userKey];
-
-  const pending =
-    userPendingReportUpload[userKey];
-
-  if (
-    !selected ||
-    !pending
-  ) {
-    await send(
-      "Не найдена выбранная сделка."
-    );
-
-    return;
-  }
-
-  const lead =
-    await getLead(
-      selected.lead_id
-    );
-
-  const folders =
-    await ensureLeadYandexFolders(
-      lead
-    );
-
-  const now =
-    getMoscowDate();
-
-  const dateText =
-    `${String(now.getUTCDate()).padStart(2, "0")}.` +
-    `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
-    `${now.getUTCFullYear()}`;
-
-  pending.mode =
-    "video";
-
-  pending.folder_path =
-    folders.videoPath;
-
-  pending.date_text =
-    dateText;
-
-  pending.next_file_number =
-    0;
-
-  pending.uploaded_count =
-    0;
-
-  await send(
-    "Загрузите видео"
-  );
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ЗАВЕРШИТЬ ОТЧЕТ
-// ------------------------------------------------------
-
-if (
-  trimmedText ===
-  "Завершить отчет"
-) {
-  const selected =
-    userSelectedReport[userKey];
-
-  const pending =
-    userPendingReportUpload[userKey];
-
-  if (!selected) {
-    await send(
-      "Не найдена выбранная сделка."
-    );
-
-    return;
-  }
-
-  try {
-    await senseiCompleteTask(
-      selected.lead_id,
-      selected.task_id,
-      "Отчет загружен"
-    );
-  } catch (error) {
-    console.error(
-      "Ошибка завершения задачи отчета:",
-      error.message
-    );
-
-    await send(
-      "❌ Не удалось завершить задачу."
-    );
-
-    return;
-  }
-
-  if (
-    pending &&
-    pending.links
-  ) {
-    const lines = [
-      "Ссылки на папки в yandex:"
-    ];
-
-    if (
-      pending.links.photo
-    ) {
-      lines.push(
-        `Фотоотчет: ${pending.links.photo}`
-      );
-    }
-
-    if (
-      pending.links.measure_sheet
-    ) {
-      lines.push(
-        `Замерный лист: ${pending.links.measure_sheet}`
-      );
-    }
-
-    if (
-      pending.links.video
-    ) {
-      lines.push(
-        `Видео: ${pending.links.video}`
-      );
-    }
-
-    if (
-      lines.length > 1
-    ) {
-      try {
-        await addLeadNote(
-          selected.lead_id,
-          lines.join("\n")
-        );
-      } catch (error) {
-        console.error(
-          "Ошибка добавления примечания:",
-          error.message
-        );
-      }
-    }
-  }
-
-  delete userPendingReportUpload[userKey];
-
-  userPendingBudgetEdit[userKey] = {
-    lead_id:
-      selected.lead_id,
-
-    task_id:
-      selected.task_id,
-
-    contact_id:
-      selected.contact_id
-  };
-
-  await send(
-    `Бюджет сделки: ${selected.budget || "пусто"}\n` +
-    "Внесите изменения",
-    [
-      "Без изменений"
-    ]
-  );
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ОЖИДАНИЕ ИЗМЕНЕНИЯ БЮДЖЕТА
-// ------------------------------------------------------
-
-const pendingBudget =
-  userPendingBudgetEdit[userKey];
-
-if (pendingBudget) {
-  if (
-    trimmedText ===
-    "Без изменений"
-  ) {
-    delete userPendingBudgetEdit[userKey];
-
-    userPendingEmailEdit[userKey] =
-      pendingBudget;
-
-    const contact =
-      pendingBudget.contact_id
-        ? await getContact(
-            pendingBudget.contact_id
-          )
-        : null;
-
-    await send(
-      `E-mail клиента: ${getWorkEmail(contact) || "пусто"}\n` +
-      "Внесите изменения",
-      [
-        "Без изменений"
-      ]
-    );
-
-    return;
-  }
-
-  if (
-    !/^\d+$/.test(
-      trimmedText
-    )
-  ) {
-    await send(
-      "Введите сообщение, состоящие только из цифр"
-    );
-
-    return;
-  }
-
-  try {
-    await updateLeadBudget(
-      pendingBudget.lead_id,
-      trimmedText
-    );
-  } catch (error) {
-    console.error(
-      "Ошибка изменения бюджета:",
-      error.message
-    );
-
-    await send(
-      "❌ Не удалось изменить бюджет."
-    );
-
-    return;
-  }
-
-  delete userPendingBudgetEdit[userKey];
-
-  userPendingEmailEdit[userKey] =
-    pendingBudget;
-
-  const contact =
-    pendingBudget.contact_id
-      ? await getContact(
-          pendingBudget.contact_id
-        )
-      : null;
-
-  await send(
-    `E-mail клиента: ${getWorkEmail(contact) || "пусто"}\n` +
-    "Внесите изменения",
-    [
-      "Без изменений"
-    ]
-  );
-
-  return;
-}
-
-
-// ------------------------------------------------------
-// ОЖИДАНИЕ ИЗМЕНЕНИЯ EMAIL
-// ------------------------------------------------------
-
-const pendingEmail =
-  userPendingEmailEdit[userKey];
-
-if (pendingEmail) {
-  if (
-    trimmedText ===
-    "Без изменений"
-  ) {
-    delete userPendingEmailEdit[userKey];
-
-    await searchAndPresentReportTasks(
-      userKey,
-      send
-    );
-
-    return;
-  }
-
-  if (
-    !trimmedText.includes("@") ||
-    !trimmedText.includes(".")
-  ) {
-    await send(
-      "Введите корректный e-mail"
-    );
-
-    return;
-  }
-
-  if (
-    !pendingEmail.contact_id
-  ) {
-    await send(
-      "❌ У сделки не найден контакт."
-    );
-
-    return;
-  }
-
-  try {
-    await updateWorkEmail(
-      pendingEmail.contact_id,
-      trimmedText
-    );
-  } catch (error) {
-    console.error(
-      "Ошибка изменения e-mail:",
-      error.message
-    );
-
-    await send(
-      "❌ Не удалось изменить e-mail."
-    );
-
-    return;
-  }
-
-  delete userPendingEmailEdit[userKey];
-
-  await send(
-    "Правки внесены"
-  );
-
-  await searchAndPresentReportTasks(
-    userKey,
-    send
-  );
-
-  return;
-}
   if (trimmedText === "Внести правки") {
     await send(
       "Функция «Внести правки» пока находится в разработке."
@@ -5259,11 +3834,14 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    await showReportUploadEntry(
-  send
-);
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
 
-return;
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
   }
 
   // ------------------------------------------------------
@@ -5393,11 +3971,14 @@ return;
       `Текущая задача amoCRM закрыта с результатом "${trimmedText}".`
     );
 
-    await showReportUploadEntry(
-  send
-);
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send);
 
-return;
+    if (shouldFinish) {
+      await finish();
+    }
+
+    return;
   }
 
   // ------------------------------------------------------
@@ -5412,90 +3993,7 @@ return;
 
   if (trimmedText) {
     const mode = userLastSearchMode[userKey];
-    if (mode === "report") {
-      try {
-        const result =
-          await findReportTasks();
 
-        const selected =
-          result.measurements.find(
-            (item) =>
-              String(
-                item.contract_number ||
-                `Задача ${item.task_id}`
-              ).trim() === trimmedText
-          );
-
-        if (selected) {
-          userSelectedReport[userKey] =
-            selected;
-
-          const lead =
-            await getLead(
-              selected.lead_id
-            );
-
-          const folders =
-            await ensureLeadYandexFolders(
-              lead
-            );
-
-          const now =
-            getMoscowDate();
-
-          const dateText =
-            `${String(now.getUTCDate()).padStart(2, "0")}.` +
-            `${String(now.getUTCMonth() + 1).padStart(2, "0")}.` +
-            `${now.getUTCFullYear()}`;
-
-          userPendingReportUpload[userKey] = {
-            lead_id:
-              selected.lead_id,
-
-            task_id:
-              selected.task_id,
-
-            mode:
-              "photo",
-
-            folder_path:
-              folders.photoPath,
-
-            date_text:
-              dateText,
-
-            next_file_number:
-              0,
-
-            uploaded_count:
-              0,
-
-            links: {}
-          };
-
-          await send(
-            "Загрузите фотоотчет",
-            [
-              "Перейти к загрузке замерн.листа",
-              "Вернуться к списку замеров"
-            ]
-          );
-
-          return;
-        }
-      } catch (error) {
-        console.error(
-          "Ошибка выбора задачи отчета:",
-          error.message
-        );
-
-        await send(
-          "❌ Не удалось открыть выбранную сделку."
-        );
-
-        return;
-      }
-    }
     if (mode === "conduct") {
       try {
         const result = await findConductMeasurementTasks();
@@ -6133,33 +4631,72 @@ app.use(
 // ============================================================
 // START
 // ============================================================
-// ============================================================
-// ЗАГРУЗКА АКТУАЛЬНЫХ ТОКЕНОВ ИЗ UPSTASH ПРИ СТАРТЕ
-// ============================================================
 
-async function startServer() {
-  await loadTokensFromRedis();
+app.listen(
+  PORT,
+  () => {
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+    console.log(
+      "amoMessenger BOT STARTED"
+    );
+    console.log(
+      "=========================================="
+    );
 
-  app.listen(
-    PORT,
-    () => {
-      console.log("");
-      console.log("==========================================");
-      console.log("amoMessenger BOT STARTED");
-      console.log("==========================================");
+    console.log(
+      "PORT:",
+      PORT
+    );
 
-      console.log("PORT:", PORT);
-      console.log("amoCRM:", `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`);
-      console.log("Timezone:", "Europe/Moscow");
-      console.log("Engineer:", ENGINEER_NAME);
-      console.log("Engineer field:", ENGINEER_FIELD_ID);
-      console.log("Engineer enum:", ENGINEER_ENUM_ID);
-      console.log("Measurement task type:", MEASUREMENT_TASK_TYPE_ID);
-      console.log("amoCRM token:", amocrmAccessToken ? "ДА" : "НЕТ");
-      console.log("amoMessenger token:", amomessengerAccessToken ? "ДА" : "НЕТ");
-      console.log("==========================================");
-    }
-  );
-}
+    console.log(
+      "amoCRM:",
+      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`
+    );
 
-startServer();
+    console.log(
+      "Timezone:",
+      "Europe/Moscow"
+    );
+
+    console.log(
+      "Engineer:",
+      ENGINEER_NAME
+    );
+
+    console.log(
+      "Engineer field:",
+      ENGINEER_FIELD_ID
+    );
+
+    console.log(
+      "Engineer enum:",
+      ENGINEER_ENUM_ID
+    );
+
+    console.log(
+      "Measurement task type:",
+      MEASUREMENT_TASK_TYPE_ID
+    );
+
+    console.log(
+      "amoCRM token:",
+      amocrmAccessToken
+        ? "ДА"
+        : "НЕТ"
+    );
+
+    console.log(
+      "amoMessenger token:",
+      amomessengerAccessToken
+        ? "ДА"
+        : "НЕТ"
+    );
+
+    console.log(
+      "=========================================="
+    );
+  }
+);
