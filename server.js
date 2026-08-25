@@ -1318,7 +1318,83 @@ async function ensureLeadYandexFolders(lead) {
     contractPath
   };
 }
+// ============================================================
+// ОБНОВЛЕНИЕ ТОКЕНА AMOMESSENGER
+// ============================================================
 
+async function refreshAmoMessengerToken() {
+  if (!amomessengerRefreshToken) {
+    throw new Error(
+      "Refresh Token amoMessenger не найден"
+    );
+  }
+
+  console.log("");
+  console.log(
+    "=========================================="
+  );
+  console.log(
+    "ОБНОВЛЯЕМ ТОКЕН AMOMESSENGER"
+  );
+  console.log(
+    "=========================================="
+  );
+
+  try {
+    const response = await axios.post(
+      "https://id.amo.tm/oauth2/access_token",
+      {
+        grant_type: "refresh_token",
+
+        client_id:
+          AMOMESSENGER_CLIENT_ID,
+
+        client_secret:
+          AMOMESSENGER_CLIENT_SECRET,
+
+        refresh_token:
+          amomessengerRefreshToken,
+
+        redirect_uri:
+          AMOMESSENGER_REDIRECT_URI
+      },
+      {
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+        timeout: 30000
+      }
+    );
+
+    amomessengerAccessToken =
+      response.data.access_token;
+
+    if (response.data.refresh_token) {
+      amomessengerRefreshToken =
+        response.data.refresh_token;
+    }
+
+    // Сохраняем новую пару токенов в Redis.
+    await saveAmoMessengerTokensToRedis();
+
+    console.log(
+      "Токен amoMessenger успешно обновлён и сохранён в Redis."
+    );
+
+    return amomessengerAccessToken;
+
+  } catch (error) {
+    console.error(
+      "Ошибка обновления токена amoMessenger:",
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
+    );
+
+    throw error;
+  }
+}
 // ============================================================
 // AMOMESSENGER API (RPA-канал, через виджет / control_transferred)
 // ============================================================
@@ -1345,8 +1421,8 @@ async function amoMessengerPost(
   console.log("BODY:");
   console.log(JSON.stringify(body, null, 2));
 
-  try {
-    const response = await axios.post(
+  const doRequest = async () => {
+    return axios.post(
       url,
       body,
       {
@@ -1359,6 +1435,11 @@ async function amoMessengerPost(
         validateStatus: () => true
       }
     );
+  };
+
+  try {
+    let response =
+      await doRequest();
 
     console.log(
       "amoMessenger response:",
@@ -1371,7 +1452,24 @@ async function amoMessengerPost(
       response.status === 403
     ) {
       console.log(
-        "amoMessenger token недействителен."
+        "amoMessenger вернул " +
+        `${response.status}. ` +
+        "Пробуем обновить токен..."
+      );
+
+      await refreshAmoMessengerToken();
+
+      console.log(
+        "Повторяем запрос amoMessenger..."
+      );
+
+      response =
+        await doRequest();
+
+      console.log(
+        "amoMessenger response после обновления токена:",
+        response.status,
+        response.data
       );
     }
 
@@ -1382,6 +1480,7 @@ async function amoMessengerPost(
     }
 
     return response;
+
   } catch (error) {
     console.error(
       "amoMessenger POST ERROR:",
