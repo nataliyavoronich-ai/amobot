@@ -1667,7 +1667,7 @@ async function getAmoMessengerUserName(userId) {
 
   try {
     const response = await axios.get(
-      "https://api.amo.io/v1.3/users",
+      ""https://api.amo.tm/v1.3/users",",
       {
         params: {
           "user_id[]": userId
@@ -2327,8 +2327,8 @@ async function findMeasurementTasks() {
       )
     );
 
-    const belongs =
-      leadBelongsToEngineer(lead);
+const belongs =
+      leadBelongsToEngineer(lead, ENGINEER_NAME);
 
     console.log(
       "Подходит инженер:",
@@ -2444,7 +2444,7 @@ async function findConductMeasurementTasks() {
       continue;
     }
 
-    if (!leadBelongsToEngineer(lead)) {
+        if (!leadBelongsToEngineer(lead, ENGINEER_NAME)) {
       continue;
     }
 
@@ -2561,7 +2561,7 @@ async function findReportMeasurementTasks() {
       continue;
     }
 
-    if (!leadBelongsToEngineer(lead)) {
+    if (!leadBelongsToEngineer(lead, ENGINEER_NAME)) {
       continue;
     }
 
