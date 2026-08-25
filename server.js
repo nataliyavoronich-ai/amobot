@@ -1656,6 +1656,98 @@ async function debugAmoMessengerUser(userId) {
 
   return null;
 }
+// ============================================================
+// ПОЛУЧЕНИЕ ИМЕНИ ПОЛЬЗОВАТЕЛЯ ИЗ AMOMESSENGER
+// ============================================================
+
+async function getAmoMessengerUserName(userId) {
+  if (!userId) {
+    return "";
+  }
+
+  try {
+    const response = await axios.get(
+      "https://api.amo.io/v1.3/users",
+      {
+        params: {
+          "user_id[]": userId
+        },
+
+        headers: {
+          Authorization: `Bearer ${amomessengerAccessToken}`,
+          "Content-Type": "application/json"
+        },
+
+        timeout: 30000
+      }
+    );
+
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+    console.log(
+      "AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ"
+    );
+    console.log(
+      JSON.stringify(
+        response.data,
+        null,
+        2
+      )
+    );
+    console.log(
+      "=========================================="
+    );
+
+    const items =
+      response.data?._embedded?.items || [];
+
+    if (
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      console.log(
+        "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:",
+        userId
+      );
+
+      return "";
+    }
+
+    const user =
+      items.find(
+        (item) =>
+          String(item.id) === String(userId)
+      ) || items[0];
+
+    const userName =
+      String(
+        user?.name || ""
+      ).trim();
+
+    console.log(
+      "ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
+      userName
+    );
+
+    return userName;
+
+  } catch (error) {
+    console.error(
+      "ОШИБКА ПОЛУЧЕНИЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
+      error.response?.status ||
+        error.message,
+      JSON.stringify(
+        error.response?.data || {},
+        null,
+        2
+      )
+    );
+
+    return "";
+  }
+}
 async function sendDirectMessage(
   directId,
   text,
@@ -5866,11 +5958,20 @@ app.post(
         const userKey =
           context.user_id ||
           (message.author && message.author.user_id);
-const userName = extractAmoMessengerUserName(
+let userName = extractAmoMessengerUserName(
   message.author,
   context,
   message
 );
+
+// Если имя не пришло непосредственно в webhook,
+// получаем его через API amoMessenger.
+if (!userName && userKey) {
+  userName =
+    await getAmoMessengerUserName(
+      userKey
+    );
+}
 
 console.log(
   "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER:",
@@ -5883,8 +5984,7 @@ console.log(
     2
   )
 );
-  const amoMessengerUserData =
-  await debugAmoMessengerUser(userKey);
+ 
         log(
           "ПРЯМОЙ КАНАЛ: ВХОДЯЩЕЕ СООБЩЕНИЕ",
           {
