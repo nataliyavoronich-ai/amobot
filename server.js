@@ -266,6 +266,102 @@ async function loadAmoCrmTokensFromRedis() {
   }
 }
 // ============================================================
+// UPSTASH REDIS — РАБОТА С ТОКЕНАМИ AMOMESSENGER
+// ============================================================
+
+async function saveAmoMessengerTokensToRedis() {
+  if (
+    !amomessengerAccessToken ||
+    !amomessengerRefreshToken
+  ) {
+    throw new Error(
+      "Невозможно сохранить пустые токены amoMessenger"
+    );
+  }
+
+  await redisRequest([
+    "SET",
+    "amomessenger_access_token",
+    amomessengerAccessToken
+  ]);
+
+  await redisRequest([
+    "SET",
+    "amomessenger_refresh_token",
+    amomessengerRefreshToken
+  ]);
+
+  console.log(
+    "Токены amoMessenger сохранены в Upstash Redis."
+  );
+}
+
+async function loadAmoMessengerTokensFromRedis() {
+  if (
+    !UPSTASH_REDIS_REST_URL ||
+    !UPSTASH_REDIS_REST_TOKEN
+  ) {
+    console.log(
+      "Upstash Redis не настроен. Используем токены amoMessenger из Environment Variables."
+    );
+
+    return false;
+  }
+
+  try {
+    const accessResponse =
+      await redisRequest([
+        "GET",
+        "amomessenger_access_token"
+      ]);
+
+    const refreshResponse =
+      await redisRequest([
+        "GET",
+        "amomessenger_refresh_token"
+      ]);
+
+    const redisAccessToken =
+      accessResponse.result;
+
+    const redisRefreshToken =
+      refreshResponse.result;
+
+    if (
+      redisAccessToken &&
+      redisRefreshToken
+    ) {
+      amomessengerAccessToken =
+        redisAccessToken;
+
+      amomessengerRefreshToken =
+        redisRefreshToken;
+
+      console.log(
+        "Токены amoMessenger загружены из Upstash Redis."
+      );
+
+      return true;
+    }
+
+    console.log(
+      "В Upstash Redis пока нет токенов amoMessenger."
+    );
+
+    return false;
+
+  } catch (error) {
+    console.error(
+      "Ошибка загрузки токенов amoMessenger из Upstash Redis:",
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
+    );
+
+    return false;
+  }
+}
+// ============================================================
 // ХРАНИЛИЩЕ ТОКЕНОВ
 // ============================================================
 
@@ -3182,15 +3278,19 @@ app.get(
         response.status
       );
 
-      amomessengerAccessToken =
-        response.data.access_token;
+     amomessengerAccessToken =
+  response.data.access_token;
 
-      amomessengerRefreshToken =
-        response.data.refresh_token;
+amomessengerRefreshToken =
+  response.data.refresh_token;
 
-      console.log(
-        "amoMessenger токены сохранены."
-      );
+// Сохраняем новые токены постоянно,
+// чтобы они не потерялись после перезапуска Render.
+await saveAmoMessengerTokensToRedis();
+
+console.log(
+  "amoMessenger токены успешно получены и сохранены в Redis."
+);
 
       res.send(`
         <!DOCTYPE html>
@@ -5534,7 +5634,7 @@ async function startServer() {
   );
 
   await loadAmoCrmTokensFromRedis();
-
+await loadAmoMessengerTokensFromRedis();
   app.listen(
     PORT,
     () => {
@@ -5612,7 +5712,12 @@ async function startServer() {
           ? "ДА"
           : "НЕТ"
       );
-
+console.log(
+  "amoMessenger refresh token:",
+  amomessengerRefreshToken
+    ? "ДА"
+    : "НЕТ"
+);
       console.log(
         "=========================================="
       );
