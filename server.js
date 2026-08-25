@@ -1601,7 +1601,61 @@ async function returnControl(
 // ============================================================
 // ОТПРАВКА СООБЩЕНИЯ (ПРЯМОЙ КАНАЛ, direct_id)
 // ============================================================
+// ============================================================
+// ДИАГНОСТИКА ПОЛУЧЕНИЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
+// ============================================================
 
+async function debugAmoMessengerUser(userId) {
+  if (!userId) {
+    return null;
+  }
+
+  const urls = [
+    `https://api.amo.tm/v1.3/users/${userId}`,
+    `https://api.amo.tm/v1.3/user/${userId}`,
+    `https://api.amo.tm/v1.3/direct/${userId}`
+  ];
+
+  for (const url of urls) {
+    try {
+      console.log("");
+      console.log("==========================================");
+      console.log("ПРОВЕРЯЕМ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER");
+      console.log(url);
+      console.log("==========================================");
+
+      const response = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${amomessengerAccessToken}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 30000,
+        validateStatus: () => true
+      });
+
+      console.log(
+        "AMOMESSENGER USER API RESPONSE:",
+        response.status,
+        JSON.stringify(response.data, null, 2)
+      );
+
+      if (
+        response.status >= 200 &&
+        response.status < 300
+      ) {
+        return response.data;
+      }
+
+    } catch (error) {
+      console.error(
+        "Ошибка проверки пользователя amoMessenger:",
+        error.message
+      );
+    }
+  }
+
+  return null;
+}
 async function sendDirectMessage(
   directId,
   text,
@@ -5829,6 +5883,8 @@ console.log(
     2
   )
 );
+  const amoMessengerUserData =
+  await debugAmoMessengerUser(userKey);
         log(
           "ПРЯМОЙ КАНАЛ: ВХОДЯЩЕЕ СООБЩЕНИЕ",
           {
