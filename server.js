@@ -1667,20 +1667,18 @@ async function getAmoMessengerUserName(userId) {
 
   try {
     const response = await axios.get(
-      ""https://api.amo.tm/v1.3/users",",
-      {
-        params: {
-          "user_id[]": userId
-        },
-
-        headers: {
-          Authorization: `Bearer ${amomessengerAccessToken}`,
-          "Content-Type": "application/json"
-        },
-
-        timeout: 30000
-      }
-    );
+  "https://api.amo.tm/v1.3/users",
+  {
+    params: {
+      "user_id[]": userId
+    },
+    headers: {
+      Authorization: `Bearer ${amomessengerAccessToken}`,
+      "Content-Type": "application/json"
+    },
+    timeout: 30000
+  }
+);
 
     console.log("");
     console.log(
