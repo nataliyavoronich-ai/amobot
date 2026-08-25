@@ -5652,6 +5652,10 @@ function extractImageUrlsFromMessage(message) {
 // ОЧИСТКА ССЫЛКИ AMOMESSENGER
 // ============================================================
 
+// ============================================================
+// ОЧИСТКА ССЫЛКИ AMOMESSENGER
+// ============================================================
+
 function normalizeAmoMessengerFileUrl(
   value
 ) {
@@ -5661,101 +5665,7 @@ function normalizeAmoMessengerFileUrl(
   ) {
     return null;
   }
-  // ============================================================
-// ПОЛУЧЕНИЕ ИМЕНИ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
-// ============================================================
 
-function extractAmoMessengerUserName(...sources) {
-  const preferredKeys = [
-    "name",
-    "full_name",
-    "fullName",
-    "user_name",
-    "username"
-  ];
-
-  for (const source of sources) {
-    if (!source || typeof source !== "object") {
-      continue;
-    }
-
-    for (const key of preferredKeys) {
-      const value = source[key];
-
-      if (
-        typeof value === "string" &&
-        value.trim()
-      ) {
-        return value.trim();
-      }
-    }
-
-    if (
-      source.author &&
-      typeof source.author === "object"
-    ) {
-      for (const key of preferredKeys) {
-        const value = source.author[key];
-
-        if (
-          typeof value === "string" &&
-          value.trim()
-        ) {
-          return value.trim();
-        }
-      }
-    }
-  }
-
-  return "";
-}
-// ============================================================
-// ИЗВЛЕЧЕНИЕ ИМЕНИ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
-// ============================================================
-
-function extractAmoMessengerUserName(...sources) {
-  const preferredKeys = [
-    "name",
-    "full_name",
-    "fullName",
-    "user_name",
-    "username"
-  ];
-
-  for (const source of sources) {
-    if (!source || typeof source !== "object") {
-      continue;
-    }
-
-    for (const key of preferredKeys) {
-      const value = source[key];
-
-      if (
-        typeof value === "string" &&
-        value.trim()
-      ) {
-        return value.trim();
-      }
-    }
-
-    const author = source.author;
-
-    if (author && typeof author === "object") {
-      for (const key of preferredKeys) {
-        const value = author[key];
-
-        if (
-          typeof value === "string" &&
-          value.trim()
-        ) {
-          return value.trim();
-        }
-      }
-    }
-  }
-
-  return "";
-}
   const text =
     value.trim();
 
@@ -5790,6 +5700,63 @@ function extractAmoMessengerUserName(...sources) {
   return null;
 }
 
+
+// ============================================================
+// ИЗВЛЕЧЕНИЕ ИМЕНИ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
+// ============================================================
+
+function extractAmoMessengerUserName(...sources) {
+  const preferredKeys = [
+    "name",
+    "full_name",
+    "fullName",
+    "user_name",
+    "username"
+  ];
+
+  for (const source of sources) {
+    if (
+      !source ||
+      typeof source !== "object"
+    ) {
+      continue;
+    }
+
+    for (const key of preferredKeys) {
+      const value =
+        source[key];
+
+      if (
+        typeof value === "string" &&
+        value.trim()
+      ) {
+        return value.trim();
+      }
+    }
+
+    const author =
+      source.author;
+
+    if (
+      author &&
+      typeof author === "object"
+    ) {
+      for (const key of preferredKeys) {
+        const value =
+          author[key];
+
+        if (
+          typeof value === "string" &&
+          value.trim()
+        ) {
+          return value.trim();
+        }
+      }
+    }
+  }
+
+  return "";
+}
 // ============================================================
 // AMOMESSENGER WEBHOOK
 // ============================================================
