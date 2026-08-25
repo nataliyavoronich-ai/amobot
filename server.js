@@ -69,6 +69,10 @@ const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстова�
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
 
+// Поле "Email рабочий" в сущности Контакт — используется в сценарии
+// "Загрузить фотоотчет" при редактировании e-mail клиента.
+const CONTACT_EMAIL_FIELD_ID = 141995;
+
 // Поля-ссылки на папки Яндекс.Диска (заполняются ботом автоматически)
 const REPORTS_LINK_FIELD_ID = 555436; // "Отчеты и проекты"
 const PHOTO_LINK_FIELD_ID = 543238; // "Фото проема №1" (папка "Фотоотчет")
@@ -193,11 +197,31 @@ const userSelectedReportMeasurement = {};
 // Пользователь находится на экране "Загрузите фотоотчет" (после выбора сделки
 // или после нажатия "Перейти к загрузке отчета") и видит кнопки
 // "Перейти к загрузке замерн.листа" / "Вернуться к списку замеров".
+// Здесь же хранятся пути к папкам сделки на Яндекс.Диске (чтобы не запрашивать
+// их заново на каждом шаге) и счётчик номера следующего файла фотоотчета.
 const userPendingReportHub = {};
 
 // Ожидание загрузки файлов замерного листа + очередь обработки файлов.
 const userPendingMeasureSheetUpload = {};
 const userMeasureSheetUploadQueue = {};
+
+// Очередь обработки фото прямо на экране "Загрузите фотоотчет" (папка "Фотоотчет").
+const userReportPhotoUploadQueue = {};
+
+// Ожидание загрузки видео + очередь обработки файлов.
+const userPendingVideoUpload = {};
+const userVideoUploadQueue = {};
+
+// Отмечает, в какие папки сделки реально что-то загружалось за текущий
+// проход сценария "Загрузить фотоотчет" (нужно для примечания в сделке —
+// упоминаем в примечании только реально использованные папки).
+const userReportUploadFlags = {};
+
+// Ожидание правки поля "Бюджет" сделки (после "Завершить отчет").
+const userPendingBudgetEdit = {};
+
+// Ожидание правки e-mail клиента (после шага с бюджетом).
+const userPendingEmailEdit = {};
 
 // Сбрасывает весь временный стейт конкретного пользователя
 function resetUserState(userKey) {
@@ -214,6 +238,12 @@ function resetUserState(userKey) {
   delete userPendingReportHub[userKey];
   delete userPendingMeasureSheetUpload[userKey];
   delete userMeasureSheetUploadQueue[userKey];
+  delete userReportPhotoUploadQueue[userKey];
+  delete userPendingVideoUpload[userKey];
+  delete userVideoUploadQueue[userKey];
+  delete userReportUploadFlags[userKey];
+  delete userPendingBudgetEdit[userKey];
+  delete userPendingEmailEdit[userKey];
 }
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"), чтобы не запрашивать одного и того же пользователя много раз подряд.
@@ -477,8 +507,59 @@ async function updateLeadCustomFields(leadId, fieldsMap) {
 }
 
 // ============================================================
-// ИМЯ ОТВЕТСТВЕННОГО МЕНЕДЖЕРА ПО СДЕЛКЕ
+// ОБНОВЛЕНИЕ СТАНДАРТНОГО ПОЛЯ "БЮДЖЕТ" (price) СДЕЛКИ
 // ============================================================
+
+async function updateLeadPrice(leadId, price) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
+
+  const response = await amoCrmPatch(url, {
+    price: Number(price)
+  });
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoCRM lead PATCH (price) HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
+}
+
+// ============================================================
+// ОБНОВЛЕНИЕ ПОЛЕЙ КОНТАКТА (например, "Email рабочий")
+// ============================================================
+
+async function updateContactCustomFields(contactId, fieldsMap) {
+  const customFieldsValues = Object.keys(fieldsMap).map(
+    (fieldId) => ({
+      field_id: Number(fieldId),
+      values: [{ value: fieldsMap[fieldId] }]
+    })
+  );
+
+  if (customFieldsValues.length === 0) {
+    return null;
+  }
+
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/contacts/${contactId}`;
+
+  const response = await amoCrmPatch(url, {
+    custom_fields_values: customFieldsValues
+  });
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoCRM contact PATCH HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return response.data;
+}
 
 async function getUserName(userId) {
   if (!userId) {
@@ -902,6 +983,13 @@ function buildMeasureSheetFileName(
   number
 ) {
   return buildDocumentFileName("Замерный лист", dateText, number);
+}
+
+function buildVideoFileName(
+  dateText,
+  number
+) {
+  return buildDocumentFileName("Видео", dateText, number);
 }
 
 async function ydUploadFromUrl(path, fileUrl) {
@@ -2294,6 +2382,236 @@ async function offerReportStart(send, userKey, leadId) {
   );
 }
 
+// ------------------------------------------------------------
+// ВХОД НА ЭКРАН "ЗАГРУЗИТЕ ФОТООТЧЕТ" (хаб сценария "Загрузить фотоотчет")
+// ------------------------------------------------------------
+// Готовит папки на Яндекс.Диске для сделки, запоминает их пути (чтобы не
+// запрашивать заново на каждом шаге), обнуляет флаги "что уже загружено"
+// и показывает экран с кнопками.
+
+async function enterReportHub(send, finish, userKey, leadId, reportTaskId) {
+  try {
+    const lead = await getLead(leadId);
+
+    if (!lead) {
+      throw new Error("Сделка не найдена");
+    }
+
+    const folders = await ensureLeadYandexFolders(lead);
+
+    const dateText = todayMoscowDateText();
+
+    const nextPhotoNumber = await ydGetNextDocumentFileNumber(
+      folders.photoPath,
+      "Фотоотчет",
+      dateText
+    );
+
+    userReportUploadFlags[userKey] = {
+      photo: false,
+      measureSheet: false,
+      video: false
+    };
+
+    userPendingReportHub[userKey] = {
+      lead_id: leadId,
+      report_task_id: reportTaskId,
+      folders,
+      photo_date_text: dateText,
+      photo_next_number: nextPhotoNumber
+    };
+
+    await send("Загрузите фотоотчет", [
+      "Перейти к загрузке замерн.листа",
+      "Вернуться к списку замеров"
+    ]);
+  } catch (error) {
+    console.error(
+      "Ошибка подготовки папок на Яндекс.Диске (Загрузить фотоотчет):",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось подготовить папки на Яндекс.Диске. " +
+        "Подробности есть в логах Render."
+    );
+
+    await finish();
+  }
+}
+
+// ------------------------------------------------------------
+// ПРИМЕЧАНИЕ СО ССЫЛКАМИ НА ПАПКИ (только те, куда реально что-то загрузили)
+// ------------------------------------------------------------
+
+async function buildReportNoteText(folders, flags) {
+  const lines = ["Ссылки на папки в yandex:"];
+
+  if (flags && flags.photo) {
+    const url = await ydGetFolderPublicUrl(folders.photoPath);
+
+    lines.push(`Фотоотчет: ${url}`);
+  }
+
+  if (flags && flags.measureSheet) {
+    const url = await ydGetFolderPublicUrl(folders.measureSheetPath);
+
+    lines.push(`Замерный лист: ${url}`);
+  }
+
+  if (flags && flags.video) {
+    const url = await ydGetFolderPublicUrl(folders.videoPath);
+
+    lines.push(`Видео: ${url}`);
+  }
+
+  return lines.join("\n");
+}
+
+// ------------------------------------------------------------
+// ЗАВЕРШЕНИЕ ОТЧЕТА (кнопка "Завершить отчет" на шаге замерного листа
+// или на шаге видео)
+// ------------------------------------------------------------
+
+async function finishReportFlow(
+  send,
+  finish,
+  userKey,
+  leadId,
+  reportTaskId
+) {
+  try {
+    await senseiCompleteTask(
+      leadId,
+      reportTaskId,
+      "Отчет загружен"
+    );
+  } catch (error) {
+    console.error(
+      "Ошибка завершения задачи (Загруз. отчет(и)):",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось завершить задачу в Sensei. " +
+        "Подробности есть в логах Render. Попробуйте ещё раз " +
+        "или обратитесь к администратору."
+    );
+
+    await finish();
+
+    return;
+  }
+
+  const flags = userReportUploadFlags[userKey];
+
+  try {
+    const lead = await getLead(leadId);
+
+    if (lead) {
+      const folders = await ensureLeadYandexFolders(lead);
+
+      const noteText = await buildReportNoteText(folders, flags);
+
+      await addLeadNote(leadId, noteText);
+    }
+  } catch (error) {
+    console.error(
+      "Не удалось добавить примечание со ссылками на папки:",
+      error.message
+    );
+  }
+
+  delete userPendingReportHub[userKey];
+  delete userPendingMeasureSheetUpload[userKey];
+  delete userPendingVideoUpload[userKey];
+  delete userReportUploadFlags[userKey];
+
+  await startBudgetEditStep(send, userKey, leadId);
+}
+
+// ------------------------------------------------------------
+// ШАГ 7: ПРАВКА БЮДЖЕТА СДЕЛКИ
+// ------------------------------------------------------------
+
+async function startBudgetEditStep(send, userKey, leadId) {
+  let budgetText = "—";
+
+  try {
+    const lead = await getLead(leadId);
+
+    if (lead && lead.price !== undefined && lead.price !== null) {
+      budgetText = String(lead.price);
+    }
+  } catch (error) {
+    console.error(
+      "Не удалось получить бюджет сделки:",
+      error.message
+    );
+  }
+
+  userPendingBudgetEdit[userKey] = { lead_id: leadId };
+
+  await send(
+    `Бюджет сделки: ${budgetText}\nВнесите изменения`,
+    ["Без изменений"]
+  );
+}
+
+// ------------------------------------------------------------
+// ШАГ 8: ПРАВКА E-MAIL КЛИЕНТА
+// ------------------------------------------------------------
+
+async function startEmailEditStep(send, userKey, leadId) {
+  let emailText = "пусто";
+  let contactId = null;
+
+  try {
+    const lead = await getLead(leadId);
+
+    contactId = getMainContactId(lead);
+
+    if (contactId) {
+      const contact = await getContact(contactId);
+
+      const currentEmail = getFieldValueJoined(
+        contact,
+        CONTACT_EMAIL_FIELD_ID
+      );
+
+      if (currentEmail) {
+        emailText = currentEmail;
+      }
+    }
+  } catch (error) {
+    console.error(
+      "Не удалось получить e-mail клиента:",
+      error.message
+    );
+  }
+
+  userPendingEmailEdit[userKey] = {
+    lead_id: leadId,
+    contact_id: contactId
+  };
+
+  await send(
+    `E-mail клиента: ${emailText}\nВнесите изменения`,
+    ["Без изменений"]
+  );
+}
+
+// Возврат к списку задач "Загруз. отчет(и)" — финальный шаг п.9/п.10 сценария.
+async function returnToReportList(send, finish, userKey) {
+  userLastSearchMode[userKey] = "report";
+
+  const shouldFinish = await searchAndPresentReportMeasurements(send);
+
+  if (shouldFinish) {
+    await finish();
+  }
+}
+
 // ============================================================
 // DEBUG: STATUS
 // ============================================================
@@ -3154,6 +3472,169 @@ async function processUserMessage({
   }
 
   // ------------------------------------------------------
+  // ЭКРАН "ЗАГРУЗИТЕ ФОТООТЧЕТ" (хаб сценария "Загрузить фотоотчет")
+  // Пользователь может прислать фото (папка "Фотоотчет") или нажать
+  // одну из двух кнопок.
+  // ------------------------------------------------------
+
+  const pendingReportHub = userPendingReportHub[userKey];
+
+  if (pendingReportHub) {
+    if (trimmedText === "Вернуться к списку замеров") {
+      delete userPendingReportHub[userKey];
+      delete userReportUploadFlags[userKey];
+
+      await returnToReportList(send, finish, userKey);
+
+      return;
+    }
+
+    if (trimmedText === "Перейти к загрузке замерн.листа") {
+      try {
+        const dateText = todayMoscowDateText();
+
+        const nextFileNumber = await ydGetNextDocumentFileNumber(
+          pendingReportHub.folders.measureSheetPath,
+          "Замерный лист",
+          dateText
+        );
+
+        userPendingMeasureSheetUpload[userKey] = {
+          lead_id: pendingReportHub.lead_id,
+          report_task_id: pendingReportHub.report_task_id,
+          folders: pendingReportHub.folders,
+          measure_sheet_path: pendingReportHub.folders.measureSheetPath,
+          date_text: dateText,
+          next_file_number: nextFileNumber,
+          has_uploaded_file: false
+        };
+
+        delete userPendingReportHub[userKey];
+
+        await send("Загрузите замерный лист");
+      } catch (error) {
+        console.error(
+          "Ошибка подготовки папки замерного листа:",
+          error.message
+        );
+
+        await send(
+          "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+            "Подробности есть в логах Render."
+        );
+
+        await finish();
+      }
+
+      return;
+    }
+
+    if (imageUrls && imageUrls.length > 0) {
+      // --------------------------------------------------------
+      // СТАВИМ ЗАГРУЗКУ ФОТО ОТЧЕТА В ОЧЕРЕДЬ
+      // --------------------------------------------------------
+
+      const previousQueue =
+        userReportPhotoUploadQueue[userKey] || Promise.resolve();
+
+      const currentQueue = previousQueue
+        .catch(() => {
+          // Не даём ошибке предыдущей загрузки остановить очередь.
+        })
+        .then(async () => {
+          const currentHub = userPendingReportHub[userKey];
+
+          if (!currentHub) {
+            return;
+          }
+
+          let uploaded = 0;
+
+          for (const url of imageUrls) {
+            try {
+              const currentNumber = currentHub.photo_next_number;
+
+              const fileName = buildDocumentFileName(
+                "Фотоотчет",
+                currentHub.photo_date_text,
+                currentNumber
+              );
+
+              console.log("Загружаю фото отчета:", {
+                userKey,
+                url,
+                fileName,
+                number: currentNumber
+              });
+
+              await ydUploadFromUrl(
+                `${currentHub.folders.photoPath}/${fileName}`,
+                url
+              );
+
+              currentHub.photo_next_number = currentNumber + 1;
+
+              uploaded++;
+
+              console.log(
+                "Фото отчета успешно отправлено на Яндекс.Диск:",
+                fileName
+              );
+            } catch (error) {
+              console.error(
+                "Ошибка загрузки фото отчета на Яндекс.Диск:",
+                error.message
+              );
+            }
+          }
+
+          if (uploaded > 0) {
+            if (userReportUploadFlags[userKey]) {
+              userReportUploadFlags[userKey].photo = true;
+            }
+
+            await send(
+              `Фото получено (${uploaded}). Когда закончите — выберите действие:`,
+              [
+                "Перейти к загрузке замерн.листа",
+                "Вернуться к списку замеров"
+              ]
+            );
+          } else {
+            await send(
+              "❌ Не удалось сохранить фото на Яндекс.Диске. " +
+                "Попробуйте ещё раз.",
+              [
+                "Перейти к загрузке замерн.листа",
+                "Вернуться к списку замеров"
+              ]
+            );
+          }
+        });
+
+      userReportPhotoUploadQueue[userKey] = currentQueue;
+
+      try {
+        await currentQueue;
+      } finally {
+        if (userReportPhotoUploadQueue[userKey] === currentQueue) {
+          delete userReportPhotoUploadQueue[userKey];
+        }
+      }
+
+      return;
+    }
+
+    // Другой текст на этом экране — напоминаем про доступные кнопки.
+    await send("Загрузите фотоотчет или выберите действие:", [
+      "Перейти к загрузке замерн.листа",
+      "Вернуться к списку замеров"
+    ]);
+
+    return;
+  }
+
+  // ------------------------------------------------------
   // ОЖИДАЕМ ФАЙЛЫ ЗАМЕРНОГО ЛИСТА
   // (после кнопки "Перейти к загрузке замерн.листа")
   // ------------------------------------------------------
@@ -3176,14 +3657,55 @@ async function processUserMessage({
         return;
       }
 
-      // ВРЕМЕННАЯ ЗАГЛУШКА.
-      // Шаги "Перейти к загрузке видео" и "Завершить отчет"
-      // будут реализованы отдельно в одном из следующих обновлений.
-      await send(
-        `Функция «${trimmedText}» пока находится в разработке.`
-      );
+      if (trimmedText === "Перейти к загрузке видео") {
+        try {
+          const dateText = todayMoscowDateText();
 
-      await finish();
+          const nextFileNumber = await ydGetNextDocumentFileNumber(
+            pendingMeasureSheet.folders.videoPath,
+            "Видео",
+            dateText
+          );
+
+          userPendingVideoUpload[userKey] = {
+            lead_id: pendingMeasureSheet.lead_id,
+            report_task_id: pendingMeasureSheet.report_task_id,
+            folders: pendingMeasureSheet.folders,
+            video_path: pendingMeasureSheet.folders.videoPath,
+            date_text: dateText,
+            next_file_number: nextFileNumber,
+            has_uploaded_file: false
+          };
+
+          delete userPendingMeasureSheetUpload[userKey];
+
+          await send("Загрузите видео");
+        } catch (error) {
+          console.error(
+            "Ошибка подготовки папки видео:",
+            error.message
+          );
+
+          await send(
+            "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+              "Подробности есть в логах Render."
+          );
+
+          await finish();
+        }
+
+        return;
+      }
+
+      // trimmedText === "Завершить отчет"
+
+      await finishReportFlow(
+        send,
+        finish,
+        userKey,
+        pendingMeasureSheet.lead_id,
+        pendingMeasureSheet.report_task_id
+      );
 
       return;
     }
@@ -3251,6 +3773,10 @@ async function processUserMessage({
           if (uploaded > 0) {
             currentPending.has_uploaded_file = true;
 
+            if (userReportUploadFlags[userKey]) {
+              userReportUploadFlags[userKey].measureSheet = true;
+            }
+
             await send(
               `Файл(ы) получено (${uploaded}). Когда закончите — выберите действие:`,
               ["Перейти к загрузке видео", "Завершить отчет"]
@@ -3290,6 +3816,248 @@ async function processUserMessage({
     } else {
       await send("Загрузите замерный лист.");
     }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ ВИДЕО (после кнопки "Перейти к загрузке видео")
+  // ------------------------------------------------------
+
+  const pendingVideo = userPendingVideoUpload[userKey];
+
+  if (pendingVideo) {
+    if (trimmedText === "Завершить отчет") {
+      if (!pendingVideo.has_uploaded_file) {
+        await send(
+          "Пока не получено ни одного видео. " +
+            "Загрузите хотя бы один файл, прежде чем продолжить."
+        );
+
+        return;
+      }
+
+      await finishReportFlow(
+        send,
+        finish,
+        userKey,
+        pendingVideo.lead_id,
+        pendingVideo.report_task_id
+      );
+
+      return;
+    }
+
+    if (imageUrls && imageUrls.length > 0) {
+      // --------------------------------------------------------
+      // СТАВИМ ЗАГРУЗКУ ВИДЕО В ОЧЕРЕДЬ
+      // --------------------------------------------------------
+
+      const previousQueue =
+        userVideoUploadQueue[userKey] || Promise.resolve();
+
+      const currentQueue = previousQueue
+        .catch(() => {
+          // Не даём ошибке предыдущей загрузки остановить очередь.
+        })
+        .then(async () => {
+          const currentPending = userPendingVideoUpload[userKey];
+
+          if (!currentPending) {
+            return;
+          }
+
+          let uploaded = 0;
+
+          for (const url of imageUrls) {
+            try {
+              const currentNumber = currentPending.next_file_number;
+
+              const fileName = buildVideoFileName(
+                currentPending.date_text,
+                currentNumber
+              );
+
+              console.log("Загружаю видео:", {
+                userKey,
+                url,
+                fileName,
+                number: currentNumber
+              });
+
+              await ydUploadFromUrl(
+                `${currentPending.video_path}/${fileName}`,
+                url
+              );
+
+              currentPending.next_file_number = currentNumber + 1;
+
+              uploaded++;
+
+              console.log(
+                "Видео успешно отправлено на Яндекс.Диск:",
+                fileName
+              );
+            } catch (error) {
+              console.error(
+                "Ошибка загрузки видео на Яндекс.Диск:",
+                error.message
+              );
+            }
+          }
+
+          if (uploaded > 0) {
+            currentPending.has_uploaded_file = true;
+
+            if (userReportUploadFlags[userKey]) {
+              userReportUploadFlags[userKey].video = true;
+            }
+
+            await send(
+              `Файл(ы) получено (${uploaded}). ` +
+                "Когда закончите — нажмите «Завершить отчет».",
+              ["Завершить отчет"]
+            );
+          } else if (currentPending.has_uploaded_file) {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте ещё раз или нажмите «Завершить отчет».",
+              ["Завершить отчет"]
+            );
+          } else {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте загрузить его ещё раз."
+            );
+          }
+        });
+
+      userVideoUploadQueue[userKey] = currentQueue;
+
+      try {
+        await currentQueue;
+      } finally {
+        if (userVideoUploadQueue[userKey] === currentQueue) {
+          delete userVideoUploadQueue[userKey];
+        }
+      }
+
+      return;
+    }
+
+    if (pendingVideo.has_uploaded_file) {
+      await send(
+        "Загрузите видео или нажмите «Завершить отчет».",
+        ["Завершить отчет"]
+      );
+    } else {
+      await send("Загрузите видео.");
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПРАВКА БЮДЖЕТА СДЕЛКИ (после "Завершить отчет")
+  // ------------------------------------------------------
+
+  const pendingBudget = userPendingBudgetEdit[userKey];
+
+  if (pendingBudget) {
+    if (trimmedText === "Без изменений") {
+      delete userPendingBudgetEdit[userKey];
+
+      await startEmailEditStep(send, userKey, pendingBudget.lead_id);
+
+      return;
+    }
+
+    if (!/^\d+$/.test(trimmedText)) {
+      await send("Введите сообщение, состоящие только из цифр");
+
+      return;
+    }
+
+    try {
+      await updateLeadPrice(pendingBudget.lead_id, trimmedText);
+    } catch (error) {
+      console.error(
+        "Не удалось обновить бюджет сделки:",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось сохранить бюджет в amoCRM. " +
+          "Подробности есть в логах Render."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingBudgetEdit[userKey];
+
+    await startEmailEditStep(send, userKey, pendingBudget.lead_id);
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ПРАВКА E-MAIL КЛИЕНТА
+  // ------------------------------------------------------
+
+  const pendingEmail = userPendingEmailEdit[userKey];
+
+  if (pendingEmail) {
+    if (trimmedText === "Без изменений") {
+      delete userPendingEmailEdit[userKey];
+
+      await returnToReportList(send, finish, userKey);
+
+      return;
+    }
+
+    if (
+      !trimmedText.includes("@") ||
+      !trimmedText.includes(".")
+    ) {
+      await send("Введите корректный e-mail");
+
+      return;
+    }
+
+    if (pendingEmail.contact_id) {
+      try {
+        await updateContactCustomFields(pendingEmail.contact_id, {
+          [CONTACT_EMAIL_FIELD_ID]: trimmedText
+        });
+      } catch (error) {
+        console.error(
+          "Не удалось обновить e-mail контакта:",
+          error.message
+        );
+
+        await send(
+          "❌ Не удалось сохранить e-mail в amoCRM. " +
+            "Подробности есть в логах Render."
+        );
+
+        await finish();
+
+        return;
+      }
+    } else {
+      console.log(
+        "У сделки нет привязанного контакта — e-mail не сохранён."
+      );
+    }
+
+    await send("Правки внесены");
+
+    delete userPendingEmailEdit[userKey];
+
+    await returnToReportList(send, finish, userKey);
 
     return;
   }
@@ -4013,94 +4781,13 @@ return;
 
     delete userPendingReportStart[userKey];
 
-    userPendingReportHub[userKey] = {
-      lead_id: stored.lead_id,
-      report_task_id: Number(reportTask.id)
-    };
-
-    await send("Загрузите фотоотчет", [
-      "Перейти к загрузке замерн.листа",
-      "Вернуться к списку замеров"
-    ]);
-
-    return;
-  }
-
-  // ------------------------------------------------------
-  // ВЕРНУТЬСЯ К СПИСКУ ЗАМЕРОВ (из экрана "Загрузите фотоотчет")
-  // ------------------------------------------------------
-
-  if (
-    trimmedText === "Вернуться к списку замеров" &&
-    userPendingReportHub[userKey]
-  ) {
-    delete userPendingReportHub[userKey];
-
-    userLastSearchMode[userKey] = "report";
-
-    const shouldFinish = await searchAndPresentReportMeasurements(send);
-
-    if (shouldFinish) {
-      await finish();
-    }
-
-    return;
-  }
-
-  // ------------------------------------------------------
-  // ПЕРЕЙТИ К ЗАГРУЗКЕ ЗАМЕРНОГО ЛИСТА
-  // ------------------------------------------------------
-
-  if (
-    trimmedText === "Перейти к загрузке замерн.листа" &&
-    userPendingReportHub[userKey]
-  ) {
-    const stored = userPendingReportHub[userKey];
-
-    try {
-      const lead = await getLead(stored.lead_id);
-
-      if (!lead) {
-        throw new Error("Сделка не найдена");
-      }
-
-      // Папки уже должны существовать (их создаёт шаг "Заключен договор"),
-      // но на всякий случай проверяем/создаём их заново — это безопасно.
-      const folders = await ensureLeadYandexFolders(lead);
-
-      const dateText = todayMoscowDateText();
-
-      const nextFileNumber = await ydGetNextDocumentFileNumber(
-        folders.measureSheetPath,
-        "Замерный лист",
-        dateText
-      );
-
-      userPendingMeasureSheetUpload[userKey] = {
-        lead_id: stored.lead_id,
-        report_task_id: stored.report_task_id,
-        measure_sheet_path: folders.measureSheetPath,
-        date_text: dateText,
-        next_file_number: nextFileNumber,
-        has_uploaded_file: false
-      };
-
-      delete userPendingReportHub[userKey];
-
-      await send("Загрузите замерный лист");
-    } catch (error) {
-      console.error(
-        "Ошибка подготовки папки замерного листа:",
-        error.message
-      );
-
-      await send(
-        "❌ Не удалось подготовить папку на Яндекс.Диске. " +
-          "Подробности есть в логах Render."
-      );
-
-      await finish();
-    }
+    await enterReportHub(
+      send,
+      finish,
+      userKey,
+      stored.lead_id,
+      Number(reportTask.id)
+    );
 
     return;
   }
@@ -4160,15 +4847,13 @@ return;
 
           userSelectedReportMeasurement[userKey] = selected;
 
-          userPendingReportHub[userKey] = {
-            lead_id: selected.lead_id,
-            report_task_id: selected.task_id
-          };
-
-          await send("Загрузите фотоотчет", [
-            "Перейти к загрузке замерн.листа",
-            "Вернуться к списку замеров"
-          ]);
+          await enterReportHub(
+            send,
+            finish,
+            userKey,
+            selected.lead_id,
+            selected.task_id
+          );
 
           return;
         }
