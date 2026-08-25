@@ -5848,20 +5848,34 @@ console.log(
 
         const imageUrls = extractImageUrlsFromMessage(message);
 
-        if (imageUrls.length > 0) {
-          log("НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ", imageUrls);
-        }
+if (imageUrls.length > 0) {
+  log(
+    "НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ",
+    imageUrls
+  );
+}
 
-        await processUserMessage({
+await processUserMessage({
   text,
   userKey,
   userName,
-  send,
-  finish,
+
+  send: wrapSendWithLastMessageTracking(
+    userKey,
+    (msgText, buttons) =>
+      sendDirectMessage(
+        directId,
+        msgText,
+        buttons
+      )
+  ),
+
+  finish: async () => {},
+
   imageUrls
 });
 
-        return;
+return;
       }
 
       // --------------------------------------------------------
