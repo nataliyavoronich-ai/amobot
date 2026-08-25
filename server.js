@@ -1,6 +1,11 @@
 const express = require("express");
 const axios = require("axios");
 
+const UPSTASH_REDIS_REST_URL =
+  process.env.UPSTASH_REDIS_REST_URL || "";
+
+const UPSTASH_REDIS_REST_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const app = express();
 
 app.use(express.json());
@@ -138,7 +143,128 @@ function wrapSendWithLastMessageTracking(userKey, rawSend) {
     return result;
   };
 }
+// ============================================================
+// UPSTASH REDIS — РАБОТА С ТОКЕНАМИ AMOCRM
+// ============================================================
 
+async function redisRequest(command) {
+  if (
+    !UPSTASH_REDIS_REST_URL ||
+    !UPSTASH_REDIS_REST_TOKEN
+  ) {
+    throw new Error(
+      "UPSTASH_REDIS_REST_URL или UPSTASH_REDIS_REST_TOKEN не задан"
+    );
+  }
+
+  const response = await axios.post(
+    UPSTASH_REDIS_REST_URL,
+    command,
+    {
+      headers: {
+        Authorization:
+          `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000
+    }
+  );
+
+  return response.data;
+}
+
+async function saveAmoCrmTokensToRedis() {
+  if (
+    !amocrmAccessToken ||
+    !amocrmRefreshToken
+  ) {
+    throw new Error(
+      "Невозможно сохранить пустые токены amoCRM"
+    );
+  }
+
+  await redisRequest([
+    "SET",
+    "amocrm_access_token",
+    amocrmAccessToken
+  ]);
+
+  await redisRequest([
+    "SET",
+    "amocrm_refresh_token",
+    amocrmRefreshToken
+  ]);
+
+  console.log(
+    "Токены amoCRM сохранены в Upstash Redis."
+  );
+}
+
+async function loadAmoCrmTokensFromRedis() {
+  if (
+    !UPSTASH_REDIS_REST_URL ||
+    !UPSTASH_REDIS_REST_TOKEN
+  ) {
+    console.log(
+      "Upstash Redis не настроен. Используем токены из Environment Variables."
+    );
+
+    return false;
+  }
+
+  try {
+    const accessResponse =
+      await redisRequest([
+        "GET",
+        "amocrm_access_token"
+      ]);
+
+    const refreshResponse =
+      await redisRequest([
+        "GET",
+        "amocrm_refresh_token"
+      ]);
+
+    const redisAccessToken =
+      accessResponse.result;
+
+    const redisRefreshToken =
+      refreshResponse.result;
+
+    if (
+      redisAccessToken &&
+      redisRefreshToken
+    ) {
+      amocrmAccessToken =
+        redisAccessToken;
+
+      amocrmRefreshToken =
+        redisRefreshToken;
+
+      console.log(
+        "Токены amoCRM загружены из Upstash Redis."
+      );
+
+      return true;
+    }
+
+    console.log(
+      "В Upstash Redis пока нет токенов amoCRM."
+    );
+
+    return false;
+
+  } catch (error) {
+    console.error(
+      "Ошибка загрузки токенов из Upstash Redis:",
+      error.response
+        ? JSON.stringify(error.response.data)
+        : error.message
+    );
+
+    return false;
+  }
+}
 // ============================================================
 // ХРАНИЛИЩЕ ТОКЕНОВ
 // ============================================================
@@ -373,15 +499,21 @@ async function refreshAmoCrmToken() {
       }
     );
 
-    amocrmAccessToken = response.data.access_token;
+    amocrmAccessToken =
+  response.data.access_token;
 
-    if (response.data.refresh_token) {
-      amocrmRefreshToken = response.data.refresh_token;
-    }
+if (response.data.refresh_token) {
+  amocrmRefreshToken =
+    response.data.refresh_token;
+}
 
-    console.log("amoCRM access token обновлён.");
+await saveAmoCrmTokensToRedis();
 
-    return amocrmAccessToken;
+console.log(
+  "amoCRM access token обновлён и сохранён в Redis."
+);
+
+return amocrmAccessToken;
   } catch (error) {
     console.error(
       "Ошибка обновления amoCRM token:",
@@ -2747,16 +2879,17 @@ app.get("/amocrm/callback", async (req, res) => {
       }
     );
 
-    amocrmAccessToken =
-      response.data.access_token;
+   amocrmAccessToken =
+  response.data.access_token;
 
-    amocrmRefreshToken =
-      response.data.refresh_token;
+amocrmRefreshToken =
+  response.data.refresh_token;
 
-    console.log(
-      "amoCRM токены успешно получены."
-    );
+await saveAmoCrmTokensToRedis();
 
+console.log(
+  "amoCRM токены успешно получены и сохранены в Redis."
+);
     res.send(`
       <!DOCTYPE html>
       <html lang="ru">
@@ -5388,71 +5521,110 @@ app.use(
 // START
 // ============================================================
 
-app.listen(
-  PORT,
-  () => {
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "amoMessenger BOT STARTED"
-    );
-    console.log(
-      "=========================================="
-    );
+async function startServer() {
+  console.log("");
+  console.log(
+    "=========================================="
+  );
+  console.log(
+    "ЗАПУСК БОТА"
+  );
+  console.log(
+    "=========================================="
+  );
 
-    console.log(
-      "PORT:",
-      PORT
-    );
+  await loadAmoCrmTokensFromRedis();
 
-    console.log(
-      "amoCRM:",
-      `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`
-    );
+  app.listen(
+    PORT,
+    () => {
+      console.log("");
+      console.log(
+        "=========================================="
+      );
+      console.log(
+        "amoMessenger BOT STARTED"
+      );
+      console.log(
+        "=========================================="
+      );
 
-    console.log(
-      "Timezone:",
-      "Europe/Moscow"
-    );
+      console.log(
+        "PORT:",
+        PORT
+      );
 
-    console.log(
-      "Engineer:",
-      ENGINEER_NAME
-    );
+      console.log(
+        "amoCRM:",
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru`
+      );
 
-    console.log(
-      "Engineer field:",
-      ENGINEER_FIELD_ID
-    );
+      console.log(
+        "Timezone:",
+        "Europe/Moscow"
+      );
 
-    console.log(
-      "Engineer enum:",
-      ENGINEER_ENUM_ID
-    );
+      console.log(
+        "Engineer:",
+        ENGINEER_NAME
+      );
 
-    console.log(
-      "Measurement task type:",
-      MEASUREMENT_TASK_TYPE_ID
-    );
+      console.log(
+        "Engineer field:",
+        ENGINEER_FIELD_ID
+      );
 
-    console.log(
-      "amoCRM token:",
-      amocrmAccessToken
-        ? "ДА"
-        : "НЕТ"
-    );
+      console.log(
+        "Engineer enum:",
+        ENGINEER_ENUM_ID
+      );
 
-    console.log(
-      "amoMessenger token:",
-      amomessengerAccessToken
-        ? "ДА"
-        : "НЕТ"
-    );
+      console.log(
+        "Measurement task type:",
+        MEASUREMENT_TASK_TYPE_ID
+      );
 
-    console.log(
-      "=========================================="
-    );
-  }
-);
+      console.log(
+        "amoCRM token:",
+        amocrmAccessToken
+          ? "ДА"
+          : "НЕТ"
+      );
+
+      console.log(
+        "amoCRM refresh token:",
+        amocrmRefreshToken
+          ? "ДА"
+          : "НЕТ"
+      );
+
+      console.log(
+        "Upstash Redis:",
+        UPSTASH_REDIS_REST_URL &&
+        UPSTASH_REDIS_REST_TOKEN
+          ? "НАСТРОЕН"
+          : "НЕ НАСТРОЕН"
+      );
+
+      console.log(
+        "amoMessenger token:",
+        amomessengerAccessToken
+          ? "ДА"
+          : "НЕТ"
+      );
+
+      console.log(
+        "=========================================="
+      );
+    }
+  );
+}
+
+startServer().catch((error) => {
+  console.error(
+    "КРИТИЧЕСКАЯ ОШИБКА ПРИ ЗАПУСКЕ:",
+    error
+  );
+
+  process.exit(1);
+});
