@@ -2748,10 +2748,10 @@ async function enterReportHub(send, finish, userKey, leadId, reportTaskId) {
       photo_next_number: nextPhotoNumber
     };
 
-    await send("Загрузите фотоотчет", [
-      "Перейти к загрузке замерн.листа",
-      "Вернуться к списку замеров"
-    ]);
+    await send(
+  "Загрузите фотоотчет",
+  ["Вернуться к списку замеров"]
+);
   } catch (error) {
     console.error(
       "Ошибка подготовки папок на Яндекс.Диске (Загрузить фотоотчет):",
@@ -3920,19 +3920,19 @@ async function processUserMessage({
             }
           }
 
-          if (uploaded > 0) {
-            if (userReportUploadFlags[userKey]) {
-              userReportUploadFlags[userKey].photo = true;
-            }
+         if (uploaded > 0) {
+  if (userReportUploadFlags[userKey]) {
+    userReportUploadFlags[userKey].photo = true;
+  }
 
-            await send(
-              `Фото получено (${uploaded}). Когда закончите — выберите действие:`,
-              [
-                "Перейти к загрузке замерн.листа",
-                "Вернуться к списку замеров"
-              ]
-            );
-          } else {
+  await send(
+    `Фото получено (${uploaded}). Когда закончите — нажмите «Перейти к загрузке замерн.листа».`,
+    [
+      "Перейти к загрузке замерн.листа",
+      "Вернуться к списку замеров"
+    ]
+  );
+} else {
             await send(
               "❌ Не удалось сохранить фото на Яндекс.Диске. " +
                 "Попробуйте ещё раз.",
@@ -3958,12 +3958,12 @@ async function processUserMessage({
     }
 
     // Другой текст на этом экране — напоминаем про доступные кнопки.
-    await send("Загрузите фотоотчет или выберите действие:", [
-      "Перейти к загрузке замерн.листа",
-      "Вернуться к списку замеров"
-    ]);
+    await send(
+  "Загрузите фотоотчет.",
+  ["Вернуться к списку замеров"]
+);
 
-    return;
+return;
   }
 
   // ------------------------------------------------------
