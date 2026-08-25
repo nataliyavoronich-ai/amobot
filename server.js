@@ -5661,6 +5661,54 @@ function normalizeAmoMessengerFileUrl(
   ) {
     return null;
   }
+  // ============================================================
+// ПОЛУЧЕНИЕ ИМЕНИ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
+// ============================================================
+
+function extractAmoMessengerUserName(...sources) {
+  const preferredKeys = [
+    "name",
+    "full_name",
+    "fullName",
+    "user_name",
+    "username"
+  ];
+
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+
+    for (const key of preferredKeys) {
+      const value = source[key];
+
+      if (
+        typeof value === "string" &&
+        value.trim()
+      ) {
+        return value.trim();
+      }
+    }
+
+    if (
+      source.author &&
+      typeof source.author === "object"
+    ) {
+      for (const key of preferredKeys) {
+        const value = source.author[key];
+
+        if (
+          typeof value === "string" &&
+          value.trim()
+        ) {
+          return value.trim();
+        }
+      }
+    }
+  }
+
+  return "";
+}
 // ============================================================
 // ИЗВЛЕЧЕНИЕ ИМЕНИ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
 // ============================================================
