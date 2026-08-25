@@ -5838,7 +5838,6 @@ console.log(
         }
 
         await processUserMessage({
-         await processUserMessage({
   text,
   userKey,
   userName,
