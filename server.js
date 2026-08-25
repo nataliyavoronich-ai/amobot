@@ -4792,7 +4792,104 @@ return;
   // ------------------------------------------------------
   // ПОДТВЕРДИТЬ ЗАМЕР
   // ------------------------------------------------------
+// ------------------------------------------------------
+// ВНЕСТИ ПРАВКИ
+// ------------------------------------------------------
 
+if (trimmedText === "Внести правки") {
+  console.log("");
+  console.log(
+    "=========================================="
+  );
+  console.log(
+    "ЗАПУСК СЦЕНАРИЯ: ВНЕСТИ ПРАВКИ"
+  );
+  console.log(
+    "Инженер:",
+    currentEngineerName
+  );
+  console.log(
+    "Тип задачи:",
+    CORRECTION_TASK_TYPE_ID
+  );
+  console.log(
+    "=========================================="
+  );
+
+  if (!currentEngineerName) {
+    await send(
+      "⚠️ Не удалось определить пользователя. " +
+      "Перезапустите бота командой /старт."
+    );
+
+    return;
+  }
+
+  delete userSelectedCorrectionMeasurement[userKey];
+  delete userPendingCorrectionUpload[userKey];
+  delete userPendingCorrectionComment[userKey];
+
+  await searchAndPresentCorrections(
+    send,
+    userKey,
+    currentEngineerName
+  );
+
+  return;
+}
+  // ------------------------------------------------------
+// ВЫБОР СДЕЛКИ В СЦЕНАРИИ "ВНЕСТИ ПРАВКИ"
+// ------------------------------------------------------
+
+const correctionList =
+  userCorrectionList[userKey];
+
+if (
+  Array.isArray(correctionList) &&
+  correctionList.length > 0
+) {
+  const selectedCorrection =
+    correctionList.find(
+      (item) =>
+        String(
+          item.contract_number || ""
+        ).trim() === trimmedText
+    );
+
+  if (selectedCorrection) {
+    console.log("");
+    console.log(
+      "=========================================="
+    );
+    console.log(
+      "ВЫБРАН ЗАМЕР ДЛЯ ВНЕСЕНИЯ ПРАВОК"
+    );
+    console.log(
+      JSON.stringify(
+        selectedCorrection,
+        null,
+        2
+      )
+    );
+    console.log(
+      "=========================================="
+    );
+
+    userSelectedCorrectionMeasurement[userKey] =
+      selectedCorrection;
+
+    delete userCorrectionList[userKey];
+
+    await send(
+      formatCorrectionDetail(
+        selectedCorrection
+      ),
+      buildCorrectionActionButtons()
+    );
+
+    return;
+  }
+}
   if (trimmedText === "Подтвердить замер") {
     userLastSearchMode[userKey] = "confirm";
 
@@ -4883,53 +4980,6 @@ return;
 
     return;
   }
-
-  if (trimmedText === "Внести правки") {
-  if (!currentEngineerName) {
-    await send(
-      "❌ Не удалось определить имя пользователя amoMessenger. " +
-      "Проверьте webhook в логах Render."
-    );
-
-    await finish();
-
-    return;
-  }
-
-  userLastSearchMode[userKey] =
-    "correction";
-
-  await send(
-    "⏳ Проверяю задачи на внесение правок..."
-  );
-
-  try {
-    const shouldFinish =
-      await searchAndPresentCorrections(
-        send,
-        userKey,
-        currentEngineerName
-      );
-
-    if (shouldFinish) {
-      await finish();
-    }
-  } catch (error) {
-    console.error(
-      "Ошибка поиска задач на внесение правок:",
-      error.message
-    );
-
-    await send(
-      "❌ Произошла ошибка при поиске задач. " +
-      "Подробности есть в логах Render."
-    );
-
-    await finish();
-  }
-
-  return;
-}
 
   // ------------------------------------------------------
   // ЗАМЕР ПОДТВЕРЖДЕН
