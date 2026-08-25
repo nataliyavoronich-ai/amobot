@@ -3798,7 +3798,93 @@ function buildCorrectionActionButtons() {
     "Правки внесены"
   ];
 }
+// ------------------------------------------------------------
+// СЦЕНАРИЙ "ВНЕСТИ ПРАВКИ": ЗАГРУЗКА ФАЙЛОВ ПО ТИПАМ
+// ------------------------------------------------------------
 
+const CORRECTION_UPLOAD_TYPES = {
+  "Замерный лист": {
+    folderKey: "measureSheetPath",
+    prefix: "Замерный лист",
+    promptText: "Загрузите замерный лист"
+  },
+  "Фотоотчет": {
+    folderKey: "photoPath",
+    prefix: "Фотоотчет",
+    promptText: "Загрузите фотоотчет"
+  },
+  "Видеоотчет": {
+    folderKey: "videoPath",
+    prefix: "Видео",
+    promptText: "Загрузите видео"
+  },
+  "Договор": {
+    folderKey: "contractPath",
+    prefix: "Договор",
+    promptText: "Загрузите фото договора"
+  }
+};
+
+async function startCorrectionUpload(
+  send,
+  finish,
+  userKey,
+  correction,
+  buttonText
+) {
+  const config = CORRECTION_UPLOAD_TYPES[buttonText];
+
+  if (!config) {
+    await send("⚠️ Неизвестный тип правки. Попробуйте ещё раз.");
+    return;
+  }
+
+  try {
+    const lead = await getLead(correction.lead_id);
+
+    if (!lead) {
+      throw new Error("Сделка не найдена");
+    }
+
+    const folders = await ensureLeadYandexFolders(lead);
+
+    const folderPath = folders[config.folderKey];
+
+    const dateText = todayMoscowDateText();
+
+    const nextFileNumber = await ydGetNextDocumentFileNumber(
+      folderPath,
+      config.prefix,
+      dateText
+    );
+
+    userPendingCorrectionUpload[userKey] = {
+      lead_id: correction.lead_id,
+      task_id: correction.task_id,
+      button_text: buttonText,
+      folder_path: folderPath,
+      prefix: config.prefix,
+      date_text: dateText,
+      next_file_number: nextFileNumber,
+      has_uploaded_file: false,
+      prompt_text: config.promptText
+    };
+
+    await send(config.promptText);
+  } catch (error) {
+    console.error(
+      "Ошибка подготовки папки на Яндекс.Диске (Внести правки):",
+      error.message
+    );
+
+    await send(
+      "❌ Не удалось подготовить папку на Яндекс.Диске. " +
+        "Подробности есть в логах Render."
+    );
+
+    await finish();
+  }
+}
 async function searchAndPresentCorrections(
   send,
   userKey,
@@ -4785,6 +4871,204 @@ return;
     delete userPendingEmailEdit[userKey];
 
     await returnToReportList(send, finish, userKey);
+
+    return;
+  }
+    // ------------------------------------------------------
+  // ОЖИДАЕМ ФАЙЛЫ ДЛЯ ПРАВОК
+  // (Замерный лист / Фотоотчет / Видеоотчет / Договор)
+  // ------------------------------------------------------
+
+  const pendingCorrectionUpload =
+    userPendingCorrectionUpload[userKey];
+
+  if (pendingCorrectionUpload) {
+    if (trimmedText === "Завершить загрузку") {
+      if (!pendingCorrectionUpload.has_uploaded_file) {
+        await send(
+          "Пока не получено ни одного файла. " +
+            "Загрузите хотя бы один файл, прежде чем нажать «Завершить загрузку»."
+        );
+
+        return;
+      }
+
+      delete userPendingCorrectionUpload[userKey];
+
+      await send(
+        "✅ Файлы сохранены. Выберите, что ещё нужно поправить:",
+        buildCorrectionActionButtons()
+      );
+
+      return;
+    }
+
+    if (imageUrls && imageUrls.length > 0) {
+      const previousQueue =
+        userCorrectionUploadQueue[userKey] || Promise.resolve();
+
+      const currentQueue = previousQueue
+        .catch(() => {})
+        .then(async () => {
+          const currentPending =
+            userPendingCorrectionUpload[userKey];
+
+          if (!currentPending) {
+            return;
+          }
+
+          let uploaded = 0;
+
+          for (const url of imageUrls) {
+            try {
+              const currentNumber =
+                currentPending.next_file_number;
+
+              const fileName = buildDocumentFileName(
+                currentPending.prefix,
+                currentPending.date_text,
+                currentNumber
+              );
+
+              console.log("Загружаю файл (Внести правки):", {
+                userKey,
+                url,
+                fileName,
+                number: currentNumber
+              });
+
+              await ydUploadFromUrl(
+                `${currentPending.folder_path}/${fileName}`,
+                url
+              );
+
+              currentPending.next_file_number = currentNumber + 1;
+
+              uploaded++;
+            } catch (error) {
+              console.error(
+                "Ошибка загрузки файла (Внести правки):",
+                error.message
+              );
+            }
+          }
+
+          if (uploaded > 0) {
+            currentPending.has_uploaded_file = true;
+
+            await send(
+              `Файл(ы) получено (${uploaded}). Когда закончите — нажмите «Завершить загрузку».`,
+              ["Завершить загрузку"]
+            );
+          } else if (currentPending.has_uploaded_file) {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте ещё раз или нажмите «Завершить загрузку».",
+              ["Завершить загрузку"]
+            );
+          } else {
+            await send(
+              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
+                "Попробуйте загрузить его ещё раз."
+            );
+          }
+        });
+
+      userCorrectionUploadQueue[userKey] = currentQueue;
+
+      try {
+        await currentQueue;
+      } finally {
+        if (userCorrectionUploadQueue[userKey] === currentQueue) {
+          delete userCorrectionUploadQueue[userKey];
+        }
+      }
+
+      return;
+    }
+
+    if (pendingCorrectionUpload.has_uploaded_file) {
+      await send(
+        "Загрузите файл или нажмите «Завершить загрузку».",
+        ["Завершить загрузку"]
+      );
+    } else {
+      await send(pendingCorrectionUpload.prompt_text + ".");
+    }
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ КОММЕНТАРИЙ ПОСЛЕ "ПРАВКИ ВНЕСЕНЫ"
+  // ------------------------------------------------------
+
+  const pendingCorrectionComment =
+    userPendingCorrectionComment[userKey];
+
+  if (pendingCorrectionComment) {
+    const comment = trimmedText;
+
+    if (!comment) {
+      await send(
+        "Комментарий не может быть пустым. Введите комментарий"
+      );
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        pendingCorrectionComment.lead_id,
+        pendingCorrectionComment.task_id,
+        "Правки внесены"
+      );
+
+      try {
+        await addLeadNote(
+          pendingCorrectionComment.lead_id,
+          comment
+        );
+      } catch (noteError) {
+        console.error(
+          "Не удалось добавить комментарий к сделке (Внести правки):",
+          noteError.message
+        );
+      }
+
+      await send(
+        'Текущая задача amoCRM закрыта с результатом "Правки внесены".'
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (Внести правки):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    delete userPendingCorrectionComment[userKey];
+    delete userSelectedCorrectionMeasurement[userKey];
+    delete userPendingCorrectionUpload[userKey];
+
+    const shouldFinish = await searchAndPresentCorrections(
+      send,
+      userKey,
+      currentEngineerName
+    );
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
