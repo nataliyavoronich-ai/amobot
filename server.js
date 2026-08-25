@@ -4788,7 +4788,42 @@ return;
 
     return;
   }
+// ------------------------------------------------------
+// СЦЕНАРИЙ "ВНЕСТИ ПРАВКИ": КАРТОЧКА И ДЕЙСТВИЯ
+// ------------------------------------------------------
 
+const selectedCorrection =
+  userSelectedCorrectionMeasurement[userKey];
+
+if (selectedCorrection) {
+  if (
+    trimmedText === "Замерный лист" ||
+    trimmedText === "Фотоотчет" ||
+    trimmedText === "Видеоотчет" ||
+    trimmedText === "Договор"
+  ) {
+    await startCorrectionUpload(
+      send,
+      finish,
+      userKey,
+      selectedCorrection,
+      trimmedText
+    );
+
+    return;
+  }
+
+  if (trimmedText === "Правки внесены") {
+    userPendingCorrectionComment[userKey] = {
+      lead_id: selectedCorrection.lead_id,
+      task_id: selectedCorrection.task_id
+    };
+
+    await send("Введите комментарий");
+
+    return;
+  }
+}
   // ------------------------------------------------------
   // ПОДТВЕРДИТЬ ЗАМЕР
   // ------------------------------------------------------
