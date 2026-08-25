@@ -65,7 +65,8 @@ const KP_TASK_TYPE_ID = 2774021;
 
 // Тип задачи "Загруз. отчет(и)" — сценарий "Загрузить фотоотчет"
 const REPORT_TASK_TYPE_ID = 2746017;
-
+// Тип задачи "Внести правки(и)" — сценарий "Внести правки"
+const CORRECTION_TASK_TYPE_ID = 2990733;
 // Поля сделки, которые нужно выводить в сообщениях бота
 const CONTRACT_NUMBER_FIELD_ID = 412776; // № договора (текст)
 const MEASURE_DATE_FIELD_ID = 175370; // Дата замера (дата)
@@ -73,7 +74,7 @@ const MEASURE_TIME_FIELD_ID = 413828; // Время замера (список)
 const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстовая область)
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
-
+const BOT_NOT_ACCEPTED_FIELD_ID = 555162; // [Бот] Не принято
 // Поле "Email рабочий" в сущности Контакт — используется в сценарии
 // "Загрузить фотоотчет" при редактировании e-mail клиента.
 const CONTACT_EMAIL_FIELD_ID = 141995;
@@ -402,7 +403,28 @@ const userPendingKpTask = {};
 // После нажатия "Заключен договор" бот просит загрузить фото и ждёт фотографии + нажатие кнопки "Готово". Здесь храним, в какую папку на Яндекс.Диске сохранять фото для этой сделки.
 const userPendingPhotoUpload = {};
 const userPhotoUploadQueue = {};
+// ------------------------------------------------------------
+// СОСТОЯНИЕ ДЛЯ СЦЕНАРИЯ "ВНЕСТИ ПРАВКИ"
+// ------------------------------------------------------------
 
+// Выбранная пользователем сделка.
+const userSelectedCorrectionMeasurement = {};
+
+// Список найденных задач "Внести правки".
+const userCorrectionList = {};
+
+// Ожидание загрузки файлов.
+const userPendingCorrectionUpload = {};
+
+// Очередь последовательной загрузки нескольких файлов.
+const userCorrectionUploadQueue = {};
+
+// Ожидание комментария после кнопки "Правки внесены".
+const userPendingCorrectionComment = {};
+
+// Имя текущего пользователя amoMessenger.
+// Оно автоматически сопоставляется со значением поля "Инженер" в сделке.
+const userEngineerName = {};
 // ------------------------------------------------------------
 // СОСТОЯНИЕ ДЛЯ СЦЕНАРИЯ "ЗАГРУЗИТЬ ФОТООТЧЕТ"
 // ------------------------------------------------------------
@@ -466,6 +488,11 @@ function resetUserState(userKey) {
   delete userReportUploadFlags[userKey];
   delete userPendingBudgetEdit[userKey];
   delete userPendingEmailEdit[userKey];
+  delete userSelectedCorrectionMeasurement[userKey];
+  delete userCorrectionList[userKey];
+  delete userPendingCorrectionUpload[userKey];
+  delete userCorrectionUploadQueue[userKey];
+  delete userPendingCorrectionComment[userKey];
 }
 
 // Кэш имён пользователей amoCRM (для поля "Ответственный менеджер"), чтобы не запрашивать одного и того же пользователя много раз подряд.
@@ -1847,40 +1874,28 @@ function getEngineerFieldValue(lead) {
 // ПРОВЕРКА ИНЖЕНЕРА
 // ============================================================
 
-function leadBelongsToEngineer(lead) {
+function normalizeEngineerName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function leadBelongsToEngineer(lead, engineerName) {
   const values = getEngineerFieldValue(lead);
 
-  if (!values) {
+  const normalizedEngineerName =
+    normalizeEngineerName(engineerName);
+
+  if (!values || !normalizedEngineerName) {
     return false;
   }
 
-  const normalizedEngineerName = ENGINEER_NAME
-    .trim()
-    .toLowerCase();
-
-  return values.some((item) => {
-    if (
-      item.enum_id !== null &&
-      Number(item.enum_id) ===
-        Number(ENGINEER_ENUM_ID)
-    ) {
-      return true;
-    }
-
-    if (item.value) {
-      const normalizedValue = String(item.value)
-        .trim()
-        .toLowerCase();
-
-      if (normalizedValue === normalizedEngineerName) {
-        return true;
-      }
-    }
-
-    return false;
-  });
+  return values.some((item) =>
+    normalizeEngineerName(item.value) ===
+    normalizedEngineerName
+  );
 }
-
 // ============================================================
 // ПОЛУЧЕНИЕ ВСЕХ ЗАДАЧ
 // ============================================================
@@ -3466,7 +3481,228 @@ app.get(
     });
   }
 );
+// ============================================================
+// СЦЕНАРИЙ "ВНЕСТИ ПРАВКИ"
+// ============================================================
 
+async function loadCorrectionTasks() {
+  return loadAllTasksPaginated(
+    {
+      "filter[task_type][0]": CORRECTION_TASK_TYPE_ID,
+      "filter[is_completed]": 0
+    },
+    {
+      verbose: false,
+      errorLabel: "correction"
+    }
+  );
+}
+
+async function findCorrectionTasks(engineerName) {
+  const tasks =
+    await loadCorrectionTasks();
+
+  const measurements = [];
+
+  for (const task of tasks) {
+    if (
+      !task.entity_id ||
+      task.entity_type !== "leads" ||
+      Number(task.task_type_id) !==
+        Number(CORRECTION_TASK_TYPE_ID) ||
+      task.is_completed !== false
+    ) {
+      continue;
+    }
+
+    const lead =
+      await getLead(task.entity_id);
+
+    if (
+      !lead ||
+      !leadBelongsToEngineer(
+        lead,
+        engineerName
+      )
+    ) {
+      continue;
+    }
+
+    let contactName = "";
+    let contactPhones = [];
+
+    const mainContactId =
+      getMainContactId(lead);
+
+    if (mainContactId) {
+      const contact =
+        await getContact(mainContactId);
+
+      if (contact) {
+        contactName =
+          contact.name || "";
+
+        contactPhones =
+          getContactPhones(contact);
+      }
+    }
+
+    measurements.push({
+      task_id: Number(task.id),
+
+      lead_id:
+        Number(task.entity_id),
+
+      lead_link:
+        `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
+
+      measure_date:
+        formatDateFieldValue(
+          lead,
+          MEASURE_DATE_FIELD_ID
+        ),
+
+      address:
+        getFieldValueJoined(
+          lead,
+          ADDRESS_FIELD_ID
+        ),
+
+      manager_name:
+        await getUserName(
+          lead.responsible_user_id
+        ),
+
+      budget:
+        lead.price !== undefined &&
+        lead.price !== null
+          ? String(lead.price)
+          : "",
+
+      product:
+        getFieldValueJoined(
+          lead,
+          PRODUCT_FIELD_ID
+        ),
+
+      contact_name:
+        contactName,
+
+      contact_phones:
+        contactPhones.join(", "),
+
+      contract_number:
+        getFieldValueJoined(
+          lead,
+          CONTRACT_NUMBER_FIELD_ID
+        ),
+
+      bot_not_accepted:
+        getFieldValueJoined(
+          lead,
+          BOT_NOT_ACCEPTED_FIELD_ID
+        )
+    });
+  }
+
+  return {
+    measurements
+  };
+}
+
+function formatCorrectionLine(
+  item,
+  index
+) {
+  return (
+    `${index + 1}. ` +
+    `Дата замера: ${item.measure_date || "—"}; ` +
+    `Адрес замера: ${item.address || "—"}; ` +
+    `Ответственный менеджер: ${item.manager_name || "—"}; ` +
+    `Бюджет: ${item.budget || "—"}; ` +
+    `Продукт: ${item.product || "—"}; ` +
+    `Имя клиента: ${item.contact_name || "—"}; ` +
+    `№ телефона клиента: ${item.contact_phones || "—"}; ` +
+    `№ договора: ${item.contract_number || "—"}; ` +
+    `[Бот] Не принято: ${item.bot_not_accepted || "—"}; ` +
+    `Ссылка на сделку: ${item.lead_link}\n`
+  );
+}
+
+function formatCorrectionDetail(item) {
+  return (
+    `Дата замера: ${item.measure_date || "—"}\n` +
+    `Адрес замера: ${item.address || "—"}\n` +
+    `Ответственный менеджер: ${item.manager_name || "—"}\n` +
+    `Бюджет: ${item.budget || "—"}\n` +
+    `Продукт: ${item.product || "—"}\n` +
+    `Имя клиента: ${item.contact_name || "—"}\n` +
+    `№ телефона клиента: ${item.contact_phones || "—"}\n` +
+    `№ договора: ${item.contract_number || "—"}\n` +
+    `[Бот] Не принято: ${item.bot_not_accepted || "—"}`
+  );
+}
+
+function buildCorrectionActionButtons() {
+  return [
+    "Замерный лист",
+    "Фотоотчет",
+    "Видеоотчет",
+    "Договор",
+    "Правки внесены"
+  ];
+}
+
+async function searchAndPresentCorrections(
+  send,
+  userKey,
+  engineerName
+) {
+  const result =
+    await findCorrectionTasks(
+      engineerName
+    );
+
+  userCorrectionList[userKey] =
+    result.measurements;
+
+  if (
+    result.measurements.length === 0
+  ) {
+    await send(
+      "Задач на внесение правок не найдено"
+    );
+
+    return true;
+  }
+
+  let message =
+    "📋 Найдены замеры:\n\n";
+
+  result.measurements.forEach(
+    (item, index) => {
+      message +=
+        formatCorrectionLine(
+          item,
+          index
+        );
+    }
+  );
+
+  const buttons =
+    result.measurements.map(
+      (item) =>
+        item.contract_number ||
+        `Задача ${item.task_id}`
+    );
+
+  await send(
+    message,
+    buttons
+  );
+
+  return false;
+}
 // ============================================================
 // ПОИСК ЗАМЕРОВ + ОТПРАВКА СПИСКА ПОЛЬЗОВАТЕЛЮ
 // ============================================================
@@ -3501,11 +3737,24 @@ async function searchAndPresentMeasurements(send) {
 async function processUserMessage({
   text,
   userKey,
+  userName,
   send,
   finish,
   imageUrls
 }) {
   const trimmedText = (text || "").trim();
+
+  const currentEngineerName =
+    String(
+      userName ||
+      userEngineerName[userKey] ||
+      ""
+    ).trim();
+
+  if (currentEngineerName) {
+    userEngineerName[userKey] =
+      currentEngineerName;
+  }
 
   console.log(
     "Обработка сообщения пользователя:",
@@ -4490,14 +4739,51 @@ return;
   }
 
   if (trimmedText === "Внести правки") {
+  if (!currentEngineerName) {
     await send(
-      "Функция «Внести правки» пока находится в разработке."
+      "❌ Не удалось определить имя пользователя amoMessenger. " +
+      "Проверьте webhook в логах Render."
     );
 
     await finish();
 
     return;
   }
+
+  userLastSearchMode[userKey] =
+    "correction";
+
+  await send(
+    "⏳ Проверяю задачи на внесение правок..."
+  );
+
+  try {
+    const shouldFinish =
+      await searchAndPresentCorrections(
+        send,
+        userKey,
+        currentEngineerName
+      );
+
+    if (shouldFinish) {
+      await finish();
+    }
+  } catch (error) {
+    console.error(
+      "Ошибка поиска задач на внесение правок:",
+      error.message
+    );
+
+    await send(
+      "❌ Произошла ошибка при поиске задач. " +
+      "Подробности есть в логах Render."
+    );
+
+    await finish();
+  }
+
+  return;
+}
 
   // ------------------------------------------------------
   // ЗАМЕР ПОДТВЕРЖДЕН
@@ -5375,7 +5661,53 @@ function normalizeAmoMessengerFileUrl(
   ) {
     return null;
   }
+// ============================================================
+// ИЗВЛЕЧЕНИЕ ИМЕНИ ТЕКУЩЕГО ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
+// ============================================================
 
+function extractAmoMessengerUserName(...sources) {
+  const preferredKeys = [
+    "name",
+    "full_name",
+    "fullName",
+    "user_name",
+    "username"
+  ];
+
+  for (const source of sources) {
+    if (!source || typeof source !== "object") {
+      continue;
+    }
+
+    for (const key of preferredKeys) {
+      const value = source[key];
+
+      if (
+        typeof value === "string" &&
+        value.trim()
+      ) {
+        return value.trim();
+      }
+    }
+
+    const author = source.author;
+
+    if (author && typeof author === "object") {
+      for (const key of preferredKeys) {
+        const value = author[key];
+
+        if (
+          typeof value === "string" &&
+          value.trim()
+        ) {
+          return value.trim();
+        }
+      }
+    }
+  }
+
+  return "";
+}
   const text =
     value.trim();
 
@@ -5465,7 +5797,23 @@ app.post(
         const userKey =
           context.user_id ||
           (message.author && message.author.user_id);
+const userName = extractAmoMessengerUserName(
+  message.author,
+  context,
+  message
+);
 
+console.log(
+  "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER:",
+  JSON.stringify(
+    {
+      userKey,
+      userName
+    },
+    null,
+    2
+  )
+);
         log(
           "ПРЯМОЙ КАНАЛ: ВХОДЯЩЕЕ СООБЩЕНИЕ",
           {
@@ -5490,16 +5838,14 @@ app.post(
         }
 
         await processUserMessage({
-          text,
-          userKey,
-          send: wrapSendWithLastMessageTracking(
-            userKey,
-            (msgText, buttons) =>
-              sendDirectMessage(directId, msgText, buttons)
-          ),
-          finish: async () => {},
-          imageUrls
-        });
+         await processUserMessage({
+  text,
+  userKey,
+  userName,
+  send,
+  finish,
+  imageUrls
+});
 
         return;
       }
