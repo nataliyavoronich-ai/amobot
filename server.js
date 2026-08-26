@@ -1282,7 +1282,7 @@ async function ensureLeadYandexFolders(lead) {
   const leadId = lead.id;
 
   const leadFolderPath =
-    `${YANDEX_DISK_ROOT_FOLDER}/Сделка (${leadId})`;
+    `${YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
 
   const reportsPath = `${leadFolderPath}/Отчеты и проекты`;
   const photoPath = `${reportsPath}/Фотоотчет`;
@@ -2542,7 +2542,7 @@ function formatConductMeasurementLine(item, index) {
     `Имя клиента: ${item.contact_name || "—"}; ` +
     `№ телефона (-ов) клиента: ${item.contact_phones || "—"}; ` +
     `№ договора: ${item.contract_number || "—"}; ` +
-    `Ссылка на сделку: ${item.lead_link}\n`
+    `Ссылка на сделку: ${item.lead_link}\n\n`
   );
 }
 
@@ -3812,7 +3812,7 @@ function formatCorrectionLine(
     `№ телефона клиента: ${item.contact_phones || "—"}; ` +
     `№ договора: ${item.contract_number || "—"}; ` +
     `[Бот] Не принято: ${item.bot_not_accepted || "—"}; ` +
-    `Ссылка на сделку: ${item.lead_link}\n`
+    `Ссылка на сделку: ${item.lead_link}\n\n`
   );
 }
 
@@ -3990,7 +3990,7 @@ function formatMeasurementLine(item, index) {
     `Продукт: ${item.product || "—"}; ` +
     `Имя контакта: ${item.contact_name || "—"}; ` +
     `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
-    `Ссылка на сделку: ${item.lead_link}\n`
+    `Ссылка на сделку: ${item.lead_link}\n\n`
   );
 }
 
