@@ -1665,82 +1665,66 @@ async function getAmoMessengerUserName(userId) {
     return "";
   }
 
+  const doRequest = () =>
+    axios.get(
+      "https://api.amo.tm/v1.3/users",
+      {
+        params: {
+          "user_id[]": userId
+        },
+        headers: {
+          Authorization: `Bearer ${amomessengerAccessToken}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 30000,
+        validateStatus: () => true
+      }
+    );
+
   try {
-    const response = await axios.get(
-  "https://api.amo.tm/v1.3/users",
-  {
-    params: {
-      "user_id[]": userId
-    },
-    headers: {
-      Authorization: `Bearer ${amomessengerAccessToken}`,
-      "Content-Type": "application/json"
-    },
-    timeout: 30000
-  }
-);
+    let response = await doRequest();
+
+    if (response.status === 401 || response.status === 403) {
+      console.log(
+        "amoMessenger вернул " +
+        `${response.status} при получении пользователя. ` +
+        "Пробуем обновить токен..."
+      );
+
+      await refreshAmoMessengerToken();
+
+      response = await doRequest();
+    }
 
     console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ"
-    );
-    console.log(
-      JSON.stringify(
-        response.data,
-        null,
-        2
-      )
-    );
-    console.log(
-      "=========================================="
-    );
+    console.log("==========================================");
+    console.log("AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ");
+    console.log(JSON.stringify(response.data, null, 2));
+    console.log("==========================================");
 
     const items =
       response.data?._embedded?.items || [];
 
-    if (
-      !Array.isArray(items) ||
-      items.length === 0
-    ) {
-      console.log(
-        "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:",
-        userId
-      );
-
+    if (!Array.isArray(items) || items.length === 0) {
+      console.log("ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:", userId);
       return "";
     }
 
     const user =
-      items.find(
-        (item) =>
-          String(item.id) === String(userId)
-      ) || items[0];
+      items.find((item) => String(item.id) === String(userId)) ||
+      items[0];
 
-    const userName =
-      String(
-        user?.name || ""
-      ).trim();
+    const userName = String(user?.name || "").trim();
 
-    console.log(
-      "ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
-      userName
-    );
+    console.log("ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:", userName);
 
     return userName;
 
   } catch (error) {
     console.error(
       "ОШИБКА ПОЛУЧЕНИЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
-      error.response?.status ||
-        error.message,
-      JSON.stringify(
-        error.response?.data || {},
-        null,
-        2
-      )
+      error.response?.status || error.message,
+      JSON.stringify(error.response?.data || {}, null, 2)
     );
 
     return "";
@@ -1774,14 +1758,17 @@ async function sendDirectMessage(
   console.log("BODY:");
   console.log(JSON.stringify(body, null, 2));
 
-  const response = await axios.post(url, body, {
-    headers: {
-      Authorization: `Bearer ${amomessengerAccessToken}`,
-      "Content-Type": "application/json"
-    },
-    timeout: 30000,
-    validateStatus: () => true
-  });
+  const doRequest = () =>
+    axios.post(url, body, {
+      headers: {
+        Authorization: `Bearer ${amomessengerAccessToken}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000,
+      validateStatus: () => true
+    });
+
+  let response = await doRequest();
 
   console.log(
     "amoMessenger DIRECT response:",
@@ -1794,7 +1781,23 @@ async function sendDirectMessage(
     response.status === 403
   ) {
     console.log(
-      "amoMessenger token недействителен (DIRECT)."
+      "amoMessenger вернул " +
+      `${response.status} (DIRECT). ` +
+      "Пробуем обновить токен..."
+    );
+
+    await refreshAmoMessengerToken();
+
+    console.log(
+      "Повторяем DIRECT-запрос после обновления токена..."
+    );
+
+    response = await doRequest();
+
+    console.log(
+      "amoMessenger DIRECT response после обновления токена:",
+      response.status,
+      JSON.stringify(response.data)
     );
   }
 
@@ -1806,7 +1809,6 @@ async function sendDirectMessage(
 
   return response;
 }
-
 // ============================================================
 // ПОЛУЧЕНИЕ СДЕЛКИ
 // ============================================================
