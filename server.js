@@ -501,6 +501,10 @@ const amoCrmUsersCache = {};
 // ID аккаунта amoCRM, нужен для заголовка X-Account при обращении к API Sensei. Получаем один раз и кэшируем.
 let amocrmAccountId = null;
 
+// Кэш папок Яндекс.Диска по ID сделки — чтобы не пересоздавать и не
+// перепубликовывать все 5 папок при каждом нажатии кнопки (это и
+// вызывало задержку 20-30 секунд в разделе "Внести правки").
+const leadYandexFoldersCache = {};
 // ============================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================================
@@ -1281,6 +1285,10 @@ async function ydUploadFromUrl(path, fileUrl) {
 async function ensureLeadYandexFolders(lead) {
   const leadId = lead.id;
 
+  if (leadYandexFoldersCache[leadId]) {
+    return leadYandexFoldersCache[leadId];
+  }
+
   const leadFolderPath =
     `${YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
 
@@ -1336,7 +1344,7 @@ async function ensureLeadYandexFolders(lead) {
     }
   }
 
-  return {
+    const result = {
     leadFolderPath,
     reportsPath,
     photoPath,
@@ -1344,6 +1352,10 @@ async function ensureLeadYandexFolders(lead) {
     videoPath,
     contractPath
   };
+
+  leadYandexFoldersCache[leadId] = result;
+
+  return result;
 }
 // ============================================================
 // ОБНОВЛЕНИЕ ТОКЕНА AMOMESSENGER
