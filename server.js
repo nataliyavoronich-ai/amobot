@@ -1353,9 +1353,35 @@ async function ensureLeadYandexFolders(lead) {
     contractPath
   };
 
-  leadYandexFoldersCache[leadId] = result;
+   leadYandexFoldersCache[leadId] = result;
 
   return result;
+}
+
+// Только вычисляет пути к папкам сделки (без обращений к Яндекс.Диску).
+function buildLeadYandexFolderPaths(leadId) {
+  const leadFolderPath =
+    `${YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
+
+  const reportsPath = `${leadFolderPath}/Отчеты и проекты`;
+
+  return {
+    leadFolderPath,
+    reportsPath,
+    photoPath: `${reportsPath}/Фотоотчет`,
+    measureSheetPath: `${reportsPath}/Замерный лист`,
+    videoPath: `${reportsPath}/Видео`,
+    contractPath: `${reportsPath}/Договор`
+  };
+}
+
+// Создаёт (если ещё нет) только ОДНУ нужную папку сделки — без публикации
+// ссылок и без обращения ко всем остальным папкам. Используется в сценарии
+// "Внести правки", где на каждый клик нужна только одна папка, а не все 5
+// сразу (именно это и вызывало задержку 20-30 секунд).
+async function ensureSingleLeadFolder(reportsPath, targetFolderPath) {
+  await ydEnsureFolderPath(reportsPath);
+  await ydEnsureFolder(targetFolderPath);
 }
 // ============================================================
 // ОБНОВЛЕНИЕ ТОКЕНА AMOMESSENGER
@@ -3892,16 +3918,14 @@ async function startCorrectionUpload(
     return;
   }
 
-  try {
-    const lead = await getLead(correction.lead_id);
+   try {
+    const leadId = correction.lead_id;
 
-    if (!lead) {
-      throw new Error("Сделка не найдена");
-    }
-
-    const folders = await ensureLeadYandexFolders(lead);
+    const folders = buildLeadYandexFolderPaths(leadId);
 
     const folderPath = folders[config.folderKey];
+
+    await ensureSingleLeadFolder(folders.reportsPath, folderPath);
 
     const dateText = todayMoscowDateText();
 
