@@ -1684,7 +1684,10 @@ async function getAmoMessengerUserName(userId) {
   try {
     let response = await doRequest();
 
-    if (response.status === 401 || response.status === 403) {
+    if (
+      response.status === 401 ||
+      response.status === 403
+    ) {
       console.log(
         "amoMessenger вернул " +
         `${response.status} при получении пользователя. ` +
@@ -1694,37 +1697,74 @@ async function getAmoMessengerUserName(userId) {
       await refreshAmoMessengerToken();
 
       response = await doRequest();
+
+      console.log(
+        "amoMessenger response после обновления токена (users):",
+        response.status
+      );
     }
 
     console.log("");
-    console.log("==========================================");
-    console.log("AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ");
-    console.log(JSON.stringify(response.data, null, 2));
-    console.log("==========================================");
+    console.log(
+      "=========================================="
+    );
+    console.log(
+      "AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ"
+    );
+    console.log(
+      JSON.stringify(
+        response.data,
+        null,
+        2
+      )
+    );
+    console.log(
+      "=========================================="
+    );
 
     const items =
       response.data?._embedded?.items || [];
 
-    if (!Array.isArray(items) || items.length === 0) {
-      console.log("ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:", userId);
+    if (
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
+      console.log(
+        "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:",
+        userId
+      );
+
       return "";
     }
 
     const user =
-      items.find((item) => String(item.id) === String(userId)) ||
-      items[0];
+      items.find(
+        (item) =>
+          String(item.id) === String(userId)
+      ) || items[0];
 
-    const userName = String(user?.name || "").trim();
+    const userName =
+      String(
+        user?.name || ""
+      ).trim();
 
-    console.log("ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:", userName);
+    console.log(
+      "ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
+      userName
+    );
 
     return userName;
 
   } catch (error) {
     console.error(
       "ОШИБКА ПОЛУЧЕНИЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
-      error.response?.status || error.message,
-      JSON.stringify(error.response?.data || {}, null, 2)
+      error.response?.status ||
+        error.message,
+      JSON.stringify(
+        error.response?.data || {},
+        null,
+        2
+      )
     );
 
     return "";
@@ -1809,6 +1849,7 @@ async function sendDirectMessage(
 
   return response;
 }
+
 // ============================================================
 // ПОЛУЧЕНИЕ СДЕЛКИ
 // ============================================================
@@ -2147,14 +2188,14 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
 // ФИЛЬТРАЦИЯ ЗАДАЧ
 // ============================================================
 
-async function findMeasurementTasks() {
+async function findMeasurementTasks(engineerName) {
   console.log("");
   console.log(
     "=========================================="
   );
   console.log("ПОИСК ЗАМЕРОВ");
   console.log(
-    `Инженер: ${ENGINEER_NAME}`
+    `Инженер: ${engineerName}`
   );
   console.log(
     `Поле инженера: ${ENGINEER_FIELD_ID}`
@@ -2328,7 +2369,7 @@ async function findMeasurementTasks() {
     );
 
 const belongs =
-      leadBelongsToEngineer(lead, ENGINEER_NAME);
+      leadBelongsToEngineer(lead, engineerName);
 
     console.log(
       "Подходит инженер:",
@@ -2372,7 +2413,7 @@ const belongs =
       is_completed:
         task.is_completed,
       engineer:
-        ENGINEER_NAME,
+        engineerName,
       lead_link:
         `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/leads/detail/${task.entity_id}`,
       contract_number:
@@ -2420,7 +2461,7 @@ async function loadConductTasks() {
   );
 }
 
-async function findConductMeasurementTasks() {
+async function findConductMeasurementTasks(engineerName) {
   console.log("");
   console.log("ПОИСК ЗАДАЧ ПРОВЕСТИ ЗАМЕР (тип " + CONDUCT_TASK_TYPE_ID + ")");
 
@@ -2444,7 +2485,7 @@ async function findConductMeasurementTasks() {
       continue;
     }
 
-        if (!leadBelongsToEngineer(lead, ENGINEER_NAME)) {
+        if (!leadBelongsToEngineer(lead, engineerName)) {
       continue;
     }
 
@@ -2537,7 +2578,7 @@ async function loadReportTasks() {
   );
 }
 
-async function findReportMeasurementTasks() {
+async function findReportMeasurementTasks(engineerName) {
   console.log("");
   console.log("ПОИСК ЗАДАЧ ЗАГРУЗ. ОТЧЕТ (тип " + REPORT_TASK_TYPE_ID + ")");
 
@@ -2561,7 +2602,7 @@ async function findReportMeasurementTasks() {
       continue;
     }
 
-    if (!leadBelongsToEngineer(lead, ENGINEER_NAME)) {
+    if (!leadBelongsToEngineer(lead, engineerName)) {
       continue;
     }
 
@@ -2606,9 +2647,9 @@ async function findReportMeasurementTasks() {
   return { measurements };
 }
 
-async function searchAndPresentReportMeasurements(send) {
+async function searchAndPresentReportMeasurements(send, engineerName) {
   return runMeasurementSearchAndPresent(send, {
-    searchFn: findReportMeasurementTasks,
+    searchFn: () => findReportMeasurementTasks(engineerName),
     emptyMessage: "📋 Задач на загрузку отчета не найдено.",
     formatLine: formatConductMeasurementLine,
     errorLogLabel: " (Загрузить фотоотчет)"
@@ -2807,9 +2848,9 @@ async function runMeasurementSearchAndPresent(send, {
   return shouldFinish;
 }
 
-async function searchAndPresentConductMeasurements(send) {
+async function searchAndPresentConductMeasurements(send, engineerName) {
   return runMeasurementSearchAndPresent(send, {
-    searchFn: findConductMeasurementTasks,
+    searchFn: () => findConductMeasurementTasks(engineerName),
     emptyMessage: "📋 Замеров для проведения не найдено.",
     formatLine: formatConductMeasurementLine,
     errorLogLabel: " (Провести замер)"
@@ -3090,10 +3131,10 @@ async function startEmailEditStep(send, userKey, leadId) {
 }
 
 // Возврат к списку задач "Загруз. отчет(и)" — финальный шаг п.9/п.10 сценария.
-async function returnToReportList(send, finish, userKey) {
+async function returnToReportList(send, finish, userKey, engineerName) {
   userLastSearchMode[userKey] = "report";
 
-  const shouldFinish = await searchAndPresentReportMeasurements(send);
+  const shouldFinish = await searchAndPresentReportMeasurements(send, engineerName);
 
   if (shouldFinish) {
     await finish();
@@ -3362,7 +3403,7 @@ app.get(
         yesterdayMoscowStartUnix();
 
       const result =
-        await findMeasurementTasks();
+        await findMeasurementTasks(ENGINEER_NAME);
 
       res.json({
         status: "OK",
@@ -3953,9 +3994,9 @@ function formatMeasurementLine(item, index) {
   );
 }
 
-async function searchAndPresentMeasurements(send) {
+async function searchAndPresentMeasurements(send, engineerName) {
   return runMeasurementSearchAndPresent(send, {
-    searchFn: findMeasurementTasks,
+    searchFn: () => findMeasurementTasks(engineerName),
     emptyMessage: "📋 Замеров для подтверждения не найдено.",
     formatLine: formatMeasurementLine,
     errorLogLabel: ""
@@ -4097,8 +4138,8 @@ async function processUserMessage({
 
     const shouldFinish =
       pendingComment.afterSearchMode === "conduct"
-        ? await searchAndPresentConductMeasurements(send)
-        : await searchAndPresentMeasurements(send);
+        ? await searchAndPresentConductMeasurements(send, currentEngineerName)
+        : await searchAndPresentMeasurements(send, currentEngineerName);
 
     if (shouldFinish) {
       await finish();
@@ -4297,7 +4338,7 @@ async function processUserMessage({
       delete userPendingReportHub[userKey];
       delete userReportUploadFlags[userKey];
 
-      await returnToReportList(send, finish, userKey);
+      await returnToReportList(send, finish, userKey, currentEngineerName);
 
       return;
     }
@@ -4826,7 +4867,7 @@ return;
     if (trimmedText === "Без изменений") {
       delete userPendingEmailEdit[userKey];
 
-      await returnToReportList(send, finish, userKey);
+      await returnToReportList(send, finish, userKey, currentEngineerName);
 
       return;
     }
@@ -4870,7 +4911,7 @@ return;
 
     delete userPendingEmailEdit[userKey];
 
-    await returnToReportList(send, finish, userKey);
+    await returnToReportList(send, finish, userKey, currentEngineerName);
 
     return;
   }
@@ -5221,15 +5262,29 @@ if (
     );
 
     console.log(
+      "Инженер:",
+      currentEngineerName
+    );
+
+    console.log(
       "=========================================="
     );
+
+    if (!currentEngineerName) {
+      await send(
+        "⚠️ Не удалось определить пользователя. " +
+          "Перезапустите бота командой /старт."
+      );
+
+      return;
+    }
 
     await send(
       "⏳ Проверяю задачи на подтверждение замера..."
     );
 
     const shouldFinish =
-      await searchAndPresentMeasurements(send);
+      await searchAndPresentMeasurements(send, currentEngineerName);
 
     if (shouldFinish) {
       await finish();
@@ -5252,8 +5307,22 @@ if (
     );
 
     console.log(
+      "Инженер:",
+      currentEngineerName
+    );
+
+    console.log(
       "=========================================="
     );
+
+    if (!currentEngineerName) {
+      await send(
+        "⚠️ Не удалось определить пользователя. " +
+          "Перезапустите бота командой /старт."
+      );
+
+      return;
+    }
 
     userLastSearchMode[userKey] = "conduct";
 
@@ -5262,7 +5331,7 @@ if (
     );
 
     const shouldFinish =
-      await searchAndPresentConductMeasurements(send);
+      await searchAndPresentConductMeasurements(send, currentEngineerName);
 
     if (shouldFinish) {
       await finish();
@@ -5281,8 +5350,22 @@ if (
     );
 
     console.log(
+      "Инженер:",
+      currentEngineerName
+    );
+
+    console.log(
       "=========================================="
     );
+
+    if (!currentEngineerName) {
+      await send(
+        "⚠️ Не удалось определить пользователя. " +
+          "Перезапустите бота командой /старт."
+      );
+
+      return;
+    }
 
     userLastSearchMode[userKey] = "report";
 
@@ -5291,7 +5374,7 @@ if (
     );
 
     const shouldFinish =
-      await searchAndPresentReportMeasurements(send);
+      await searchAndPresentReportMeasurements(send, currentEngineerName);
 
     if (shouldFinish) {
       await finish();
@@ -5367,7 +5450,7 @@ if (
     // Возвращаемся к шагу поиска остальных задач замера и показываем список (или сообщение, что задач больше нет)
 
     const shouldFinish =
-      await searchAndPresentMeasurements(send);
+      await searchAndPresentMeasurements(send, currentEngineerName);
 
     if (shouldFinish) {
       await finish();
@@ -5934,7 +6017,7 @@ return;
 
     if (mode === "conduct") {
       try {
-        const result = await findConductMeasurementTasks();
+        const result = await findConductMeasurementTasks(currentEngineerName);
 
         const selected = result.measurements.find(
           (item) =>
@@ -5965,7 +6048,7 @@ return;
       }
     } else if (mode === "report") {
       try {
-        const result = await findReportMeasurementTasks();
+        const result = await findReportMeasurementTasks(currentEngineerName);
 
         const selected = result.measurements.find(
           (item) =>
@@ -5998,7 +6081,7 @@ return;
       }
     } else {
       try {
-        const result = await findMeasurementTasks();
+        const result = await findMeasurementTasks(currentEngineerName);
 
         const selected = result.measurements.find(
           (item) =>
