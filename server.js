@@ -469,6 +469,8 @@ const userPendingEmailEdit = {};
 
 // Сбрасывает весь временный стейт конкретного пользователя
 function resetUserState(userKey) {
+  cancelScheduledUploadNotice(userKey);
+
   delete userSelectedMeasurement[userKey];
   delete userPendingComment[userKey];
   delete userLastSearchMode[userKey];
@@ -1217,38 +1219,184 @@ async function ydGetNextContractFileNumber(
 function buildDocumentFileName(
   prefix,
   dateText,
-  number
+  number,
+  extension
 ) {
   const suffix =
     Number(number) > 0
       ? ` (${Number(number)})`
       : "";
 
+  const safeExtension =
+    (extension && String(extension).trim()) ||
+    "jpg";
+
   return (
     `${prefix} ${dateText}` +
-    `${suffix}.jpg`
+    `${suffix}.${safeExtension}`
   );
 }
 
 function buildContractFileName(
   dateText,
-  number
+  number,
+  extension
 ) {
-  return buildDocumentFileName("Договор", dateText, number);
+  return buildDocumentFileName("Договор", dateText, number, extension || "jpg");
 }
 
 function buildMeasureSheetFileName(
   dateText,
-  number
+  number,
+  extension
 ) {
-  return buildDocumentFileName("Замерный лист", dateText, number);
+  return buildDocumentFileName("Замерный лист", dateText, number, extension || "jpg");
 }
 
 function buildVideoFileName(
   dateText,
-  number
+  number,
+  extension
 ) {
-  return buildDocumentFileName("Видео", dateText, number);
+  return buildDocumentFileName("Видео", dateText, number, extension || "mp4");
+}
+
+// ============================================================
+// ОПРЕДЕЛЕНИЕ РЕАЛЬНОГО РАСШИРЕНИЯ И ТИПА ФАЙЛА ПО ССЫЛКЕ
+// ============================================================
+// amoMessenger отдаёт прямую ссылку на файл в исходном формате
+// (в конце пути до "?" стоит настоящее расширение — .jpg, .mp4,
+// .pdf и т.д.). Раньше расширение всегда жёстко подставлялось как
+// ".jpg", из-за чего видео/pdf сохранялись на Яндекс.Диске с неверным
+// расширением. Теперь расширение всегда берётся из самой ссылки.
+
+const PHOTO_EXTENSIONS = new Set([
+  "jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "gif"
+]);
+
+const VIDEO_EXTENSIONS = new Set([
+  "mp4", "mov", "avi", "mkv", "webm", "m4v", "3gp", "3gpp"
+]);
+
+const DOCUMENT_EXTENSIONS = new Set([
+  "pdf", "doc", "docx"
+]);
+
+const FILE_KIND_LABELS = {
+  photo: "фото",
+  video: "видео",
+  document: "документ",
+  unknown: "файл"
+};
+
+function getUrlExtension(url) {
+  try {
+    const withoutQuery = String(url || "").split("?")[0];
+    const lastDot = withoutQuery.lastIndexOf(".");
+    const lastSlash = withoutQuery.lastIndexOf("/");
+
+    if (lastDot === -1 || lastDot < lastSlash) {
+      return "";
+    }
+
+    return withoutQuery
+      .slice(lastDot + 1)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  } catch (error) {
+    return "";
+  }
+}
+
+function classifyFileKind(extension) {
+  if (PHOTO_EXTENSIONS.has(extension)) return "photo";
+  if (VIDEO_EXTENSIONS.has(extension)) return "video";
+  if (DOCUMENT_EXTENSIONS.has(extension)) return "document";
+  return "unknown";
+}
+
+// Разбивает список пришедших ссылок на те, что подходят по типу для
+// текущего шага (allowedKinds), и те, что не подходят. Файлы с
+// неопределяемым расширением ("unknown") не блокируются — пропускаются
+// как есть, чтобы не отклонять легитимные файлы из-за нестандартной
+// ссылки.
+function classifyAndFilterFiles(urls, allowedKinds) {
+  const validFiles = [];
+  const invalidFiles = [];
+
+  for (const url of urls || []) {
+    const extension = getUrlExtension(url);
+    const kind = classifyFileKind(extension);
+
+    if (kind === "unknown" || allowedKinds.includes(kind)) {
+      validFiles.push({ url, extension, kind });
+    } else {
+      invalidFiles.push({ url, extension, kind });
+    }
+  }
+
+  return { validFiles, invalidFiles };
+}
+
+function buildKindMismatchNote(invalidFiles, allowedKinds) {
+  if (!invalidFiles || invalidFiles.length === 0) {
+    return "";
+  }
+
+  const allowedLabel = allowedKinds
+    .map((kind) => FILE_KIND_LABELS[kind] || kind)
+    .join(" или ");
+
+  const foundKinds = [
+    ...new Set(
+      invalidFiles.map((f) => FILE_KIND_LABELS[f.kind] || f.kind)
+    )
+  ].join(", ");
+
+  return (
+    `⚠️ Пропущено файлов не того формата: ${invalidFiles.length} ` +
+    `(${foundKinds}). На этом шаге принимается только: ${allowedLabel}.`
+  );
+}
+
+// ============================================================
+// ОТЛОЖЕННАЯ ("СХЛОПНУТАЯ") ОТБИВКА О ЗАГРУЖЕННЫХ ФАЙЛАХ
+// ============================================================
+// Если пользователь одновременно отправляет несколько файлов, они
+// могут приходить в РАЗНЫХ вебхуках amoMessenger (каждый — отдельное
+// income_message), а не одним сообщением. Раньше на каждый такой
+// вебхук отправлялась отдельная отбивка "Файл(ы) получено...", из-за
+// чего на 5 файлов приходило 5 сообщений подряд. Теперь отбивка
+// откладывается на небольшой промежуток времени: если за это время
+// приходят новые файлы — таймер перезапускается, и в итоге
+// отправляется только одно итоговое сообщение.
+
+const userUploadNoticeTimers = {};
+
+const UPLOAD_NOTICE_DEBOUNCE_MS = 1800;
+
+function cancelScheduledUploadNotice(userKey) {
+  if (userUploadNoticeTimers[userKey]) {
+    clearTimeout(userUploadNoticeTimers[userKey]);
+    delete userUploadNoticeTimers[userKey];
+  }
+}
+
+function scheduleUploadNotice(userKey, sendNoticeFn) {
+  cancelScheduledUploadNotice(userKey);
+
+  userUploadNoticeTimers[userKey] = setTimeout(async () => {
+    delete userUploadNoticeTimers[userKey];
+
+    try {
+      await sendNoticeFn();
+    } catch (error) {
+      console.error(
+        "Ошибка отправки отложенной отбивки о загруженных файлах:",
+        error.message
+      );
+    }
+  }, UPLOAD_NOTICE_DEBOUNCE_MS);
 }
 
 async function ydUploadFromUrl(path, fileUrl) {
@@ -3011,7 +3159,9 @@ async function enterReportHub(
       contract_number: contractNumber,
       folders,
       photo_date_text: dateText,
-      photo_next_number: nextPhotoNumber
+      photo_next_number: nextPhotoNumber,
+      notice_uploaded_count: 0,
+      notice_mismatch_note: ""
     };
 
     await send(
@@ -3916,22 +4066,30 @@ const CORRECTION_UPLOAD_TYPES = {
   "Замерный лист": {
     folderKey: "measureSheetPath",
     prefix: "Замерный лист",
-    promptText: "Загрузите замерный лист"
+    promptText: "Загрузите замерный лист",
+    allowedKinds: ["photo", "document"],
+    defaultExtension: "jpg"
   },
   "Фотоотчет": {
     folderKey: "photoPath",
     prefix: "Фотоотчет",
-    promptText: "Загрузите фотоотчет"
+    promptText: "Загрузите фотоотчет",
+    allowedKinds: ["photo"],
+    defaultExtension: "jpg"
   },
   "Видеоотчет": {
     folderKey: "videoPath",
     prefix: "Видео",
-    promptText: "Загрузите видео"
+    promptText: "Загрузите видео",
+    allowedKinds: ["video"],
+    defaultExtension: "mp4"
   },
   "Договор": {
     folderKey: "contractPath",
     prefix: "Договор",
-    promptText: "Загрузите фото договора"
+    promptText: "Загрузите фото договора",
+    allowedKinds: ["photo", "document"],
+    defaultExtension: "jpg"
   }
 };
 
@@ -3976,7 +4134,11 @@ async function startCorrectionUpload(
       date_text: dateText,
       next_file_number: nextFileNumber,
       has_uploaded_file: false,
-      prompt_text: config.promptText
+      prompt_text: config.promptText,
+      allowed_kinds: config.allowedKinds || ["photo", "video", "document"],
+      default_extension: config.defaultExtension || "jpg",
+      notice_uploaded_count: 0,
+      notice_mismatch_note: ""
     };
 
     await send(config.promptText);
@@ -4294,6 +4456,24 @@ async function processUserMessage({
   imageUrls.length > 0
 ) {
   // --------------------------------------------------------
+  // ПРОВЕРКА ТИПА ФАЙЛА: на этом шаге принимаются только фото
+  // --------------------------------------------------------
+
+  const { validFiles, invalidFiles } = classifyAndFilterFiles(
+    imageUrls,
+    ["photo"]
+  );
+
+  if (validFiles.length === 0) {
+    await send(
+      buildKindMismatchNote(invalidFiles, ["photo"]) ||
+        "⚠️ Загрузите фото договора."
+    );
+
+    return;
+  }
+
+  // --------------------------------------------------------
   // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
   // --------------------------------------------------------
 
@@ -4325,7 +4505,7 @@ async function processUserMessage({
         let uploaded = 0;
 
         for (
-          const url of imageUrls
+          const file of validFiles
         ) {
           try {
             // Берём номер непосредственно перед загрузкой.
@@ -4337,14 +4517,15 @@ async function processUserMessage({
               buildContractFileName(
                 currentPendingPhoto
                   .contract_date_text,
-                currentNumber
+                currentNumber,
+                file.extension || "jpg"
               );
 
             console.log(
               "Загружаю фото договора:",
               {
                 userKey,
-                url,
+                url: file.url,
                 fileName,
                 number:
                   currentNumber
@@ -4353,7 +4534,7 @@ async function processUserMessage({
 
             await ydUploadFromUrl(
               `${currentPendingPhoto.contract_path}/${fileName}`,
-              url
+              file.url
             );
 
             // Номер увеличиваем только после успешного запуска загрузки на Яндекс.Диск.
@@ -4375,22 +4556,50 @@ async function processUserMessage({
           }
         }
 
-        if (
-          uploaded > 0
-        ) {
+        const mismatchNote = buildKindMismatchNote(invalidFiles, ["photo"]);
+
+        if (uploaded > 0) {
           currentPendingPhoto.has_uploaded_photo = true;
 
-          const doneButtonPhoto = tagButtonWithDeal(
-            "Готово",
-            currentPendingPhoto.contract_number,
-            currentPendingPhoto.lead_id
-          );
+          currentPendingPhoto.notice_uploaded_count =
+            (currentPendingPhoto.notice_uploaded_count || 0) + uploaded;
 
-          await send(
-            `Фото получено (${uploaded}). ` +
-            "Когда закончите — нажмите «Готово».",
-            [doneButtonPhoto]
-          );
+          if (mismatchNote) {
+            currentPendingPhoto.notice_mismatch_note = mismatchNote;
+          }
+
+          // Откладываем отбивку — если пользователь пришлёт ещё файлы
+          // в течение короткого окна, будет отправлено только одно
+          // итоговое сообщение вместо отдельного на каждый файл.
+          scheduleUploadNotice(userKey, async () => {
+            const latest = userPendingPhotoUpload[userKey];
+
+            if (!latest) {
+              return;
+            }
+
+            const count = latest.notice_uploaded_count || 0;
+            const note = latest.notice_mismatch_note || "";
+
+            latest.notice_uploaded_count = 0;
+            latest.notice_mismatch_note = "";
+
+            const doneButtonPhoto = tagButtonWithDeal(
+              "Готово",
+              latest.contract_number,
+              latest.lead_id
+            );
+
+            let text =
+              `Фото получено (${count}). ` +
+              "Когда закончите — нажмите «Готово».";
+
+            if (note) {
+              text = `${text}\n\n${note}`;
+            }
+
+            await send(text, [doneButtonPhoto]);
+          });
         } else if (currentPendingPhoto.has_uploaded_photo) {
            await send(
             "❌ Не удалось сохранить фото на Яндекс.Диске. " +
@@ -4493,7 +4702,9 @@ async function processUserMessage({
           measure_sheet_path: pendingReportHub.folders.measureSheetPath,
           date_text: dateText,
           next_file_number: nextFileNumber,
-          has_uploaded_file: false
+          has_uploaded_file: false,
+          notice_uploaded_count: 0,
+          notice_mismatch_note: ""
         };
 
         delete userPendingReportHub[userKey];
@@ -4518,6 +4729,29 @@ async function processUserMessage({
 
     if (imageUrls && imageUrls.length > 0) {
       // --------------------------------------------------------
+      // ПРОВЕРКА ТИПА ФАЙЛА: на этом шаге принимаются только фото
+      // --------------------------------------------------------
+
+      const { validFiles, invalidFiles } = classifyAndFilterFiles(
+        imageUrls,
+        ["photo"]
+      );
+
+      if (validFiles.length === 0) {
+        await send(
+          buildKindMismatchNote(invalidFiles, ["photo"]) ||
+            "⚠️ Загрузите фото замера.",
+          [tagButtonWithDeal(
+            "Вернуться к списку замеров",
+            pendingReportHub.contract_number,
+            pendingReportHub.lead_id
+          )]
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ФОТО ОТЧЕТА В ОЧЕРЕДЬ
       // --------------------------------------------------------
 
@@ -4537,26 +4771,27 @@ async function processUserMessage({
 
           let uploaded = 0;
 
-          for (const url of imageUrls) {
+          for (const file of validFiles) {
             try {
               const currentNumber = currentHub.photo_next_number;
 
               const fileName = buildDocumentFileName(
                 "Фотоотчет",
                 currentHub.photo_date_text,
-                currentNumber
+                currentNumber,
+                file.extension || "jpg"
               );
 
               console.log("Загружаю фото отчета:", {
                 userKey,
-                url,
+                url: file.url,
                 fileName,
                 number: currentNumber
               });
 
               await ydUploadFromUrl(
                 `${currentHub.folders.photoPath}/${fileName}`,
-                url
+                file.url
               );
 
               currentHub.photo_next_number = currentNumber + 1;
@@ -4588,15 +4823,44 @@ async function processUserMessage({
   )
 ];
 
+const mismatchNote = buildKindMismatchNote(invalidFiles, ["photo"]);
+
 if (uploaded > 0) {
   if (userReportUploadFlags[userKey]) {
     userReportUploadFlags[userKey].photo = true;
   }
 
-  await send(
-    `Фото получено (${uploaded}). Когда закончите — нажмите «Перейти к загрузке замерн.листа».`,
-    reportHubButtons
-  );
+  currentHub.notice_uploaded_count =
+    (currentHub.notice_uploaded_count || 0) + uploaded;
+
+  if (mismatchNote) {
+    currentHub.notice_mismatch_note = mismatchNote;
+  }
+
+  // Откладываем отбивку, чтобы на несколько одновременно
+  // присланных файлов пришло только одно итоговое сообщение.
+  scheduleUploadNotice(userKey, async () => {
+    const latestHub = userPendingReportHub[userKey];
+
+    if (!latestHub) {
+      return;
+    }
+
+    const count = latestHub.notice_uploaded_count || 0;
+    const note = latestHub.notice_mismatch_note || "";
+
+    latestHub.notice_uploaded_count = 0;
+    latestHub.notice_mismatch_note = "";
+
+    let text =
+      `Фото получено (${count}). Когда закончите — нажмите «Перейти к загрузке замерн.листа».`;
+
+    if (note) {
+      text = `${text}\n\n${note}`;
+    }
+
+    await send(text, reportHubButtons);
+  });
 } else {
             await send(
               "❌ Не удалось сохранить фото на Яндекс.Диске. " +
@@ -4675,7 +4939,9 @@ return;
             video_path: pendingMeasureSheet.folders.videoPath,
             date_text: dateText,
             next_file_number: nextFileNumber,
-            has_uploaded_file: false
+            has_uploaded_file: false,
+            notice_uploaded_count: 0,
+            notice_mismatch_note: ""
           };
 
           delete userPendingMeasureSheetUpload[userKey];
@@ -4714,6 +4980,24 @@ return;
 
     if (imageUrls && imageUrls.length > 0) {
       // --------------------------------------------------------
+      // ПРОВЕРКА ТИПА ФАЙЛА: замерный лист — фото или документ (pdf)
+      // --------------------------------------------------------
+
+      const { validFiles, invalidFiles } = classifyAndFilterFiles(
+        imageUrls,
+        ["photo", "document"]
+      );
+
+      if (validFiles.length === 0) {
+        await send(
+          buildKindMismatchNote(invalidFiles, ["photo", "document"]) ||
+            "⚠️ Загрузите замерный лист."
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ (по аналогии с фото договора)
       // --------------------------------------------------------
 
@@ -4734,26 +5018,27 @@ return;
 
           let uploaded = 0;
 
-          for (const url of imageUrls) {
+          for (const file of validFiles) {
             try {
               const currentNumber =
                 currentPending.next_file_number;
 
               const fileName = buildMeasureSheetFileName(
                 currentPending.date_text,
-                currentNumber
+                currentNumber,
+                file.extension || "jpg"
               );
 
               console.log("Загружаю файл замерного листа:", {
                 userKey,
-                url,
+                url: file.url,
                 fileName,
                 number: currentNumber
               });
 
               await ydUploadFromUrl(
                 `${currentPending.measure_sheet_path}/${fileName}`,
-                url
+                file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
@@ -4785,6 +5070,11 @@ return;
             )
           ];
 
+          const mismatchNote = buildKindMismatchNote(
+            invalidFiles,
+            ["photo", "document"]
+          );
+
           if (uploaded > 0) {
             currentPending.has_uploaded_file = true;
 
@@ -4792,10 +5082,37 @@ return;
               userReportUploadFlags[userKey].measureSheet = true;
             }
 
-            await send(
-              `Файл(ы) получено (${uploaded}). Когда закончите — выберите действие:`,
-              measureSheetButtons
-            );
+            currentPending.notice_uploaded_count =
+              (currentPending.notice_uploaded_count || 0) + uploaded;
+
+            if (mismatchNote) {
+              currentPending.notice_mismatch_note = mismatchNote;
+            }
+
+            // Откладываем отбивку, чтобы несколько одновременно
+            // присланных файлов дали только одно итоговое сообщение.
+            scheduleUploadNotice(userKey, async () => {
+              const latest = userPendingMeasureSheetUpload[userKey];
+
+              if (!latest) {
+                return;
+              }
+
+              const count = latest.notice_uploaded_count || 0;
+              const note = latest.notice_mismatch_note || "";
+
+              latest.notice_uploaded_count = 0;
+              latest.notice_mismatch_note = "";
+
+              let text =
+                `Файл(ы) получено (${count}). Когда закончите — выберите действие:`;
+
+              if (note) {
+                text = `${text}\n\n${note}`;
+              }
+
+              await send(text, measureSheetButtons);
+            });
           } else if (currentPending.has_uploaded_file) {
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
@@ -4877,6 +5194,24 @@ return;
 
     if (imageUrls && imageUrls.length > 0) {
       // --------------------------------------------------------
+      // ПРОВЕРКА ТИПА ФАЙЛА: на этом шаге принимается только видео
+      // --------------------------------------------------------
+
+      const { validFiles, invalidFiles } = classifyAndFilterFiles(
+        imageUrls,
+        ["video"]
+      );
+
+      if (validFiles.length === 0) {
+        await send(
+          buildKindMismatchNote(invalidFiles, ["video"]) ||
+            "⚠️ Загрузите видео."
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ВИДЕО В ОЧЕРЕДЬ
       // --------------------------------------------------------
 
@@ -4896,25 +5231,26 @@ return;
 
           let uploaded = 0;
 
-          for (const url of imageUrls) {
+          for (const file of validFiles) {
             try {
               const currentNumber = currentPending.next_file_number;
 
               const fileName = buildVideoFileName(
                 currentPending.date_text,
-                currentNumber
+                currentNumber,
+                file.extension || "mp4"
               );
 
               console.log("Загружаю видео:", {
                 userKey,
-                url,
+                url: file.url,
                 fileName,
                 number: currentNumber
               });
 
               await ydUploadFromUrl(
                 `${currentPending.video_path}/${fileName}`,
-                url
+                file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
@@ -4933,6 +5269,8 @@ return;
             }
           }
 
+          const mismatchNote = buildKindMismatchNote(invalidFiles, ["video"]);
+
           if (uploaded > 0) {
             currentPending.has_uploaded_file = true;
 
@@ -4940,15 +5278,42 @@ return;
               userReportUploadFlags[userKey].video = true;
             }
 
-            await send(
-              `Файл(ы) получено (${uploaded}). ` +
-                "Когда закончите — нажмите «Завершить отчет».",
-              [tagButtonWithDeal(
+            currentPending.notice_uploaded_count =
+              (currentPending.notice_uploaded_count || 0) + uploaded;
+
+            if (mismatchNote) {
+              currentPending.notice_mismatch_note = mismatchNote;
+            }
+
+            // Откладываем отбивку, чтобы несколько одновременно
+            // присланных видео дали только одно итоговое сообщение.
+            scheduleUploadNotice(userKey, async () => {
+              const latest = userPendingVideoUpload[userKey];
+
+              if (!latest) {
+                return;
+              }
+
+              const count = latest.notice_uploaded_count || 0;
+              const note = latest.notice_mismatch_note || "";
+
+              latest.notice_uploaded_count = 0;
+              latest.notice_mismatch_note = "";
+
+              let text =
+                `Файл(ы) получено (${count}). ` +
+                "Когда закончите — нажмите «Завершить отчет».";
+
+              if (note) {
+                text = `${text}\n\n${note}`;
+              }
+
+              await send(text, [tagButtonWithDeal(
                 "Завершить отчет",
-                currentPending.contract_number,
-                currentPending.lead_id
-              )]
-            );
+                latest.contract_number,
+                latest.lead_id
+              )]);
+            });
           } else if (currentPending.has_uploaded_file) {
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
@@ -5143,6 +5508,30 @@ return;
     }
 
     if (imageUrls && imageUrls.length > 0) {
+      // --------------------------------------------------------
+      // ПРОВЕРКА ТИПА ФАЙЛА — зависит от того, что сейчас грузим
+      // (Замерный лист/Договор — фото или документ, Фотоотчет —
+      // только фото, Видеоотчет — только видео)
+      // --------------------------------------------------------
+
+      const allowedKinds =
+        pendingCorrectionUpload.allowed_kinds ||
+        ["photo", "video", "document"];
+
+      const { validFiles, invalidFiles } = classifyAndFilterFiles(
+        imageUrls,
+        allowedKinds
+      );
+
+      if (validFiles.length === 0) {
+        await send(
+          buildKindMismatchNote(invalidFiles, allowedKinds) ||
+            `⚠️ ${pendingCorrectionUpload.prompt_text}.`
+        );
+
+        return;
+      }
+
       const previousQueue =
         userCorrectionUploadQueue[userKey] || Promise.resolve();
 
@@ -5158,7 +5547,7 @@ return;
 
           let uploaded = 0;
 
-          for (const url of imageUrls) {
+          for (const file of validFiles) {
             try {
               const currentNumber =
                 currentPending.next_file_number;
@@ -5166,19 +5555,20 @@ return;
               const fileName = buildDocumentFileName(
                 currentPending.prefix,
                 currentPending.date_text,
-                currentNumber
+                currentNumber,
+                file.extension || currentPending.default_extension || "jpg"
               );
 
               console.log("Загружаю файл (Внести правки):", {
                 userKey,
-                url,
+                url: file.url,
                 fileName,
                 number: currentNumber
               });
 
               await ydUploadFromUrl(
                 `${currentPending.folder_path}/${fileName}`,
-                url
+                file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
@@ -5192,17 +5582,50 @@ return;
             }
           }
 
+          const mismatchNote = buildKindMismatchNote(
+            invalidFiles,
+            allowedKinds
+          );
+
           if (uploaded > 0) {
             currentPending.has_uploaded_file = true;
 
-            await send(
-              `Файл(ы) получено (${uploaded}). Когда закончите — нажмите «Завершить загрузку».`,
-              [tagButtonWithDeal(
+            currentPending.notice_uploaded_count =
+              (currentPending.notice_uploaded_count || 0) + uploaded;
+
+            if (mismatchNote) {
+              currentPending.notice_mismatch_note = mismatchNote;
+            }
+
+            // Откладываем отбивку — на несколько одновременно
+            // присланных файлов придёт только одно итоговое сообщение
+            // (раньше на каждый файл/сообщение приходила своя отбивка).
+            scheduleUploadNotice(userKey, async () => {
+              const latest = userPendingCorrectionUpload[userKey];
+
+              if (!latest) {
+                return;
+              }
+
+              const count = latest.notice_uploaded_count || 0;
+              const note = latest.notice_mismatch_note || "";
+
+              latest.notice_uploaded_count = 0;
+              latest.notice_mismatch_note = "";
+
+              let text =
+                `Файл(ы) получено (${count}). Когда закончите — нажмите «Завершить загрузку».`;
+
+              if (note) {
+                text = `${text}\n\n${note}`;
+              }
+
+              await send(text, [tagButtonWithDeal(
                 "Завершить загрузку",
-                currentPending.contract_number,
-                currentPending.lead_id
-              )]
-            );
+                latest.contract_number,
+                latest.lead_id
+              )]);
+            });
           } else if (currentPending.has_uploaded_file) {
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
@@ -5983,7 +6406,10 @@ userPendingPhotoUpload[userKey] = {
     nextContractFileNumber,
 
   has_uploaded_photo:
-    false
+    false,
+
+  notice_uploaded_count:
+    0
 };
 
 delete userPendingResultTask[
