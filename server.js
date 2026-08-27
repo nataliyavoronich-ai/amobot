@@ -1609,106 +1609,9 @@ async function refreshAmoMessengerToken() {
   }
 }
 // ============================================================
-// AMOMESSENGER API (RPA-канал, через виджет / control_transferred)
+// ОТПРАВКА СООБЩЕНИЯ (ПРЯМОЙ КАНАЛ, direct_id)
 // ============================================================
 
-async function amoMessengerPost(
-  botId,
-  requestId,
-  method,
-  body
-) {
-  if (!amomessengerAccessToken) {
-    throw new Error(
-      "Токен amoMessenger не найден"
-    );
-  }
-
-  const url =
-    `https://api.amo.tm/v1.3/bots/${botId}` +
-    `/request/${requestId}/${method}`;
-
-  console.log("");
-  console.log("amoMessenger POST (RPA)");
-  console.log(url);
-  console.log("BODY:");
-  console.log(JSON.stringify(body, null, 2));
-
-  const doRequest = async () => {
-    return axios.post(
-      url,
-      body,
-      {
-        headers: {
-          Authorization:
-            `Bearer ${amomessengerAccessToken}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000,
-        validateStatus: () => true
-      }
-    );
-  };
-
-  try {
-    let response =
-      await doRequest();
-
-    console.log(
-      "amoMessenger response:",
-      response.status,
-      response.data
-    );
-
-    if (
-      response.status === 401 ||
-      response.status === 403
-    ) {
-      console.log(
-        "amoMessenger вернул " +
-        `${response.status}. ` +
-        "Пробуем обновить токен..."
-      );
-
-      await refreshAmoMessengerToken();
-
-      console.log(
-        "Повторяем запрос amoMessenger..."
-      );
-
-      response =
-        await doRequest();
-
-      console.log(
-        "amoMessenger response после обновления токена:",
-        response.status,
-        response.data
-      );
-    }
-
-    if (response.status >= 400) {
-      throw new Error(
-        `amoMessenger HTTP ${response.status}`
-      );
-    }
-
-    return response;
-
-  } catch (error) {
-    console.error(
-      "amoMessenger POST ERROR:",
-      error.message
-    );
-
-    throw error;
-  }
-}
-
-// ============================================================
-// ОТПРАВКА СООБЩЕНИЯ (RPA-канал)
-// ============================================================
-
-// Собирает объект reply_markup из простого массива подписей кнопок —  используется и RPA-каналом (sendMessengerMessage), и прямым каналом (sendDirectMessage), поэтому вынесено в одну общую функцию.
 function buildReplyMarkup(buttons) {
   if (!buttons) {
     return null;
@@ -1723,125 +1626,6 @@ function buildReplyMarkup(buttons) {
   };
 }
 
-async function sendMessengerMessage(
-  botId,
-  requestId,
-  receiverUserId,
-  text,
-  buttons = null
-) {
-  const body = {
-    text,
-    receiver: {
-      user_id: receiverUserId
-    }
-  };
-
-  const replyMarkup = buildReplyMarkup(buttons);
-
-  if (replyMarkup) {
-    body.reply_markup = replyMarkup;
-  }
-
-  return amoMessengerPost(
-    botId,
-    requestId,
-    "sendMessage",
-    body
-  );
-}
-
-// ============================================================
-// ВОЗВРАТ УПРАВЛЕНИЯ AMOMESSENGER (RPA-канал)
-// ============================================================
-
-async function returnControl(
-  botId,
-  requestId
-) {
-  try {
-    console.log(
-      "Возвращаем управление amoMessenger..."
-    );
-
-    await amoMessengerPost(
-      botId,
-      requestId,
-      "returnControl",
-      {
-        return_code: "success"
-      }
-    );
-
-    console.log(
-      "Управление возвращено amoMessenger"
-    );
-  } catch (error) {
-    console.error(
-      "Ошибка возврата управления:",
-      error.message
-    );
-  }
-}
-
-// ============================================================
-// ОТПРАВКА СООБЩЕНИЯ (ПРЯМОЙ КАНАЛ, direct_id)
-// ============================================================
-// ============================================================
-// ДИАГНОСТИКА ПОЛУЧЕНИЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER
-// ============================================================
-
-async function debugAmoMessengerUser(userId) {
-  if (!userId) {
-    return null;
-  }
-
-  const urls = [
-    `https://api.amo.tm/v1.3/users/${userId}`,
-    `https://api.amo.tm/v1.3/user/${userId}`,
-    `https://api.amo.tm/v1.3/direct/${userId}`
-  ];
-
-  for (const url of urls) {
-    try {
-      console.log("");
-      console.log("==========================================");
-      console.log("ПРОВЕРЯЕМ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER");
-      console.log(url);
-      console.log("==========================================");
-
-      const response = await axios.get(url, {
-        headers: {
-          Authorization: `Bearer ${amomessengerAccessToken}`,
-          "Content-Type": "application/json"
-        },
-        timeout: 30000,
-        validateStatus: () => true
-      });
-
-      console.log(
-        "AMOMESSENGER USER API RESPONSE:",
-        response.status,
-        JSON.stringify(response.data, null, 2)
-      );
-
-      if (
-        response.status >= 200 &&
-        response.status < 300
-      ) {
-        return response.data;
-      }
-
-    } catch (error) {
-      console.error(
-        "Ошибка проверки пользователя amoMessenger:",
-        error.message
-      );
-    }
-  }
-
-  return null;
-}
 // ============================================================
 // ПОЛУЧЕНИЕ ИМЕНИ ПОЛЬЗОВАТЕЛЯ ИЗ AMOMESSENGER
 // ============================================================
@@ -1874,39 +1658,10 @@ async function getAmoMessengerUserName(userId) {
       response.status === 401 ||
       response.status === 403
     ) {
-      console.log(
-        "amoMessenger вернул " +
-        `${response.status} при получении пользователя. ` +
-        "Пробуем обновить токен..."
-      );
-
       await refreshAmoMessengerToken();
 
       response = await doRequest();
-
-      console.log(
-        "amoMessenger response после обновления токена (users):",
-        response.status
-      );
     }
-
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "AMOMESSENGER: ПОЛУЧЕНЫ ДАННЫЕ ПОЛЬЗОВАТЕЛЯ"
-    );
-    console.log(
-      JSON.stringify(
-        response.data,
-        null,
-        2
-      )
-    );
-    console.log(
-      "=========================================="
-    );
 
     const items =
       response.data?._embedded?.items || [];
@@ -1915,11 +1670,6 @@ async function getAmoMessengerUserName(userId) {
       !Array.isArray(items) ||
       items.length === 0
     ) {
-      console.log(
-        "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER НЕ НАЙДЕН:",
-        userId
-      );
-
       return "";
     }
 
@@ -1933,11 +1683,6 @@ async function getAmoMessengerUserName(userId) {
       String(
         user?.name || ""
       ).trim();
-
-    console.log(
-      "ИМЯ ПОЛЬЗОВАТЕЛЯ AMOMESSENGER:",
-      userName
-    );
 
     return userName;
 
@@ -1978,12 +1723,6 @@ async function sendDirectMessage(
     body.reply_markup = replyMarkup;
   }
 
-  console.log("");
-  console.log("amoMessenger POST (DIRECT)");
-  console.log(url);
-  console.log("BODY:");
-  console.log(JSON.stringify(body, null, 2));
-
   const doRequest = () =>
     axios.post(url, body, {
       headers: {
@@ -1996,35 +1735,13 @@ async function sendDirectMessage(
 
   let response = await doRequest();
 
-  console.log(
-    "amoMessenger DIRECT response:",
-    response.status,
-    JSON.stringify(response.data)
-  );
-
   if (
     response.status === 401 ||
     response.status === 403
   ) {
-    console.log(
-      "amoMessenger вернул " +
-      `${response.status} (DIRECT). ` +
-      "Пробуем обновить токен..."
-    );
-
     await refreshAmoMessengerToken();
 
-    console.log(
-      "Повторяем DIRECT-запрос после обновления токена..."
-    );
-
     response = await doRequest();
-
-    console.log(
-      "amoMessenger DIRECT response после обновления токена:",
-      response.status,
-      JSON.stringify(response.data)
-    );
   }
 
   if (response.status >= 400) {
@@ -2366,7 +2083,7 @@ async function loadTasksDiagnostic(fromUnix, nowUnix) {
       "filter[complete_till][from]": fromUnix,
       "filter[complete_till][to]": nowUnix
     },
-    { verbose: true }
+    { verbose: false }
   );
 }
 
@@ -4258,12 +3975,6 @@ async function processUserMessage({
     userEngineerName[userKey] =
       currentEngineerName;
   }
-
-  console.log(
-    "Обработка сообщения пользователя:",
-    userKey,
-    trimmedText
-  );
 
   // ------------------------------------------------------
   // СТАРТ / ПЕРЕЗАПУСК АЛГОРИТМА
@@ -7047,24 +6758,6 @@ app.post(
     const body =
       req.body || {};
 
-    console.log("");
-    console.log(
-      "=========================================="
-    );
-    console.log(
-      "AMOMESSENGER WEBHOOK"
-    );
-    console.log(
-      JSON.stringify(
-        body,
-        null,
-        2
-      )
-    );
-    console.log(
-      "=========================================="
-    );
-
     // Сразу отвечаем amoMessenger.
     res.status(200).json({
       status: "OK"
@@ -7107,27 +6800,6 @@ if (!userName && userKey) {
     );
 }
 
-console.log(
-  "ПОЛЬЗОВАТЕЛЬ AMOMESSENGER:",
-  JSON.stringify(
-    {
-      userKey,
-      userName
-    },
-    null,
-    2
-  )
-);
- 
-        log(
-          "ПРЯМОЙ КАНАЛ: ВХОДЯЩЕЕ СООБЩЕНИЕ",
-          {
-            directId,
-            userKey,
-            text
-          }
-        );
-
         if (!directId || !userKey) {
           console.error(
             "Не удалось определить direct_id или user_id из вебхука."
@@ -7137,13 +6809,6 @@ console.log(
         }
 
         const imageUrls = extractImageUrlsFromMessage(message);
-
-if (imageUrls.length > 0) {
-  log(
-    "НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ",
-    imageUrls
-  );
-}
 
 await processUserMessage({
   text,
@@ -7168,179 +6833,6 @@ await processUserMessage({
 return;
       }
 
-      // --------------------------------------------------------
-      // CONTROL TRANSFERRED (RPA-канал через виджет)
-      // --------------------------------------------------------
-
-      if (
-        eventType ===
-        "rpa_bot_control_transferred"
-      ) {
-        const data =
-          body._embedded
-            ?.rpa_bot_control_transferred;
-
-        const nested =
-          data?._embedded;
-
-        const context =
-          body._embedded
-            ?.context;
-
-        const request =
-          nested?.request;
-
-        const botId =
-          data?.bot_id;
-
-        const requestId =
-          request?.id;
-
-        const requestAuthorId =
-          request?.author_id;
-
-        const contextUserId =
-          context?.user_id;
-
-        const receiverUserId =
-          requestAuthorId ||
-          contextUserId;
-
-        log(
-          "ПЕРЕДАНО УПРАВЛЕНИЕ ВИДЖЕТУ",
-          {
-            botId,
-            requestId,
-            receiverUserId,
-            contextUserId,
-            requestAuthorId
-          }
-        );
-
-        if (
-          !botId ||
-          !requestId ||
-          !receiverUserId
-        ) {
-          console.error(
-            "Не удалось определить параметры запроса."
-          );
-
-          return;
-        }
-
-       resetUserState(receiverUserId);
-
-        await wrapSendWithLastMessageTracking(
-          receiverUserId,
-          (msgText, buttons) =>
-            sendMessengerMessage(
-              botId,
-              requestId,
-              receiverUserId,
-              msgText,
-              buttons
-            )
-        )(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
-
-        return;
-      }
-
-      // --------------------------------------------------------
-      // INCOME MESSAGE (RPA-канал через виджет)
-      // --------------------------------------------------------
-
-      if (
-        eventType ===
-        "rpa_bot_income_message"
-      ) {
-        const data =
-          body._embedded
-            ?.rpa_bot_income_message;
-
-        const nested =
-          data?._embedded;
-
-        const context =
-          body._embedded
-            ?.context;
-
-        const incomeMessage =
-          nested?.income_message;
-
-        const request =
-          nested?.request;
-
-        const text =
-          incomeMessage?.text ||
-          "";
-
-        const botId =
-          data?.bot_id;
-
-        const requestId =
-          request?.id;
-
-        const receiverUserId =
-          incomeMessage?.author?.user_id ||
-          request?.author_id ||
-          context?.user_id;
-
-        console.log(
-          "Получено сообщение:",
-          text
-        );
-
-        console.log(
-          "requestId:",
-          requestId
-        );
-
-        console.log(
-          "receiverUserId:",
-          receiverUserId
-        );
-
-        if (
-          !botId ||
-          !requestId ||
-          !receiverUserId
-        ) {
-          console.error(
-            "Не удалось определить параметры запроса (RPA)."
-          );
-
-          return;
-        }
-
-        const imageUrls =
-          extractImageUrlsFromMessage(incomeMessage);
-
-        if (imageUrls.length > 0) {
-          log("НАЙДЕНЫ ССЫЛКИ НА ФОТО В СООБЩЕНИИ (RPA)", imageUrls);
-        }
-
-        await processUserMessage({
-          text,
-          userKey: receiverUserId,
-          send: wrapSendWithLastMessageTracking(
-            receiverUserId,
-            (msgText, buttons) =>
-              sendMessengerMessage(
-                botId,
-                requestId,
-                receiverUserId,
-                msgText,
-                buttons
-              )
-          ),
-          finish: () =>
-            returnControl(botId, requestId),
-          imageUrls
-        });
-
-        return;
-      }
     } catch (error) {
       console.error(
         "WEBHOOK ERROR:",
