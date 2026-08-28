@@ -2385,11 +2385,12 @@ const belongs =
 
 // ПОИСК ЗАДАЧ "ПРОВЕСТИ ЗАМЕР" (тип 2746009), БЕЗ ФИЛЬТРА ПО ДАТЕ
 
-async function loadConductTasks() {
+async function loadConductTasks(toUnix) {
   return loadAllTasksPaginated(
     {
       "filter[task_type][0]": CONDUCT_TASK_TYPE_ID,
-      "filter[is_completed]": 0
+      "filter[is_completed]": 0,
+      "filter[complete_till][to]": toUnix
     },
     { verbose: false, errorLabel: "conduct" }
   );
@@ -2399,7 +2400,12 @@ async function findConductMeasurementTasks(engineerName) {
   console.log("");
   console.log("ПОИСК ЗАДАЧ ПРОВЕСТИ ЗАМЕР (тип " + CONDUCT_TASK_TYPE_ID + ")");
 
-  const tasks = await loadConductTasks();
+  // Показываем только задачи со сроком выполнения до конца сегодняшнего
+  // дня (23:59 по Москве) включительно — просроченные (за более ранние
+  // даты) тоже показываем, будущие — нет.
+  const toUnix = todayMoscowEndUnix();
+
+  const tasks = await loadConductTasks(toUnix);
 
   const measurements = [];
 
@@ -2408,7 +2414,8 @@ async function findConductMeasurementTasks(engineerName) {
       !task.entity_id ||
       task.entity_type !== "leads" ||
       Number(task.task_type_id) !== Number(CONDUCT_TASK_TYPE_ID) ||
-      task.is_completed !== false
+      task.is_completed !== false ||
+      Number(task.complete_till || 0) > toUnix
     ) {
       continue;
     }
