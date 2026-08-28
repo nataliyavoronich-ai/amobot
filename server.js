@@ -48,9 +48,11 @@ const SENSEI_TOKEN = process.env.SENSEI_TOKEN || "";
 // ПОСТОЯННЫЕ ЗНАЧЕНИЯ CRM
 // ============================================================
 
-const ENGINEER_NAME = "Марина Трафимова";
+// Значение поля "Инженер" сделки определяется динамически: это имя
+// пользователя amoMessenger, от которого пришёл запрос боту (см.
+// extractAmoMessengerUserName / getAmoMessengerUserName и
+// leadBelongsToEngineer). Здесь хранится только ID самого поля.
 const ENGINEER_FIELD_ID = 203849;
-const ENGINEER_ENUM_ID = 1059150;
 
 const MEASUREMENT_TASK_TYPE_ID = 2746005;
 
@@ -577,8 +579,36 @@ function yesterdayMoscowStartUnix() {
   return todayMoscowStartUnix() - 24 * 60 * 60;
 }
 
+function todayMoscowEndUnix() {
+  return todayMoscowStartUnix() + 24 * 60 * 60 - 1;
+}
+
 function getCurrentMoscowUnix() {
   return Math.floor(Date.now() / 1000);
+}
+
+// ============================================================
+// ДИАПАЗОН ДАТ ДЛЯ СЦЕНАРИЯ "ПОДТВЕРДИТЬ ЗАМЕР"
+// ============================================================
+// Если запрос приходит с 00:00 до 18:00 по Москве — показываем задачи
+// со сроком выполнения "вчера" (00:00-23:59) и "сегодня" до текущего
+// момента.
+// Если запрос приходит с 18:01 до 23:59 по Москве — показываем задачи
+// со сроком выполнения "вчера" (00:00-23:59) и "сегодня" целиком
+// (00:00-23:59), не ограничиваясь текущим моментом.
+function getConfirmMeasurementDateRange(nowUnix) {
+  const todayEighteenUnix =
+    todayMoscowStartUnix() + 18 * 60 * 60;
+
+  const toUnix =
+    nowUnix <= todayEighteenUnix
+      ? nowUnix
+      : todayMoscowEndUnix();
+
+  return {
+    fromUnix: yesterdayMoscowStartUnix(),
+    toUnix
+  };
 }
 
 // Сегодняшняя дата по Москве в формате ДД.ММ.ГГГГ (для имён файлов)
@@ -2075,13 +2105,13 @@ async function loadAllTasksPaginated(filterParams, { verbose = false, errorLabel
   return allTasks;
 }
 
-async function loadTasksDiagnostic(fromUnix, nowUnix) {
+async function loadTasksDiagnostic(fromUnix, toUnix) {
   return loadAllTasksPaginated(
     {
       "filter[task_type][0]": MEASUREMENT_TASK_TYPE_ID,
       "filter[is_completed]": 0,
       "filter[complete_till][from]": fromUnix,
-      "filter[complete_till][to]": nowUnix
+      "filter[complete_till][to]": toUnix
     },
     { verbose: false }
   );
@@ -2104,9 +2134,6 @@ async function findMeasurementTasks(engineerName) {
     `Поле инженера: ${ENGINEER_FIELD_ID}`
   );
   console.log(
-    `ID инженера: ${ENGINEER_ENUM_ID}`
-  );
-  console.log(
     `Тип задачи: ${MEASUREMENT_TASK_TYPE_ID}`
   );
   console.log(
@@ -2115,15 +2142,19 @@ async function findMeasurementTasks(engineerName) {
 
   const nowUnix = getCurrentMoscowUnix();
 
-  // Вчера 00:00 по Москве
-  const fromUnix =
-    yesterdayMoscowStartUnix();
+  const { fromUnix, toUnix } =
+    getConfirmMeasurementDateRange(nowUnix);
+
+  console.log(
+    "Текущее время (Москва):",
+    unixToMoscow(nowUnix)
+  );
 
   console.log(
     "Диапазон Unix:",
     fromUnix,
     "—",
-    nowUnix
+    toUnix
   );
 
   console.log(
@@ -2133,14 +2164,14 @@ async function findMeasurementTasks(engineerName) {
 
   console.log(
     "До:",
-    unixToMoscow(nowUnix)
+    unixToMoscow(toUnix)
   );
 
   // 1. Получаем задачи — фильтрация по типу/статусу/дате теперь выполняется на стороне amoCRM API (см. loadTasksDiagnostic).
-  
+
 
   const tasks =
-    await loadTasksDiagnostic(fromUnix, nowUnix);
+    await loadTasksDiagnostic(fromUnix, toUnix);
 
   console.log(
     `Всего загружено задач (уже отфильтрованных API): ${tasks.length}`
@@ -2180,7 +2211,7 @@ async function findMeasurementTasks(engineerName) {
 
       return (
         till >= fromUnix &&
-        till <= nowUnix
+        till <= toUnix
       );
     });
 
@@ -3094,11 +3125,8 @@ app.get("/status", (req, res) => {
       amocrmAccessToken
         ? "ДА"
         : "НЕТ",
-    engineer: ENGINEER_NAME,
     engineer_field_id:
       ENGINEER_FIELD_ID,
-    engineer_enum_id:
-      ENGINEER_ENUM_ID,
     task_type_id:
       MEASUREMENT_TASK_TYPE_ID,
     conduct_task_type_id:
@@ -3299,14 +3327,8 @@ app.get("/amocrm/status", (req, res) => {
     subdomain:
       AMOCRM_SUBDOMAIN,
 
-    engineer:
-      ENGINEER_NAME,
-
     engineer_field_id:
       ENGINEER_FIELD_ID,
-
-    engineer_enum_id:
-      ENGINEER_ENUM_ID,
 
     task_type_id:
       MEASUREMENT_TASK_TYPE_ID
@@ -3329,17 +3351,28 @@ app.get(
         });
       }
 
+      const engineerName =
+        String(req.query.engineer || "").trim();
+
+      if (!engineerName) {
+        return res.status(400).json({
+          status: "Ошибка",
+          message:
+            "Укажите параметр ?engineer=Имя Фамилия (имя пользователя amoMessenger/amoCRM)."
+        });
+      }
+
       const now =
         getMoscowDate();
 
       const nowUnix =
         getCurrentMoscowUnix();
 
-      const fromUnix =
-        yesterdayMoscowStartUnix();
+      const { fromUnix, toUnix } =
+        getConfirmMeasurementDateRange(nowUnix);
 
       const result =
-        await findMeasurementTasks(ENGINEER_NAME);
+        await findMeasurementTasks(engineerName);
 
       res.json({
         status: "OK",
@@ -3352,20 +3385,19 @@ app.get(
 
         engineer: {
           name:
-            ENGINEER_NAME,
+            engineerName,
 
           field_id:
-            ENGINEER_FIELD_ID,
-
-          enum_id:
-            ENGINEER_ENUM_ID
+            ENGINEER_FIELD_ID
         },
 
         task_type_id:
           MEASUREMENT_TASK_TYPE_ID,
 
         date_mode:
-          "сегодня + вчера, до текущего момента",
+          nowUnix <= todayMoscowStartUnix() + 18 * 60 * 60
+            ? "вчера (00:00-23:59) + сегодня до текущего момента"
+            : "вчера (00:00-23:59) + сегодня целиком (00:00-23:59)",
 
         date_range: {
           from:
@@ -3378,7 +3410,7 @@ app.get(
           to:
             formatMoscow(
               new Date(
-                nowUnix * 1000
+                toUnix * 1000
               )
             )
         },
@@ -6920,18 +6952,8 @@ await loadAmoMessengerTokensFromRedis();
       );
 
       console.log(
-        "Engineer:",
-        ENGINEER_NAME
-      );
-
-      console.log(
         "Engineer field:",
         ENGINEER_FIELD_ID
-      );
-
-      console.log(
-        "Engineer enum:",
-        ENGINEER_ENUM_ID
       );
 
       console.log(
