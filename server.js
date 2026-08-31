@@ -1505,6 +1505,67 @@ async function ydUploadFromUrl(path, fileUrl) {
   return response.data;
 }
 
+// ============================================================
+// ОЖИДАНИЕ ЗАВЕРШЕНИЯ АСИНХРОННОЙ ЗАГРУЗКИ ФАЙЛА НА ЯНДЕКС.ДИСК
+// ============================================================
+// Загрузка файла по ссылке (ydUploadFromUrl) — асинхронная операция:
+// ответ 202 означает, что Яндекс.Диск только начал копировать файл, а
+// не то, что файл уже на месте. Если сразу после этого попытаться
+// получить публичную ссылку на файл (для отбивки о загрузке), запрос
+// может завершиться ошибкой, потому что файла ещё физически нет по
+// целевому пути. Поэтому дожидаемся статуса "success" у операции.
+async function ydWaitForUploadOperation(
+  operationHref,
+  { maxAttempts = 25, delayMs = 1200 } = {}
+) {
+  if (!operationHref) {
+    return true;
+  }
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const response = await axios.get(operationHref, {
+      headers: yandexDiskHeaders(),
+      timeout: 30000,
+      validateStatus: () => true
+    });
+
+    const status =
+      response.status === 200 && response.data
+        ? response.data.status
+        : null;
+
+    if (status === "success") {
+      return true;
+    }
+
+    if (status === "failed") {
+      return false;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  return false;
+}
+
+// Загружает файл на Яндекс.Диск и дожидается реального завершения
+// копирования — используется везде, где сразу после загрузки нужно
+// получить публичную ссылку на файл (отбивка "Файл(ы) получено...").
+async function ydUploadFromUrlAndWait(path, fileUrl) {
+  const result = await ydUploadFromUrl(path, fileUrl);
+
+  const completed = await ydWaitForUploadOperation(result && result.href);
+
+  if (!completed) {
+    throw new Error(
+      `Яндекс.Диск: загрузка файла в "${path}" не завершилась успехом ` +
+      `за отведённое время.`
+    );
+  }
+
+  return result;
+}
+
 async function ensureLeadYandexFolders(lead) {
   const leadId = lead.id;
 
@@ -4475,7 +4536,7 @@ async function processUserMessage({
             const uploadedPath =
               `${currentPendingPhoto.contract_path}/${fileName}`;
 
-            await ydUploadFromUrl(
+            await ydUploadFromUrlAndWait(
               uploadedPath,
               file.url
             );
@@ -4745,7 +4806,7 @@ async function processUserMessage({
               const uploadedPath =
                 `${currentHub.folders.photoPath}/${fileName}`;
 
-              await ydUploadFromUrl(
+              await ydUploadFromUrlAndWait(
                 uploadedPath,
                 file.url
               );
@@ -5000,7 +5061,7 @@ return;
               const uploadedPath =
                 `${currentPending.measure_sheet_path}/${fileName}`;
 
-              await ydUploadFromUrl(
+              await ydUploadFromUrlAndWait(
                 uploadedPath,
                 file.url
               );
@@ -5227,7 +5288,7 @@ return;
               const uploadedPath =
                 `${currentPending.video_path}/${fileName}`;
 
-              await ydUploadFromUrl(
+              await ydUploadFromUrlAndWait(
                 uploadedPath,
                 file.url
               );
@@ -5561,7 +5622,7 @@ return;
               const uploadedPath =
                 `${currentPending.folder_path}/${fileName}`;
 
-              await ydUploadFromUrl(
+              await ydUploadFromUrlAndWait(
                 uploadedPath,
                 file.url
               );
@@ -6829,6 +6890,12 @@ function extractImageUrlsFromMessage(message) {
   // --------------------------------------------------------
   // ПРЯМОЕ ИЗВЛЕЧЕНИЕ ИЗ attachments
   // --------------------------------------------------------
+  // Для любого типа вложения (photo, video, document и т.д.) ссылка на
+  // сам файл лежит в attachment[attachment.type].link — по аналогии с
+  // photo.link. Берём именно её и НЕ обходим остальные поля вложения,
+  // чтобы не подхватить попутные технические ссылки (например,
+  // превью/миниатюру видео), которые приводили к ложному "файл не
+  // того формата" для настоящих mp4.
 
   if (
     Array.isArray(message.attachments)
@@ -6836,15 +6903,21 @@ function extractImageUrlsFromMessage(message) {
     for (
       const attachment of message.attachments
     ) {
-      if (
+      const container =
         attachment &&
-        attachment.type === "photo" &&
-        attachment.photo &&
-        attachment.photo.link
+        attachment.type &&
+        attachment[attachment.type];
+
+      const link =
+        container && container.link;
+
+      if (
+        typeof link === "string" &&
+        link
       ) {
         const cleanUrl =
           normalizeAmoMessengerFileUrl(
-            attachment.photo.link
+            link
           );
 
         if (cleanUrl) {
@@ -6858,7 +6931,14 @@ function extractImageUrlsFromMessage(message) {
 
   // --------------------------------------------------------
   // ДОПОЛНИТЕЛЬНЫЙ ПОИСК НА СЛУЧАЙ ДРУГОЙ СТРУКТУРЫ WEBHOOK
+  // Запускаем, только если прямое извлечение из attachments ничего не
+  // нашло — иначе сплошной обход всего сообщения подхватывает лишние
+  // ссылки (превью, служебные поля), которых не должно быть в списке.
   // --------------------------------------------------------
+
+  if (urls.length > 0) {
+    return [...new Set(urls)];
+  }
 
   function walk(value) {
     if (!value) {
