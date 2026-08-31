@@ -396,8 +396,12 @@ const userPendingComment = {};
 const userLastSearchMode = {};
 const userSelectedConductMeasurement = {};
 
-// После нажатия "Замер состоялся" бот ждёт, пока в сделке появится новая задача "Рез-т замера(и)" (id типа 2746013). 
+// После нажатия "Замер состоялся" бот ждёт, пока в сделке появится новая задача "Рез-т замера(и)" (id типа 2746013).
 const userPendingResultTask = {};
+
+// После нажатия "Думает (свяжусь сам)" / "Думает/отказ (передать менеджеру)"
+// бот просит комментарий, прежде чем закрыть задачу и добавить примечание.
+const userPendingThinkingComment = {};
 
 // После нажатия "Нужно подготовить КП и/или черновой проект" бот ждёт, пока в сделке появится новая задача "Указать рез-т(и)" (id 2774021).
 const userPendingKpTask = {};
@@ -469,6 +473,10 @@ const userPendingBudgetEdit = {};
 // Ожидание правки e-mail клиента (после шага с бюджетом).
 const userPendingEmailEdit = {};
 
+// После нажатия "Завершить отчет" бот просит указать результат отчета
+// (комментарий), прежде чем завершить задачу "Загруз. отчет(и)".
+const userPendingReportFinishComment = {};
+
 // Сбрасывает весь временный стейт конкретного пользователя
 function resetUserState(userKey) {
   cancelScheduledUploadNotice(userKey);
@@ -478,6 +486,7 @@ function resetUserState(userKey) {
   delete userLastSearchMode[userKey];
   delete userSelectedConductMeasurement[userKey];
   delete userPendingResultTask[userKey];
+  delete userPendingThinkingComment[userKey];
   delete userPendingKpTask[userKey];
   delete userPendingPhotoUpload[userKey];
   delete userPhotoUploadQueue[userKey];
@@ -492,6 +501,7 @@ function resetUserState(userKey) {
   delete userReportUploadFlags[userKey];
   delete userPendingBudgetEdit[userKey];
   delete userPendingEmailEdit[userKey];
+  delete userPendingReportFinishComment[userKey];
   delete userSelectedCorrectionMeasurement[userKey];
   delete userCorrectionList[userKey];
   delete userPendingCorrectionUpload[userKey];
@@ -1387,6 +1397,41 @@ function buildKindMismatchNote(invalidFiles, allowedKinds) {
     `⚠️ Пропущено файлов не того формата: ${invalidFiles.length} ` +
     `(${foundKinds}). На этом шаге принимается только: ${allowedLabel}.`
   );
+}
+
+// ============================================================
+// ССЫЛКИ НА ЗАГРУЖЕННЫЕ ФАЙЛЫ (для отбивки о загрузке)
+// ============================================================
+// Публикует каждый файл на Яндекс.Диске и возвращает текстовый список
+// "имя файла: ссылка" — добавляется в отбивку о загруженных файлах,
+// чтобы было легче проверить, какие файлы точно загрузились, а какие нет.
+async function buildUploadedFilesLinksText(filePaths) {
+  if (!filePaths || filePaths.length === 0) {
+    return "";
+  }
+
+  const lines = [];
+
+  for (const filePath of filePaths) {
+    try {
+      const url = await ydGetFolderPublicUrl(filePath);
+      const fileName = filePath.split("/").pop();
+
+      lines.push(`${fileName}: ${url}`);
+    } catch (error) {
+      console.error(
+        "Не удалось получить ссылку на загруженный файл:",
+        filePath,
+        error.message
+      );
+    }
+  }
+
+  if (lines.length === 0) {
+    return "";
+  }
+
+  return `Ссылки на загруженные файлы:\n${lines.join("\n")}`;
 }
 
 // ============================================================
@@ -2916,12 +2961,13 @@ async function enterReportHub(
       photo_date_text: dateText,
       photo_next_number: nextPhotoNumber,
       notice_uploaded_count: 0,
-      notice_mismatch_note: ""
+      notice_mismatch_note: "",
+      notice_uploaded_paths: []
     };
 
     await send(
   "Загрузите фото замера",
-  [tagButtonWithDeal("Вернуться к списку замеров", contractNumber, leadId)]
+  ["Вернуться к списку замеров"]
 );
   } catch (error) {
     console.error(
@@ -2964,6 +3010,28 @@ async function buildReportNoteText(folders, flags) {
   }
 
   return lines.join("\n");
+}
+
+// ------------------------------------------------------------
+// ЗАПРОС РЕЗУЛЬТАТА ОТЧЕТА (кнопка "Завершить отчет" на шаге замерного
+// листа или на шаге видео) — прежде чем завершить задачу, спрашиваем
+// комментарий и сохраняем его в сделку примечанием.
+// ------------------------------------------------------------
+
+async function startReportFinishComment(
+  send,
+  userKey,
+  leadId,
+  reportTaskId,
+  contractNumber
+) {
+  userPendingReportFinishComment[userKey] = {
+    lead_id: leadId,
+    report_task_id: reportTaskId,
+    contract_number: contractNumber
+  };
+
+  await send("Укажите результат отчета");
 }
 
 // ------------------------------------------------------------
@@ -3894,7 +3962,8 @@ async function startCorrectionUpload(
       allowed_kinds: config.allowedKinds || ["photo", "video", "document"],
       default_extension: config.defaultExtension || "jpg",
       notice_uploaded_count: 0,
-      notice_mismatch_note: ""
+      notice_mismatch_note: "",
+      notice_uploaded_paths: []
     };
 
     await send(config.promptText);
@@ -4166,6 +4235,127 @@ async function processUserMessage({
   }
 
   // ------------------------------------------------------
+  // ОЖИДАЕМ КОММЕНТАРИЙ (после "Думает (свяжусь сам)" /
+  // "Думает/отказ (передать менеджеру)")
+  // ------------------------------------------------------
+
+  const pendingThinkingComment = userPendingThinkingComment[userKey];
+
+  if (pendingThinkingComment) {
+    const comment = trimmedText;
+
+    if (!comment) {
+      await send(
+        "Комментарий не может быть пустым. Укажите комментарий"
+      );
+
+      return;
+    }
+
+    try {
+      await senseiCompleteTask(
+        pendingThinkingComment.lead_id,
+        pendingThinkingComment.result_task_id,
+        pendingThinkingComment.resultLabel
+      );
+    } catch (error) {
+      console.error(
+        "Ошибка завершения задачи (" + pendingThinkingComment.resultLabel + "):",
+        error.message
+      );
+
+      await send(
+        "❌ Не удалось завершить задачу в Sensei. " +
+          "Подробности есть в логах Render. Попробуйте ещё раз " +
+          "или обратитесь к администратору."
+      );
+
+      await finish();
+
+      return;
+    }
+
+    try {
+      await addLeadNote(
+        pendingThinkingComment.lead_id,
+        comment
+      );
+    } catch (noteError) {
+      console.error(
+        "Не удалось добавить комментарий к сделке:",
+        noteError.message
+      );
+    }
+
+    await send(
+      `Текущая задача amoCRM закрыта с результатом "${pendingThinkingComment.resultLabel}".`
+    );
+
+    const thinkingLeadId = pendingThinkingComment.lead_id;
+    const thinkingContractNumber = pendingThinkingComment.contract_number;
+
+    delete userPendingThinkingComment[userKey];
+
+    await offerReportStart(
+      send,
+      userKey,
+      thinkingLeadId,
+      thinkingContractNumber
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // ОЖИДАЕМ РЕЗУЛЬТАТ ОТЧЕТА (после кнопки "Завершить отчет")
+  // ------------------------------------------------------
+
+  const pendingReportFinishComment =
+    userPendingReportFinishComment[userKey];
+
+  if (pendingReportFinishComment) {
+    const comment = trimmedText;
+
+    if (!comment) {
+      await send(
+        "Комментарий не может быть пустым. Укажите результат отчета"
+      );
+
+      return;
+    }
+
+    try {
+      await addLeadNote(
+        pendingReportFinishComment.lead_id,
+        comment
+      );
+    } catch (noteError) {
+      console.error(
+        "Не удалось добавить комментарий к сделке (результат отчета):",
+        noteError.message
+      );
+    }
+
+    const reportFinishLeadId = pendingReportFinishComment.lead_id;
+    const reportFinishTaskId = pendingReportFinishComment.report_task_id;
+    const reportFinishContractNumber =
+      pendingReportFinishComment.contract_number;
+
+    delete userPendingReportFinishComment[userKey];
+
+    await finishReportFlow(
+      send,
+      finish,
+      userKey,
+      reportFinishLeadId,
+      reportFinishTaskId,
+      reportFinishContractNumber
+    );
+
+    return;
+  }
+
+  // ------------------------------------------------------
   // ОЖИДАЕМ ФОТО ДОГОВОРА (после кнопки "Заключен договор")
   // ------------------------------------------------------
 
@@ -4282,8 +4472,11 @@ async function processUserMessage({
               }
             );
 
+            const uploadedPath =
+              `${currentPendingPhoto.contract_path}/${fileName}`;
+
             await ydUploadFromUrl(
-              `${currentPendingPhoto.contract_path}/${fileName}`,
+              uploadedPath,
               file.url
             );
 
@@ -4293,6 +4486,11 @@ async function processUserMessage({
                 currentNumber + 1;
 
             uploaded++;
+
+            currentPendingPhoto.notice_uploaded_paths =
+              currentPendingPhoto.notice_uploaded_paths || [];
+
+            currentPendingPhoto.notice_uploaded_paths.push(uploadedPath);
 
             console.log(
               "Фото успешно отправлено на Яндекс.Диск:",
@@ -4330,9 +4528,11 @@ async function processUserMessage({
 
             const count = latest.notice_uploaded_count || 0;
             const note = latest.notice_mismatch_note || "";
+            const uploadedPaths = latest.notice_uploaded_paths || [];
 
             latest.notice_uploaded_count = 0;
             latest.notice_mismatch_note = "";
+            latest.notice_uploaded_paths = [];
 
             const doneButtonPhoto = tagButtonWithDeal(
               "Готово",
@@ -4346,6 +4546,12 @@ async function processUserMessage({
 
             if (note) {
               text = `${text}\n\n${note}`;
+            }
+
+            const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+            if (linksText) {
+              text = `${text}\n\n${linksText}`;
             }
 
             await send(text, [doneButtonPhoto]);
@@ -4419,7 +4625,7 @@ async function processUserMessage({
 
   if (pendingReportHub) {
     if (
-      parseTaggedButton(trimmedText, "Вернуться к списку замеров") !== null
+      trimmedText === "Вернуться к списку замеров"
     ) {
       delete userPendingReportHub[userKey];
       delete userReportUploadFlags[userKey];
@@ -4454,7 +4660,8 @@ async function processUserMessage({
           next_file_number: nextFileNumber,
           has_uploaded_file: false,
           notice_uploaded_count: 0,
-          notice_mismatch_note: ""
+          notice_mismatch_note: "",
+          notice_uploaded_paths: []
         };
 
         delete userPendingReportHub[userKey];
@@ -4491,11 +4698,7 @@ async function processUserMessage({
         await send(
           buildKindMismatchNote(invalidFiles, ["photo"]) ||
             "⚠️ Загрузите фото замера.",
-          [tagButtonWithDeal(
-            "Вернуться к списку замеров",
-            pendingReportHub.contract_number,
-            pendingReportHub.lead_id
-          )]
+          ["Вернуться к списку замеров"]
         );
 
         return;
@@ -4539,14 +4742,22 @@ async function processUserMessage({
                 number: currentNumber
               });
 
+              const uploadedPath =
+                `${currentHub.folders.photoPath}/${fileName}`;
+
               await ydUploadFromUrl(
-                `${currentHub.folders.photoPath}/${fileName}`,
+                uploadedPath,
                 file.url
               );
 
               currentHub.photo_next_number = currentNumber + 1;
 
               uploaded++;
+
+              currentHub.notice_uploaded_paths =
+                currentHub.notice_uploaded_paths || [];
+
+              currentHub.notice_uploaded_paths.push(uploadedPath);
 
               console.log(
                 "Фото отчета успешно отправлено на Яндекс.Диск:",
@@ -4566,11 +4777,7 @@ async function processUserMessage({
     currentHub.contract_number,
     currentHub.lead_id
   ),
-  tagButtonWithDeal(
-    "Вернуться к списку замеров",
-    currentHub.contract_number,
-    currentHub.lead_id
-  )
+  "Вернуться к списку замеров"
 ];
 
 const mismatchNote = buildKindMismatchNote(invalidFiles, ["photo"]);
@@ -4598,15 +4805,23 @@ if (uploaded > 0) {
 
     const count = latestHub.notice_uploaded_count || 0;
     const note = latestHub.notice_mismatch_note || "";
+    const uploadedPaths = latestHub.notice_uploaded_paths || [];
 
     latestHub.notice_uploaded_count = 0;
     latestHub.notice_mismatch_note = "";
+    latestHub.notice_uploaded_paths = [];
 
     let text =
       `Фото получено (${count}). Когда закончите — нажмите «Перейти к загрузке замерн.листа».`;
 
     if (note) {
       text = `${text}\n\n${note}`;
+    }
+
+    const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+    if (linksText) {
+      text = `${text}\n\n${linksText}`;
     }
 
     await send(text, reportHubButtons);
@@ -4636,11 +4851,7 @@ if (uploaded > 0) {
     // Другой текст на этом экране — напоминаем про доступные кнопки.
     await send(
   "Загрузите фото замера.",
-  [tagButtonWithDeal(
-    "Вернуться к списку замеров",
-    pendingReportHub.contract_number,
-    pendingReportHub.lead_id
-  )]
+  ["Вернуться к списку замеров"]
 );
 
 return;
@@ -4691,7 +4902,8 @@ return;
             next_file_number: nextFileNumber,
             has_uploaded_file: false,
             notice_uploaded_count: 0,
-            notice_mismatch_note: ""
+            notice_mismatch_note: "",
+            notice_uploaded_paths: []
           };
 
           delete userPendingMeasureSheetUpload[userKey];
@@ -4716,9 +4928,8 @@ return;
 
       // isFinishReportButton === true
 
-      await finishReportFlow(
+      await startReportFinishComment(
         send,
-        finish,
         userKey,
         pendingMeasureSheet.lead_id,
         pendingMeasureSheet.report_task_id,
@@ -4786,14 +4997,22 @@ return;
                 number: currentNumber
               });
 
+              const uploadedPath =
+                `${currentPending.measure_sheet_path}/${fileName}`;
+
               await ydUploadFromUrl(
-                `${currentPending.measure_sheet_path}/${fileName}`,
+                uploadedPath,
                 file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
 
               uploaded++;
+
+              currentPending.notice_uploaded_paths =
+                currentPending.notice_uploaded_paths || [];
+
+              currentPending.notice_uploaded_paths.push(uploadedPath);
 
               console.log(
                 "Файл замерного листа успешно отправлен на Яндекс.Диск:",
@@ -4850,15 +5069,23 @@ return;
 
               const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
+              const uploadedPaths = latest.notice_uploaded_paths || [];
 
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
+              latest.notice_uploaded_paths = [];
 
               let text =
                 `Файл(ы) получено (${count}). Когда закончите — выберите действие:`;
 
               if (note) {
                 text = `${text}\n\n${note}`;
+              }
+
+              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+              if (linksText) {
+                text = `${text}\n\n${linksText}`;
               }
 
               await send(text, measureSheetButtons);
@@ -4930,9 +5157,8 @@ return;
         return;
       }
 
-      await finishReportFlow(
+      await startReportFinishComment(
         send,
-        finish,
         userKey,
         pendingVideo.lead_id,
         pendingVideo.report_task_id,
@@ -4998,14 +5224,22 @@ return;
                 number: currentNumber
               });
 
+              const uploadedPath =
+                `${currentPending.video_path}/${fileName}`;
+
               await ydUploadFromUrl(
-                `${currentPending.video_path}/${fileName}`,
+                uploadedPath,
                 file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
 
               uploaded++;
+
+              currentPending.notice_uploaded_paths =
+                currentPending.notice_uploaded_paths || [];
+
+              currentPending.notice_uploaded_paths.push(uploadedPath);
 
               console.log(
                 "Видео успешно отправлено на Яндекс.Диск:",
@@ -5046,9 +5280,11 @@ return;
 
               const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
+              const uploadedPaths = latest.notice_uploaded_paths || [];
 
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
+              latest.notice_uploaded_paths = [];
 
               let text =
                 `Файл(ы) получено (${count}). ` +
@@ -5056,6 +5292,12 @@ return;
 
               if (note) {
                 text = `${text}\n\n${note}`;
+              }
+
+              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+              if (linksText) {
+                text = `${text}\n\n${linksText}`;
               }
 
               await send(text, [tagButtonWithDeal(
@@ -5316,14 +5558,22 @@ return;
                 number: currentNumber
               });
 
+              const uploadedPath =
+                `${currentPending.folder_path}/${fileName}`;
+
               await ydUploadFromUrl(
-                `${currentPending.folder_path}/${fileName}`,
+                uploadedPath,
                 file.url
               );
 
               currentPending.next_file_number = currentNumber + 1;
 
               uploaded++;
+
+              currentPending.notice_uploaded_paths =
+                currentPending.notice_uploaded_paths || [];
+
+              currentPending.notice_uploaded_paths.push(uploadedPath);
             } catch (error) {
               console.error(
                 "Ошибка загрузки файла (Внести правки):",
@@ -5359,15 +5609,23 @@ return;
 
               const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
+              const uploadedPaths = latest.notice_uploaded_paths || [];
 
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
+              latest.notice_uploaded_paths = [];
 
               let text =
                 `Файл(ы) получено (${count}). Когда закончите — нажмите «Завершить загрузку».`;
 
               if (note) {
                 text = `${text}\n\n${note}`;
+              }
+
+              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+              if (linksText) {
+                text = `${text}\n\n${linksText}`;
               }
 
               await send(text, [tagButtonWithDeal(
@@ -6159,7 +6417,9 @@ userPendingPhotoUpload[userKey] = {
     false,
 
   notice_uploaded_count:
-    0
+    0,
+
+  notice_uploaded_paths: []
 };
 
 delete userPendingResultTask[
@@ -6201,41 +6461,16 @@ return;
       return;
     }
 
-    try {
-      await senseiCompleteTask(
-        stored.lead_id,
-        stored.result_task_id,
-        matchedThinkingLabel
-      );
-    } catch (error) {
-      console.error(
-        "Ошибка завершения задачи (" + matchedThinkingLabel + "):",
-        error.message
-      );
-
-      await send(
-        "❌ Не удалось завершить задачу в Sensei. " +
-          "Подробности есть в логах Render. Попробуйте ещё раз " +
-          "или обратитесь к администратору."
-      );
-
-      await finish();
-
-      return;
-    }
+    userPendingThinkingComment[userKey] = {
+      lead_id: stored.lead_id,
+      result_task_id: stored.result_task_id,
+      contract_number: stored.contract_number,
+      resultLabel: matchedThinkingLabel
+    };
 
     delete userPendingResultTask[userKey];
 
-    await send(
-      `Текущая задача amoCRM закрыта с результатом "${matchedThinkingLabel}".`
-    );
-
-    await offerReportStart(
-      send,
-      userKey,
-      stored.lead_id,
-      stored.contract_number
-    );
+    await send("Укажите комментарий");
 
     return;
   }
