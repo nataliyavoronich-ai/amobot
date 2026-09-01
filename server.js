@@ -77,6 +77,7 @@ const ADDRESS_FIELD_ID = 175412; // Адрес объекта (текстова�
 const PRODUCT_FIELD_ID = 172572; // Продукт (список)
 const DISCOUNT_FIELD_ID = 552706; // Скидка ОП (число)
 const BOT_NOT_ACCEPTED_FIELD_ID = 555162; // [Бот] Не принято
+const ENGINEER_COMMENT_FIELD_ID = 555098; // Комментарий инженера (текстовая область)
 // Поле "Email рабочий" в сущности Контакт — используется в сценарии
 // "Загрузить фотоотчет" при редактировании e-mail клиента.
 const CONTACT_EMAIL_FIELD_ID = 141995;
@@ -4394,6 +4395,18 @@ async function processUserMessage({
       console.error(
         "Не удалось добавить комментарий к сделке (результат отчета):",
         noteError.message
+      );
+    }
+
+    try {
+      await updateLeadCustomFields(
+        pendingReportFinishComment.lead_id,
+        { [ENGINEER_COMMENT_FIELD_ID]: comment }
+      );
+    } catch (fieldError) {
+      console.error(
+        "Не удалось записать комментарий в поле \"Комментарий инженера\":",
+        fieldError.message
       );
     }
 
