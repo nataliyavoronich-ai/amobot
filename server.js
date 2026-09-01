@@ -731,8 +731,38 @@ async function amoCrmRequest(
   // Примечание: для GET axiosMethod принимает (url, config), а для POST/PATCH — (url, body, config). Вызывающие обёртки ниже передают сюда axios.get / axios.post / axios.patch напрямую,
   // поэтому сигнатура совпадает автоматически в зависимости от наличия body.
 
+  // Повторяем запрос при сетевом сбое (например "socket hang up", обрыв
+  // соединения) — validateStatus всегда возвращает true, поэтому axios
+  // бросает исключение только при сетевой проблеме, а не из-за HTTP-кода
+  // ошибки. Без повтора такая временная проблема роняла весь сценарий
+  // (например выбор замера по кнопке) с сообщением "Неизвестная команда".
+  const doRequestWithRetry = async (maxAttempts = 3) => {
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await doRequest();
+      } catch (error) {
+        lastError = error;
+
+        if (error.response || attempt >= maxAttempts) {
+          throw error;
+        }
+
+        console.log(
+          `amoCRM ${errorLabel}: сетевая ошибка (${error.message}), ` +
+          `попытка ${attempt} из ${maxAttempts}. Повторяю...`
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, attempt * 700));
+      }
+    }
+
+    throw lastError;
+  };
+
   try {
-    const response = await doRequest();
+    const response = await doRequestWithRetry();
 
     if (response.status === 401) {
       console.log(
@@ -742,7 +772,7 @@ async function amoCrmRequest(
       try {
         await refreshAmoCrmToken();
 
-        return await doRequest();
+        return await doRequestWithRetry();
       } catch (refreshError) {
         return response;
       }
@@ -6812,6 +6842,13 @@ return;
           "Ошибка при выборе замера (Провести замер):",
           error.message
         );
+
+        await send(
+          "❌ Произошла ошибка при обращении к amoCRM. Попробуйте нажать " +
+            "на кнопку ещё раз через несколько секунд."
+        );
+
+        return;
       }
     } else if (mode === "report") {
       try {
@@ -6846,6 +6883,13 @@ return;
           "Ошибка при выборе замера (Загрузить фотоотчет):",
           error.message
         );
+
+        await send(
+          "❌ Произошла ошибка при обращении к amoCRM. Попробуйте нажать " +
+            "на кнопку ещё раз через несколько секунд."
+        );
+
+        return;
       }
     } else {
       try {
@@ -6888,6 +6932,13 @@ return;
           "Ошибка при выборе замера:",
           error.message
         );
+
+        await send(
+          "❌ Произошла ошибка при обращении к amoCRM. Попробуйте нажать " +
+            "на кнопку ещё раз через несколько секунд."
+        );
+
+        return;
       }
     }
   }
