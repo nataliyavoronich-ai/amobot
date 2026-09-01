@@ -2612,13 +2612,13 @@ function formatConductMeasurementLine(item, index) {
   return (
     `${index + 1}. ` +
     `Дата замера: ${item.measure_date || "—"}; ` +
-    `Адрес замера: ${item.address || "—"}; ` +
+    `Адрес замера: ${mono(item.address)}; ` +
     `Ответственный менеджер: ${item.manager_name || "—"}; ` +
     `Бюджет: ${item.budget || "—"}; ` +
     `Скидка ОП: ${item.discount || "—"}; ` +
     `Продукт: ${item.product || "—"}; ` +
     `Имя клиента: ${item.contact_name || "—"}; ` +
-    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}; ` +
+    `№ телефона (-ов) клиента: ${mono(item.contact_phones)}; ` +
     `№ договора: ${item.contract_number || "—"}; ` +
     `Ссылка на сделку: ${item.lead_link}\n\n`
   );
@@ -2627,13 +2627,13 @@ function formatConductMeasurementLine(item, index) {
 function formatConductMeasurementDetail(item) {
   return (
     `Дата замера: ${item.measure_date || "—"}\n` +
-    `Адрес замера: ${item.address || "—"}\n` +
+    `Адрес замера: ${mono(item.address)}\n` +
     `Ответственный менеджер: ${item.manager_name || "—"}\n` +
     `Бюджет: ${item.budget || "—"}\n` +
     `Скидка ОП: ${item.discount || "—"}\n` +
     `Продукт: ${item.product || "—"}\n` +
     `Имя клиента: ${item.contact_name || "—"}\n` +
-    `№ телефона (-ов) клиента: ${item.contact_phones || "—"}\n` +
+    `№ телефона (-ов) клиента: ${mono(item.contact_phones)}\n` +
     `№ договора: ${item.contract_number || "—"}\n` +
     `Ссылка на сделку: ${item.lead_link}`
   );
@@ -2796,6 +2796,14 @@ function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Оборачивает значение в моноширный шрифт (обратные кавычки) для
+// сообщений бота — используется для адреса замера и телефона(-ов)
+// клиента, чтобы их было легче скопировать. Плейсхолдер "—" (нет
+// значения) в кавычки не оборачивается.
+function mono(value) {
+  return value ? `\`${value}\`` : "—";
+}
+
 function buildTaggedButton(label, identifier) {
   return `${label} (${identifier})`;
 }
@@ -2815,10 +2823,10 @@ function formatMeasurementDetail(item) {
   return (
     `Дата замера: ${item.measure_date || "—"}\n` +
     `Время замера: ${item.measure_time || "—"}\n` +
-    `Адрес замера: ${item.address || "—"}\n` +
+    `Адрес замера: ${mono(item.address)}\n` +
     `Продукт: ${item.product || "—"}\n` +
     `Имя контакта: ${item.contact_name || "—"}\n` +
-    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}\n` +
+    `№ телефона (-ов) контакта: ${mono(item.contact_phones)}\n` +
     `№ договора: ${item.contract_number || "—"}\n` +
     `Ссылка на сделку: ${item.lead_link}`
   );
@@ -3939,12 +3947,12 @@ function formatCorrectionLine(
   return (
     `${index + 1}. ` +
     `Дата замера: ${item.measure_date || "—"}; ` +
-    `Адрес замера: ${item.address || "—"}; ` +
+    `Адрес замера: ${mono(item.address)}; ` +
     `Ответственный менеджер: ${item.manager_name || "—"}; ` +
     `Бюджет: ${item.budget || "—"}; ` +
     `Продукт: ${item.product || "—"}; ` +
     `Имя клиента: ${item.contact_name || "—"}; ` +
-    `№ телефона клиента: ${item.contact_phones || "—"}; ` +
+    `№ телефона клиента: ${mono(item.contact_phones)}; ` +
     `№ договора: ${item.contract_number || "—"}; ` +
     `[Бот] Не принято: ${item.bot_not_accepted || "—"}; ` +
     `Ссылка на сделку: ${item.lead_link}\n\n`
@@ -3954,12 +3962,12 @@ function formatCorrectionLine(
 function formatCorrectionDetail(item) {
   return (
     `Дата замера: ${item.measure_date || "—"}\n` +
-    `Адрес замера: ${item.address || "—"}\n` +
+    `Адрес замера: ${mono(item.address)}\n` +
     `Ответственный менеджер: ${item.manager_name || "—"}\n` +
     `Бюджет: ${item.budget || "—"}\n` +
     `Продукт: ${item.product || "—"}\n` +
     `Имя клиента: ${item.contact_name || "—"}\n` +
-    `№ телефона клиента: ${item.contact_phones || "—"}\n` +
+    `№ телефона клиента: ${mono(item.contact_phones)}\n` +
     `№ договора: ${item.contract_number || "—"}\n` +
     `[Бот] Не принято: ${item.bot_not_accepted || "—"}`
   );
@@ -4133,10 +4141,10 @@ function formatMeasurementLine(item, index) {
     `№ договора: ${item.contract_number || "—"}; ` +
     `Дата замера: ${item.measure_date || "—"}; ` +
     `Время замера: ${item.measure_time || "—"}; ` +
-    `Адрес замера: ${item.address || "—"}; ` +
+    `Адрес замера: ${mono(item.address)}; ` +
     `Продукт: ${item.product || "—"}; ` +
     `Имя контакта: ${item.contact_name || "—"}; ` +
-    `№ телефона (-ов) контакта: ${item.contact_phones || "—"}; ` +
+    `№ телефона (-ов) контакта: ${mono(item.contact_phones)}; ` +
     `Ссылка на сделку: ${item.lead_link}\n\n`
   );
 }
