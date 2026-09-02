@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const designerBot = require("./designerBot");
 
 const UPSTASH_REDIS_REST_URL =
   process.env.UPSTASH_REDIS_REST_URL || "";
@@ -2796,12 +2797,14 @@ function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// Оборачивает значение в моноширный шрифт (обратные кавычки) для
-// сообщений бота — используется для адреса замера и телефона(-ов)
-// клиента, чтобы их было легче скопировать. Плейсхолдер "—" (нет
-// значения) в кавычки не оборачивается.
+// amoMessenger не поддерживает Markdown-разметку в тексте сообщения —
+// обратные кавычки отображаются как есть, буквальными символами.
+// Моноширный шрифт там задаётся через отдельный массив "entities"
+// ({start, end, format}) в теле сообщения, а не через сам текст.
+// Пока не подтверждено точное значение format для моноширного
+// шрифта, функция ничего не оборачивает — оставлено на будущее.
 function mono(value) {
-  return value ? `\`${value}\`` : "—";
+  return value || "—";
 }
 
 function buildTaggedButton(label, identifier) {
@@ -7297,6 +7300,54 @@ return;
 );
 
 // ============================================================
+// БОТ ПРОЕКТИРОВЩИКОВ (amoMessenger, отдельное приложение/бот)
+// ============================================================
+// Отдельный бот со своими OAuth-токенами, отдельным bot_id и отдельным
+// состоянием пользователей реализован в designerBot.js. Ниже только
+// передаётся ссылка на app и уже проверенные функции работы с amoCRM /
+// Sensei / Яндекс.Диском / amoMessenger — логика бота инженеров выше
+// этим не затрагивается и не меняется. Регистрируется ДО catch-all
+// 404-обработчика (см. ниже), иначе Express не дойдёт до новых маршрутов.
+
+const designerBotContext = {
+  AMOCRM_SUBDOMAIN,
+  getLead,
+  getContact,
+  getMainContactId,
+  getContactPhones,
+  getFieldValues,
+  getFieldValueJoined,
+  formatDateFieldValue,
+  getUserName,
+  updateLeadCustomFields,
+  addLeadNote,
+  senseiCompleteTask,
+  loadAllTasksPaginated,
+  ydEnsureFolderPath,
+  ydEnsureFolder,
+  ydUploadFromUrlAndWait,
+  ydGetFolderPublicUrl,
+  yandexDiskHeaders,
+  getUrlExtension,
+  escapeRegExp,
+  mono,
+  isStartCommand,
+  buildTaggedButton,
+  parseTaggedButton,
+  extractAmoMessengerUserName,
+  extractImageUrlsFromMessage,
+  redisRequest,
+  getMoscowDate,
+  todayMoscowDateText,
+  getCurrentMoscowUnix,
+  todayMoscowStartUnix,
+  todayMoscowEndUnix,
+  YANDEX_DISK_ROOT_FOLDER
+};
+
+designerBot.init(app, designerBotContext);
+
+// ============================================================
 // GET /
 // ============================================================
 
@@ -7343,6 +7394,8 @@ async function startServer() {
 
   await loadAmoCrmTokensFromRedis();
 await loadAmoMessengerTokensFromRedis();
+  await designerBot.loadTokens(designerBotContext);
+  designerBot.startSchedulers(designerBotContext);
   app.listen(
     PORT,
     () => {
