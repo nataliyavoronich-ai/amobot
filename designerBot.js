@@ -35,6 +35,13 @@ const AMOMESSENGER_PROJECT_REDIRECT_URI =
   process.env.AMOMESSENGER_PROJECT_REDIRECT_URI ||
   "https://amobot-cpck.onrender.com/oauth/amomessenger/project/callback";
 
+// id.amo.tm требует параметр scope в ссылке авторизации. Точный набор
+// разрешённых значений зависит от того, какие права выданы конкретному
+// приложению в личном кабинете developers.amo.tm — поэтому значение
+// берётся из переменной окружения, а не зашивается в код. Несколько
+// scope через пробел, как и предполагает OAuth2 (RFC 6749).
+const AMOMESSENGER_PROJECT_SCOPE = process.env.AMOMESSENGER_PROJECT_SCOPE || "";
+
 // Условный идентификатор бота — используется только в логах/отладке.
 // Физическое разделение от бота инженеров обеспечивается отдельным
 // webhook-маршрутом (/webhook/project) и отдельными объектами состояния
@@ -1787,10 +1794,24 @@ function init(app, ctx) {
       return res.status(500).send("AMOMESSENGER_PROJECT_CLIENT_ID не задан");
     }
 
+    // Значение scope можно переопределить прямо в ссылке (?scope=...) —
+    // удобно для подбора правильного значения без передеплоя. По
+    // умолчанию берётся AMOMESSENGER_PROJECT_SCOPE из переменных окружения.
+    const scope = String(req.query.scope || AMOMESSENGER_PROJECT_SCOPE || "").trim();
+
+    if (!scope) {
+      return res.status(500).send(
+        "Не задан scope. Укажите AMOMESSENGER_PROJECT_SCOPE в переменных окружения " +
+          "(значение — из настроек приложения в кабинете developers.amo.tm) либо " +
+          "откройте /oauth/amomessenger/project?scope=... с нужным значением вручную."
+      );
+    }
+
     const url =
       "https://id.amo.tm/oauth2/authorize?" +
       `client_id=${encodeURIComponent(AMOMESSENGER_PROJECT_CLIENT_ID)}` +
       `&redirect_uri=${encodeURIComponent(AMOMESSENGER_PROJECT_REDIRECT_URI)}` +
+      `&scope=${encodeURIComponent(scope)}` +
       "&response_type=code";
 
     console.log("[Бот проектировщиков] amoMessenger OAuth URL:", url);
