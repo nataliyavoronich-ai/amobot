@@ -631,6 +631,13 @@ async function loadAllDesignerTasksWithLeads(ctx) {
 function formatDesignerListLine(item, index) {
   const parts = [];
 
+  // Список может смешивать несколько типов задач (кнопка "Все задачи",
+  // ежедневная рассылка) — без явного указания типа непонятно, что именно
+  // нужно подготовить/поправить.
+  const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
+
+  if (typeConfig) parts.push(`Тип задачи: ${typeConfig.label}`);
+
   if (item.engineer) parts.push(`Инженер: ${item.engineer}`);
   if (item.contract_number) parts.push(`№ Дог/Зам. листа: ${item.contract_number}`);
   if (item.product) parts.push(`Продукт: ${item.product}`);
@@ -968,6 +975,17 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
   const targetPath = upload.folders[fileConfig.folderKey];
 
+  console.log(
+    "[Бот проектировщиков] Загрузка файлов:",
+    JSON.stringify({
+      task_id: task.task_id,
+      lead_id: task.lead_id,
+      key: upload.key,
+      filesCount: validFiles.length,
+      targetPath
+    })
+  );
+
   try {
     await ensureDesignerTargetFolder(ctx, upload.folders.reportsPath, targetPath);
   } catch (error) {
@@ -999,6 +1017,8 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
       uploaded++;
       lastPath = uploadedPath;
+
+      console.log("[Бот проектировщиков] Файл сохранён на Яндекс.Диске:", uploadedPath);
     } catch (error) {
       console.error(
         "[Бот проектировщиков] Ошибка загрузки файла на Яндекс.Диск:",
@@ -1063,6 +1083,11 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
 async function finalizeDesignerTask(ctx, state, userKey, uploadedKeysOrder, resultCaption, send) {
   const task = state.task;
+
+  console.log(
+    "[Бот проектировщиков] Завершение задачи в Sensei:",
+    JSON.stringify({ task_id: task.task_id, lead_id: task.lead_id, resultCaption })
+  );
 
   try {
     await ctx.senseiCompleteTask(task.lead_id, task.task_id, resultCaption);
@@ -1201,7 +1226,11 @@ async function finishMenuUpload(ctx, state, userKey, send) {
 async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send) {
   const task = state.task;
   const config = TASK_TYPE_CONFIG[task.task_type_id];
-  const expectedTag = tagId(task);
+  // Важно: тег считаем от task.item (там есть contract_number), а не от
+  // самого task — у обёртки state.task своего contract_number нет, только
+  // task_id, из-за чего сверка с кнопками (тоже помеченными от item) не
+  // совпадала и любое нажатие ошибочно считалось "устаревшей кнопкой".
+  const expectedTag = tagId(task.item);
 
   const anyTag = parseAnyDesignerTag(trimmedText);
 
@@ -1274,6 +1303,11 @@ async function handlePendingComment(ctx, state, userKey, trimmedText, send) {
     console.error("[Бот проектировщиков] Не удалось добавить примечание с комментарием:", error.message);
   }
 
+  console.log(
+    "[Бот проектировщиков] Завершение задачи в Sensei (спецрезультат):",
+    JSON.stringify({ task_id: task.task_id, lead_id: task.lead_id, resultCaption: pending.resultCaption })
+  );
+
   try {
     await ctx.senseiCompleteTask(task.lead_id, task.task_id, pending.resultCaption);
   } catch (error) {
@@ -1340,6 +1374,11 @@ async function handleUploadStep(ctx, state, userKey, trimmedText, imageUrls, sen
 // ============================================================
 
 async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
+  console.log(
+    "[Бот проектировщиков] Поиск задач:",
+    JSON.stringify({ designerName: state.designerName, taskTypeId: taskTypeId || "все типы" })
+  );
+
   await send("⏳ Проверяю задачи...");
 
   try {
@@ -1352,6 +1391,8 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
         items = items.concat(await findDesignerTasksOfType(ctx, id, state.designerName));
       }
     }
+
+    console.log(`[Бот проектировщиков] Найдено задач: ${items.length}`);
 
     state.step = "TASK_LIST";
     state.listTaskType = taskTypeId;
@@ -1405,6 +1446,16 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
 }
 
 async function selectDesignerTask(ctx, state, userKey, item, send) {
+  console.log(
+    "[Бот проектировщиков] Выбрана задача:",
+    JSON.stringify({
+      task_id: item.task_id,
+      lead_id: item.lead_id,
+      task_type_id: item.task_type_id,
+      contract_number: item.contract_number
+    })
+  );
+
   state.task = {
     task_id: item.task_id,
     lead_id: item.lead_id,
@@ -1538,11 +1589,14 @@ async function processDesignerMessage(ctx, { text, userKey, userName, directId, 
 // ============================================================
 
 async function runDailyDigest(ctx) {
+  console.log("[Бот проектировщиков] Запуск ежедневной рассылки (08:55 МСК).");
+
   if (!registryLoaded) {
     await loadRegistry(ctx);
   }
 
   if (!projectAccessToken) {
+    console.log("[Бот проектировщиков] Рассылка пропущена: нет access_token amoMessenger.");
     return;
   }
 
@@ -1554,6 +1608,11 @@ async function runDailyDigest(ctx) {
     console.error("[Бот проектировщиков] Ошибка подготовки ежедневной рассылки:", error.message);
     return;
   }
+
+  console.log(
+    `[Бот проектировщиков] Рассылка: загружено задач ${entries.length}, ` +
+      `зарегистрировано проектировщиков ${Object.keys(registry).length}.`
+  );
 
   const nowUnix = ctx.getCurrentMoscowUnix();
   const todayStart = ctx.todayMoscowStartUnix();
@@ -1614,6 +1673,11 @@ async function runDailyDigest(ctx) {
 
     try {
       await sendProjectDirectMessage(ctx, registrant.directId, message.trim());
+
+      console.log(
+        `[Бот проектировщиков] Рассылка отправлена: ${registrant.name} ` +
+          `(просроченных: ${overdue.length}, на сегодня: ${today.length}).`
+      );
     } catch (error) {
       console.error(
         "[Бот проектировщиков] Ошибка отправки ежедневной рассылки:",
@@ -1622,6 +1686,8 @@ async function runDailyDigest(ctx) {
       );
     }
   }
+
+  console.log("[Бот проектировщиков] Ежедневная рассылка завершена.");
 }
 
 // ============================================================
@@ -1701,6 +1767,7 @@ async function pollNewTasks(ctx) {
   }
 
   if (!projectAccessToken) {
+    console.log("[Бот проектировщиков] Опрос новых задач пропущен: нет access_token amoMessenger.");
     return;
   }
 
@@ -1712,6 +1779,8 @@ async function pollNewTasks(ctx) {
     console.error("[Бот проектировщиков] Ошибка опроса новых задач:", error.message);
     return;
   }
+
+  console.log(`[Бот проектировщиков] Опрос новых задач: открытых задач ${entries.length}, уже отправлено ${seenTaskIds.size}.`);
 
   const toNotify = {};
   let changed = false;
@@ -1749,6 +1818,10 @@ async function pollNewTasks(ctx) {
 
     try {
       await sendProjectDirectMessage(ctx, directId, formatNewTaskNotification(name, items));
+
+      console.log(
+        `[Бот проектировщиков] Уведомление о новой задаче отправлено: ${name} (задач: ${items.length}).`
+      );
     } catch (error) {
       console.error(
         "[Бот проектировщиков] Ошибка отправки уведомления о новой задаче:",
@@ -1918,6 +1991,8 @@ function init(app, ctx) {
 
     res.status(200).json({ status: "OK" });
 
+    console.log("[Бот проектировщиков] Webhook получен, event_type:", body.event_type);
+
     try {
       if (body.event_type !== "income_message") {
         return;
@@ -1947,6 +2022,16 @@ function init(app, ctx) {
 
       const normalizedUserKey = String(userKey);
       const imageUrls = ctx.extractImageUrlsFromMessage(message);
+
+      console.log(
+        "[Бот проектировщиков] Входящее сообщение:",
+        JSON.stringify({
+          userKey: normalizedUserKey,
+          userName,
+          text,
+          filesCount: imageUrls.length
+        })
+      );
 
       await processDesignerMessage(ctx, {
         text,
