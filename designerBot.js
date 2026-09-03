@@ -63,7 +63,8 @@ const CONTRACT_NUMBER_FIELD_ID = 412776; // "№ Дог/Зам. листа"
 const PRODUCT_FIELD_ID = 172572; // "Продукт"
 const ADDRESS_FIELD_ID = 175412; // "Адрес объекта"
 const ENGINEER_COMMENT_FIELD_ID = 555098; // "Комментарий инженера"
-const OKK_COMMENT_FIELD_ID = 555424; // "Комментарий ОКК"
+const ZRPO_COMMENT_FIELD_ID = 555424; // "Комментарий ЗРПО"
+const REPORTS_LINK_FIELD_ID = 555436; // "Отчеты и проекты" (ссылка на общую папку)
 const DESIGNER_COMMENT_FIELD_ID = 554526; // "Комментарий проектировщика"
 const CONTACT_EMAIL_FIELD_ID = 141995; // "Email рабочий" (контакт)
 
@@ -196,7 +197,7 @@ const TASK_TYPE_CONFIG = {
   [CLIENT_CORRECTION_TASK_TYPE_ID]: {
     label: "Внести правки в проект клиента",
     listMode: "menu",
-    extended: true,
+    extended: false,
     completeResult: "Правки внесены",
     menuKeys: ["productionDwg", "productionPdf"],
     specialResults: ["Не хватает информации", "Нереализуемо"],
@@ -555,9 +556,10 @@ async function buildDesignerTaskItem(ctx, task, lead) {
     budget: lead.price !== undefined && lead.price !== null ? String(lead.price) : "",
     address: ctx.getFieldValueJoined(lead, ADDRESS_FIELD_ID),
     engineer_comment: ctx.getFieldValueJoined(lead, ENGINEER_COMMENT_FIELD_ID),
-    okk_comment: ctx.getFieldValueJoined(lead, OKK_COMMENT_FIELD_ID),
+    zrpo_comment: ctx.getFieldValueJoined(lead, ZRPO_COMMENT_FIELD_ID),
     approval_status: ctx.getFieldValueJoined(lead, PROJECT_APPROVAL_STATUS_FIELD_ID),
     approval_date: ctx.formatDateFieldValue(lead, PROJECT_APPROVAL_DATE_FIELD_ID),
+    reports_link: ctx.getFieldValueJoined(lead, REPORTS_LINK_FIELD_ID),
     payments
   };
 }
@@ -573,7 +575,8 @@ function buildLightDesignerItem(ctx, task, lead) {
     contract_number: ctx.getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID),
     product: ctx.getFieldValueJoined(lead, PRODUCT_FIELD_ID),
     budget: lead.price !== undefined && lead.price !== null ? String(lead.price) : "",
-    address: ctx.getFieldValueJoined(lead, ADDRESS_FIELD_ID)
+    address: ctx.getFieldValueJoined(lead, ADDRESS_FIELD_ID),
+    reports_link: ctx.getFieldValueJoined(lead, REPORTS_LINK_FIELD_ID)
   };
 }
 
@@ -633,6 +636,7 @@ function formatDesignerListLine(item, index) {
   if (item.product) parts.push(`Продукт: ${item.product}`);
   if (item.budget) parts.push(`Бюджет сделки: ${item.budget}`);
   if (item.address) parts.push(`Адрес объекта: ${item.address}`);
+  if (item.reports_link) parts.push(`Отчеты и проекты: ${item.reports_link}`);
 
   parts.push(`Ссылка на сделку: ${item.lead_link}`);
 
@@ -653,7 +657,7 @@ function formatDesignerDetailCard(ctx, item, extended) {
     `Бюджет сделки: ${ctx.mono(item.budget)}`,
     `Адрес объекта: ${ctx.mono(item.address)}`,
     `Комментарий инженера: ${ctx.mono(item.engineer_comment)}`,
-    `Комментарий ОКК: ${ctx.mono(item.okk_comment)}`
+    `Комментарий ЗРПО: ${ctx.mono(item.zrpo_comment)}`
   ];
 
   if (extended) {
@@ -669,6 +673,7 @@ function formatDesignerDetailCard(ctx, item, extended) {
     }
   }
 
+  lines.push(`Отчеты и проекты: ${ctx.mono(item.reports_link)}`);
   lines.push(`Ссылка на сделку: ${item.lead_link}`);
 
   return lines.join("\n");
@@ -679,14 +684,22 @@ function formatDesignerDetailCard(ctx, item, extended) {
 // ============================================================
 
 function tagId(item) {
-  return `задача ${item.task_id}`;
+  // Предпочитаем номер договора (ТЗ п.19): он понятнее пользователю в
+  // кнопке, чем технический task_id. Если номера договора нет — резервный
+  // вариант с task_id, чтобы идентификатор всё равно оставался уникальным.
+  return item.contract_number ? `№${item.contract_number}` : `задача ${item.task_id}`;
 }
 
 function parseAnyDesignerTag(text) {
-  const match = String(text || "").match(/\((задача \d+)\)\s*$/);
+  // Общий разбор "любого хвоста в скобках" — не завязан на конкретный
+  // формат (номер договора или "задача N"), чтобы не ломаться при смене
+  // формата идентификатора в tagId().
+  const match = String(text || "").match(/\(([^()]+)\)\s*$/);
 
   return match ? match[1] : null;
 }
+
+const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проекта";
 
 function buildTaskSelectedButtons(ctx, config, item) {
   const buttons = [];
@@ -698,12 +711,15 @@ function buildTaskSelectedButtons(ctx, config, item) {
     for (const key of config.menuKeys) {
       buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
     }
-
-    buttons.push(tag("Завершить загрузку проекта"));
   }
 
   for (const label of config.specialResults) {
     buttons.push(tag(label));
+  }
+
+  // "Завершить загрузку проекта" — всегда последней кнопкой в списке.
+  if (config.listMode !== "sequential") {
+    buttons.push(tag(FINISH_UPLOAD_LABEL));
   }
 
   return buttons;
@@ -729,16 +745,21 @@ function sanitizeYandexSegment(value) {
 
 function buildDesignerFolderPaths(ctx, leadId) {
   const leadFolderPath = `${ctx.YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
+  // "Проект для согласования"/"Проект в производство" — подпапки внутри
+  // "Отчеты и проекты", по аналогии с папками "Видео"/"Договор" у бота
+  // инженеров, а не напрямую в папке сделки.
+  const reportsPath = `${leadFolderPath}/Отчеты и проекты`;
 
   return {
     leadFolderPath,
-    approvalPath: `${leadFolderPath}/Проект для согласования`,
-    productionPath: `${leadFolderPath}/Проект в производство`
+    reportsPath,
+    approvalPath: `${reportsPath}/Проект для согласования`,
+    productionPath: `${reportsPath}/Проект в производство`
   };
 }
 
-async function ensureDesignerTargetFolder(ctx, leadFolderPath, targetPath) {
-  await ctx.ydEnsureFolderPath(leadFolderPath);
+async function ensureDesignerTargetFolder(ctx, basePath, targetPath) {
+  await ctx.ydEnsureFolderPath(basePath);
   await ctx.ydEnsureFolder(targetPath);
 }
 
@@ -948,7 +969,7 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
   const targetPath = upload.folders[fileConfig.folderKey];
 
   try {
-    await ensureDesignerTargetFolder(ctx, upload.folders.leadFolderPath, targetPath);
+    await ensureDesignerTargetFolder(ctx, upload.folders.reportsPath, targetPath);
   } catch (error) {
     console.error("[Бот проектировщиков] Ошибка подготовки папки на Яндекс.Диске:", error.message);
     await send("❌ Не удалось подготовить папку на Яндекс.Диске. Подробности есть в логах Render.");
@@ -1219,7 +1240,7 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
       }
     }
 
-    if (ctx.parseTaggedButton(trimmedText, "Завершить загрузку проекта") === expectedTag) {
+    if (ctx.parseTaggedButton(trimmedText, FINISH_UPLOAD_LABEL) === expectedTag) {
       await finishMenuUpload(ctx, state, userKey, send);
       return true;
     }
