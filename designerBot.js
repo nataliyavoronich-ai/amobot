@@ -653,6 +653,9 @@ function formatDesignerListLine(item, index) {
 // Полная карточка задачи (ТЗ п.8-13) — все поля показываются всегда,
 // "—" вместо пустых, как и в карточках бота инженеров.
 function formatDesignerDetailCard(ctx, item, extended) {
+  const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
+  const header = typeConfig ? `Вам необходимо "${typeConfig.label}":\n\n` : "";
+
   const lines = [
     `Инженер: ${ctx.mono(item.engineer)}`,
     `Ответственный за сделку: ${ctx.mono(item.responsible_name)}`,
@@ -683,7 +686,7 @@ function formatDesignerDetailCard(ctx, item, extended) {
   lines.push(`Отчеты и проекты: ${ctx.mono(item.reports_link)}`);
   lines.push(`Ссылка на сделку: ${item.lead_link}`);
 
-  return lines.join("\n");
+  return header + lines.join("\n");
 }
 
 // ============================================================
