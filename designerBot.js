@@ -361,7 +361,7 @@ async function getProjectAmoMessengerUserName(ctx, userId) {
   }
 }
 
-async function sendProjectDirectMessage(ctx, directId, text, buttons) {
+async function sendProjectDirectMessage(ctx, directId, text, buttons, options) {
   if (!projectAccessToken) {
     throw new Error("Токен amoMessenger бота проектировщиков не найден");
   }
@@ -369,6 +369,15 @@ async function sendProjectDirectMessage(ctx, directId, text, buttons) {
   const url = `https://api.amo.tm/v1.3/direct/${directId}/sendMessage`;
 
   const body = { text };
+
+  // По умолчанию formatting_mode = "plain" — текст (в т.ч. с * _ ~ | и
+  // обратными кавычками из пользовательских комментариев) отправляется как
+  // есть, без интерпретации разметки. Включаем "md" только там, где реально
+  // нужна разметка (см. вызовы с options.markdown), чтобы не ловить
+  // случайную интерпретацию спецсимволов в чужом тексте (комментарии и т.п.).
+  if (options && options.markdown) {
+    body.formatting_mode = "md";
+  }
 
   if (buttons && buttons.length > 0) {
     body.reply_markup = {
@@ -401,8 +410,8 @@ async function sendProjectDirectMessage(ctx, directId, text, buttons) {
 }
 
 function wrapSend(userKey, rawSend) {
-  return async (text, buttons) => {
-    const result = await rawSend(text, buttons);
+  return async (text, buttons, options) => {
+    const result = await rawSend(text, buttons, options);
 
     designerLastBotMessage[userKey] = { text, buttons: buttons || null };
 
@@ -654,9 +663,11 @@ function formatDesignerListLine(item, index) {
 // "—" вместо пустых, как и в карточках бота инженеров.
 function formatDesignerDetailCard(ctx, item, extended) {
   const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
-  // Жирный по официально задокументированной разметке amoMessenger (**текст**).
-  // typeConfig.label — фиксированные строки из TASK_TYPE_CONFIG, без
-  // спецсимволов разметки, поэтому оборачивать безопасно.
+  // Жирный шрифт работает только если в запросе sendMessage передан
+  // formatting_mode: "md" (см. sendProjectDirectMessage, вызывается с
+  // options.markdown = true в обоих местах, где используется эта карточка).
+  // typeConfig.label — фиксированные строки без спецсимволов разметки,
+  // оборачивать безопасно.
   const header = typeConfig ? `**Вам необходимо "${typeConfig.label}":**\n\n` : "";
 
   const lines = [
@@ -1246,7 +1257,8 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
     );
     await send(
       formatDesignerDetailCard(ctx, task.item, config.extended),
-      buildTaskSelectedButtons(ctx, config, task.item)
+      buildTaskSelectedButtons(ctx, config, task.item),
+      { markdown: true }
     );
     return true;
   }
@@ -1480,7 +1492,8 @@ async function selectDesignerTask(ctx, state, userKey, item, send) {
 
   await send(
     formatDesignerDetailCard(ctx, item, config.extended),
-    buildTaskSelectedButtons(ctx, config, item)
+    buildTaskSelectedButtons(ctx, config, item),
+    { markdown: true }
   );
 }
 
@@ -2045,8 +2058,8 @@ function init(app, ctx) {
         userName,
         directId,
         imageUrls,
-        send: wrapSend(normalizedUserKey, (msgText, buttons) =>
-          sendProjectDirectMessage(ctx, directId, msgText, buttons)
+        send: wrapSend(normalizedUserKey, (msgText, buttons, options) =>
+          sendProjectDirectMessage(ctx, directId, msgText, buttons, options)
         )
       });
     } catch (error) {
