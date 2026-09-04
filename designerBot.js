@@ -126,7 +126,11 @@ const FILE_TYPE_CONFIGS = {
     folderKey: "approvalPath",
     defaultExtension: "dwg",
     promptText: "Загрузите проект (.dwg/.zip/.sat)",
-    noteLabel: ".dwg/.zip/.sat для согласования"
+    noteLabel: ".dwg/.zip/.sat для согласования",
+    // buttonLabel используется только в "menu"-режиме (Внести правки в
+    // проект клиента) — в "sequential"-режиме (черновой/чистовой проект)
+    // не задействуется, там свой единственный "Перейти к загрузке проекта".
+    buttonLabel: "Проект для согласования .dwg/.zip/.sat"
   },
   approvalPdf: {
     extensions: ["pdf"],
@@ -134,7 +138,8 @@ const FILE_TYPE_CONFIGS = {
     folderKey: "approvalPath",
     defaultExtension: "pdf",
     promptText: "Загрузите PDF",
-    noteLabel: ".pdf для согласования"
+    noteLabel: ".pdf для согласования",
+    buttonLabel: "Проект для согласования .pdf"
   },
   productionDwg: {
     extensions: ["dwg", "zip", "sat"],
@@ -199,7 +204,10 @@ const TASK_TYPE_CONFIG = {
     listMode: "menu",
     extended: false,
     completeResult: "Правки внесены",
-    menuKeys: ["productionDwg", "productionPdf"],
+    // Как подтвердил заказчик: эта задача пишет в "Проект для согласования"
+    // (543248/543250), а не в "Проект в производство" — раньше здесь
+    // ошибочно использовались productionDwg/productionPdf.
+    menuKeys: ["approvalDwg", "approvalPdf"],
     specialResults: ["Не хватает информации", "Нереализуемо"],
     requireAllForFinish: false
   },
@@ -635,9 +643,28 @@ async function loadAllDesignerTasksWithLeads(ctx) {
   return result;
 }
 
+// Форматирование с Markdown-разметкой amoMessenger (**жирный**, *курсив*,
+// `моноширинный`, [именованная ссылка](url)) — работает только если
+// сообщение отправлено с options.markdown = true (formatting_mode: "md").
+// Значения из amoCRM (свободный текст) экранируются через
+// ctx.sanitizeForMarkdown, чтобы случайный "*"/"_"/"~"/"|"/"`" в чужом
+// тексте не сломал разметку остального сообщения (экранирования сама
+// разметка не поддерживает).
+function mdField(ctx, label, value) {
+  return `*${label}:* **${ctx.sanitizeForMarkdown(value || "—")}**`;
+}
+
+function mdMonoField(ctx, label, value) {
+  return `*${label}:* \`${ctx.sanitizeForMarkdown(value || "—")}\``;
+}
+
+function mdLink(label, url) {
+  return url ? `[${label}](${url})` : `*${label}:* —`;
+}
+
 // Короткая строка для списков (ежедневная рассылка, список задач одного типа) —
 // показывать только заполненные поля (ТЗ п.6).
-function formatDesignerListLine(item, index) {
+function formatDesignerListLine(ctx, item, index) {
   const parts = [];
 
   // Список может смешивать несколько типов задач (кнопка "Все задачи",
@@ -645,7 +672,7 @@ function formatDesignerListLine(item, index) {
   // нужно подготовить/поправить.
   const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
 
-  if (typeConfig) parts.push(`Тип задачи: ${typeConfig.label}`);
+  if (typeConfig) parts.push(`Тип задачи: **${ctx.sanitizeForMarkdown(typeConfig.label)}**`);
 
   if (item.engineer) parts.push(`Инженер: ${item.engineer}`);
   if (item.contract_number) parts.push(`№ Дог/Зам. листа: ${item.contract_number}`);
@@ -671,34 +698,35 @@ function formatDesignerDetailCard(ctx, item, extended) {
   const header = typeConfig ? `**Вам необходимо "${typeConfig.label}":**\n\n` : "";
 
   const lines = [
-    `Инженер: ${ctx.mono(item.engineer)}`,
-    `Ответственный за сделку: ${ctx.mono(item.responsible_name)}`,
-    `Имя контакта: ${ctx.mono(item.contact_name)}`,
-    `Телефон контакта: ${ctx.mono(item.contact_phones)}`,
-    `Email контакта: ${ctx.mono(item.contact_email)}`,
-    `№ Дог/Зам. листа: ${ctx.mono(item.contract_number)}`,
-    `Продукт: ${ctx.mono(item.product)}`,
-    `Бюджет сделки: ${ctx.mono(item.budget)}`,
-    `Адрес объекта: ${ctx.mono(item.address)}`,
-    `Комментарий инженера: ${ctx.mono(item.engineer_comment)}`,
-    `Комментарий ЗРПО: ${ctx.mono(item.zrpo_comment)}`
+    mdField(ctx, "Инженер", item.engineer),
+    mdField(ctx, "Ответственный за сделку", item.responsible_name),
+    mdField(ctx, "Имя контакта", item.contact_name),
+    mdField(ctx, "Телефон контакта", item.contact_phones),
+    mdField(ctx, "Email контакта", item.contact_email),
+    mdField(ctx, "№ Дог/Зам. листа", item.contract_number),
+    mdField(ctx, "Продукт", item.product),
+    mdField(ctx, "Бюджет сделки", item.budget),
+    mdMonoField(ctx, "Адрес объекта", item.address),
+    mdField(ctx, "Комментарий инженера", item.engineer_comment),
+    mdField(ctx, "Комментарий ЗРПО", item.zrpo_comment)
   ];
 
   if (extended) {
-    lines.push(`Согласование проекта: ${ctx.mono(item.approval_status)}`);
-    lines.push(`Дата согласования проекта: ${ctx.mono(item.approval_date)}`);
+    lines.push(mdField(ctx, "Согласование проекта", item.approval_status));
+    lines.push(mdField(ctx, "Дата согласования проекта", item.approval_date));
 
     if (item.payments.length === 0) {
-      lines.push("Оплаты: —");
+      lines.push("*Оплаты:* —");
     } else {
       item.payments.forEach((p) => {
-        lines.push(`Оплата ${p.n}: ${ctx.mono(p.amount)}${p.date ? ` (дата: ${p.date})` : ""}`);
+        const label = `Оплата ${p.n}` + (p.date ? ` (дата: ${p.date})` : "");
+        lines.push(mdField(ctx, label, p.amount));
       });
     }
   }
 
-  lines.push(`Отчеты и проекты: ${ctx.mono(item.reports_link)}`);
-  lines.push(`Ссылка на сделку: ${item.lead_link}`);
+  lines.push(mdLink("Отчеты и проекты", item.reports_link));
+  lines.push(mdLink("Ссылка на сделку", item.lead_link));
 
   return header + lines.join("\n");
 }
@@ -1019,6 +1047,7 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
   let uploaded = 0;
   let lastPath = "";
+  const uploadedPaths = [];
 
   for (const file of validFiles) {
     try {
@@ -1034,6 +1063,7 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
       uploaded++;
       lastPath = uploadedPath;
+      uploadedPaths.push(uploadedPath);
 
       console.log("[Бот проектировщиков] Файл сохранён на Яндекс.Диске:", uploadedPath);
     } catch (error) {
@@ -1053,6 +1083,13 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
   task.uploadedLastPath = task.uploadedLastPath || {};
   task.uploadedLastPath[upload.key] = lastPath;
 
+  // Копится на task (не на upload — в menu-режиме upload обнуляется сразу
+  // после этой пачки, до срабатывания отложенного уведомления ниже), чтобы
+  // при нескольких подряд идущих сообщениях со файлами ссылки не терялись
+  // и не дублировались в уведомлении.
+  task.noticeUploadedPaths = task.noticeUploadedPaths || [];
+  task.noticeUploadedPaths.push(...uploadedPaths);
+
   try {
     const publicUrl = await ctx.ydGetFolderPublicUrl(lastPath);
 
@@ -1067,12 +1104,25 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
     const keys = upload.sequenceKeys;
     const nextIndex = upload.sequenceIndex + 1;
 
+    // В "sequential"-режиме уведомление не откладывается (шаги идут по
+    // одному), поэтому ссылки на файлы этой самой пачки шлём сразу же —
+    // по аналогии с ботом инженеров ("Ссылки на загруженные файлы: ...").
+    const linksText = await ctx.buildUploadedFilesLinksText(task.noticeUploadedPaths);
+
+    task.noticeUploadedPaths = [];
+
+    const linksSuffix = linksText ? `\n\n${linksText}` : "";
+
     if (nextIndex < keys.length) {
       upload.sequenceIndex = nextIndex;
       upload.key = keys[nextIndex];
 
-      await send(`Файл получен (${uploaded}). ${FILE_TYPE_CONFIGS[upload.key].promptText}`);
+      await send(`Файл получен (${uploaded}). ${FILE_TYPE_CONFIGS[upload.key].promptText}${linksSuffix}`);
       return;
+    }
+
+    if (linksText) {
+      await send(linksText);
     }
 
     await finalizeDesignerTask(ctx, state, userKey, keys, config.completeResult, send);
@@ -1090,11 +1140,17 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
     }
 
     const cfg = TASK_TYPE_CONFIG[latestState.task.task_type_id];
+    const paths = latestState.task.noticeUploadedPaths || [];
 
-    await send(
-      "Файл(ы) получено. Когда закончите — выберите действие:",
-      buildTaskSelectedButtons(ctx, cfg, latestState.task.item)
-    );
+    latestState.task.noticeUploadedPaths = [];
+
+    const linksText = await ctx.buildUploadedFilesLinksText(paths);
+
+    const text = linksText
+      ? `Файл(ы) получено. Когда закончите — выберите действие:\n\n${linksText}`
+      : "Файл(ы) получено. Когда закончите — выберите действие:";
+
+    await send(text, buildTaskSelectedButtons(ctx, cfg, latestState.task.item));
   });
 }
 
@@ -1441,7 +1497,7 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     if (overdue.length > 0) {
       message += "Просроченные задачи:\n";
       overdue.forEach((item) => {
-        message += formatDesignerListLine(item, index);
+        message += formatDesignerListLine(ctx, item, index);
         index++;
       });
     }
@@ -1449,14 +1505,14 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     if (current.length > 0) {
       message += "Актуальные задачи:\n";
       current.forEach((item) => {
-        message += formatDesignerListLine(item, index);
+        message += formatDesignerListLine(ctx, item, index);
         index++;
       });
     }
 
     const buttons = orderedItems.map((item) => item.contract_number || `Задача ${item.task_id}`);
 
-    await send(message, buttons);
+    await send(message, buttons, { markdown: true });
   } catch (error) {
     console.error("[Бот проектировщиков] Ошибка поиска задач:", error.message);
     await send("❌ Произошла ошибка при поиске задач. Подробности есть в логах Render.");
@@ -1677,7 +1733,7 @@ async function runDailyDigest(ctx) {
     if (overdue.length > 0) {
       message += "Просроченные задачи:\n";
       overdue.forEach((item) => {
-        message += formatDesignerListLine(item, index);
+        message += formatDesignerListLine(ctx, item, index);
         index++;
       });
     }
@@ -1685,13 +1741,13 @@ async function runDailyDigest(ctx) {
     if (today.length > 0) {
       message += "Задачи на сегодня:\n";
       today.forEach((item) => {
-        message += formatDesignerListLine(item, index);
+        message += formatDesignerListLine(ctx, item, index);
         index++;
       });
     }
 
     try {
-      await sendProjectDirectMessage(ctx, registrant.directId, message.trim());
+      await sendProjectDirectMessage(ctx, registrant.directId, message.trim(), null, { markdown: true });
 
       console.log(
         `[Бот проектировщиков] Рассылка отправлена: ${registrant.name} ` +
