@@ -2652,7 +2652,12 @@ function mdMonoField(label, value) {
 }
 
 function mdLink(label, url) {
-  return url ? `[${label}](${url})` : `*${label}:* —`;
+  // Именованная ссылка "[текст](url)" на практике дублирует текст (один раз
+  // как рабочую ссылку, второй раз — обычным текстом рядом), похоже на баг
+  // формата на стороне amoMessenger. Обычный "сырой" URL распознаётся и
+  // делается кликабельным автоматически (проверено), без этого дефекта —
+  // используем его вместо именованной ссылки.
+  return url ? `*${label}:* ${url}` : `*${label}:* —`;
 }
 
 function formatConductMeasurementDetail(item) {
@@ -4025,7 +4030,8 @@ function formatCorrectionDetail(item) {
     `${mdField("Имя клиента", item.contact_name)}\n` +
     `${mdField("№ телефона клиента", item.contact_phones)}\n` +
     `${mdField("№ договора", item.contract_number)}\n` +
-    `${mdField("[Бот] Не принято", item.bot_not_accepted)}`
+    `${mdField("[Бот] Не принято", item.bot_not_accepted)}\n` +
+    `${mdLink("Ссылка на сделку", item.lead_link)}`
   );
 }
 
