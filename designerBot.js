@@ -654,7 +654,10 @@ function formatDesignerListLine(item, index) {
 // "—" вместо пустых, как и в карточках бота инженеров.
 function formatDesignerDetailCard(ctx, item, extended) {
   const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
-  const header = typeConfig ? `Вам необходимо "${typeConfig.label}":\n\n` : "";
+  // Жирный по официально задокументированной разметке amoMessenger (**текст**).
+  // typeConfig.label — фиксированные строки из TASK_TYPE_CONFIG, без
+  // спецсимволов разметки, поэтому оборачивать безопасно.
+  const header = typeConfig ? `**Вам необходимо "${typeConfig.label}":**\n\n` : "";
 
   const lines = [
     `Инженер: ${ctx.mono(item.engineer)}`,
