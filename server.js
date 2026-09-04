@@ -137,8 +137,8 @@ function isStartCommand(text) {
 const userLastBotMessage = {};
 
 function wrapSendWithLastMessageTracking(userKey, rawSend) {
-  return async (text, buttons) => {
-    const result = await rawSend(text, buttons);
+  return async (text, buttons, options) => {
+    const result = await rawSend(text, buttons, options);
 
     userLastBotMessage[userKey] = {
       text,
@@ -438,7 +438,7 @@ const userEngineerName = {};
 // ------------------------------------------------------------
 
 // После завершения фото договора / "Думает" / "Думает-отказ" / выбора результата КП
-// бот показывает кнопку "Перейти к загрузке отчета". Здесь храним сделку,
+// бот показывает кнопку "Загрузить отчет". Здесь храним сделку,
 // к которой эта кнопка относится, до тех пор пока пользователь её не нажал.
 const userPendingReportStart = {};
 
@@ -447,8 +447,8 @@ const userPendingReportStart = {};
 const userSelectedReportMeasurement = {};
 
 // Пользователь находится на экране "Загрузите фотоотчет" (после выбора сделки
-// или после нажатия "Перейти к загрузке отчета") и видит кнопки
-// "Перейти к загрузке замерн.листа" / "Вернуться к списку замеров".
+// или после нажатия "Загрузить отчет") и видит кнопки
+// "Загрузить замерн.лист" / "Вернуться к списку замеров".
 // Здесь же хранятся пути к папкам сделки на Яндекс.Диске (чтобы не запрашивать
 // их заново на каждом шаге) и счётчик номера следующего файла фотоотчета.
 const userPendingReportHub = {};
@@ -1872,7 +1872,8 @@ async function getAmoMessengerUserName(userId) {
 async function sendDirectMessage(
   directId,
   text,
-  buttons = null
+  buttons = null,
+  options = null
 ) {
   if (!amomessengerAccessToken) {
     throw new Error(
@@ -1884,6 +1885,15 @@ async function sendDirectMessage(
     `https://api.amo.tm/v1.3/direct/${directId}/sendMessage`;
 
   const body = { text };
+
+  // По умолчанию formatting_mode = "plain" (текст без интерпретации
+  // разметки). Включаем "md" только там, где явно нужен жирный/курсив/
+  // моноширинный текст (см. вызовы с options.markdown) — большинство
+  // сообщений бота этого не требует и не должно неожиданно ломаться
+  // из-за * _ ~ | или обратных кавычек в чьём-то тексте.
+  if (options && options.markdown) {
+    body.formatting_mode = "md";
+  }
 
   const replyMarkup = buildReplyMarkup(buttons);
 
@@ -2625,18 +2635,38 @@ function formatConductMeasurementLine(item, index) {
   );
 }
 
+// ------------------------------------------------------------
+// Форматирование карточки сделки после выбора конкретной задачи —
+// названия полей курсивом, значения жирным (кроме адреса — он
+// моноширинным), ссылка на сделку — именованной ссылкой. Требует
+// отправки сообщения с options.markdown = true (formatting_mode: "md"),
+// иначе "*"/"**"/"`" отобразятся буквально.
+// ------------------------------------------------------------
+
+function mdField(label, value) {
+  return `*${label}:* **${sanitizeForMarkdown(value || "—")}**`;
+}
+
+function mdMonoField(label, value) {
+  return `*${label}:* \`${sanitizeForMarkdown(value || "—")}\``;
+}
+
+function mdLink(label, url) {
+  return url ? `[${label}](${url})` : `*${label}:* —`;
+}
+
 function formatConductMeasurementDetail(item) {
   return (
-    `Дата замера: ${item.measure_date || "—"}\n` +
-    `Адрес замера: ${mono(item.address)}\n` +
-    `Ответственный менеджер: ${item.manager_name || "—"}\n` +
-    `Бюджет: ${item.budget || "—"}\n` +
-    `Скидка ОП: ${item.discount || "—"}\n` +
-    `Продукт: ${item.product || "—"}\n` +
-    `Имя клиента: ${item.contact_name || "—"}\n` +
-    `№ телефона (-ов) клиента: ${mono(item.contact_phones)}\n` +
-    `№ договора: ${item.contract_number || "—"}\n` +
-    `Ссылка на сделку: ${item.lead_link}`
+    `${mdField("Дата замера", item.measure_date)}\n` +
+    `${mdMonoField("Адрес замера", item.address)}\n` +
+    `${mdField("Ответственный менеджер", item.manager_name)}\n` +
+    `${mdField("Бюджет", item.budget)}\n` +
+    `${mdField("Скидка ОП", item.discount)}\n` +
+    `${mdField("Продукт", item.product)}\n` +
+    `${mdField("Имя клиента", item.contact_name)}\n` +
+    `${mdField("№ телефона (-ов) клиента", item.contact_phones)}\n` +
+    `${mdField("№ договора", item.contract_number)}\n` +
+    `${mdLink("Ссылка на сделку", item.lead_link)}`
   );
 }
 
@@ -2797,14 +2827,35 @@ function escapeRegExp(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-// amoMessenger не поддерживает Markdown-разметку в тексте сообщения —
-// обратные кавычки отображаются как есть, буквальными символами.
-// Моноширный шрифт там задаётся через отдельный массив "entities"
-// ({start, end, format}) в теле сообщения, а не через сам текст.
-// Пока не подтверждено точное значение format для моноширного
-// шрифта, функция ничего не оборачивает — оставлено на будущее.
+// amoMessenger поддерживает Markdown-разметку (**жирный**, *курсив*,
+// `моноширинный` и т.д.), но только если в теле запроса sendMessage
+// передан formatting_mode: "md" (проверено на практике). По умолчанию
+// ("plain") текст, включая обратные кавычки, отображается буквально —
+// поэтому эта функция остаётся простым placeholder'ом ("—" вместо
+// пустого значения) и используется в сообщениях, которые отправляются
+// без formatting_mode ("md"). Для сообщений с реальной разметкой (жирный/
+// моноширинный текст) используются отдельные локальные функции рядом с
+// соответствующими карточками — чтобы не задеть здесь все остальные,
+// "обычные" сообщения бота.
 function mono(value) {
   return value || "—";
+}
+
+// Экранирование спецсимволов Markdown-разметки amoMessenger в значениях
+// из amoCRM (комментарии, имена, адреса и т.п.) — экранирования обратным
+// слэшем эта разметка не поддерживает ("\" остаётся в тексте как есть),
+// поэтому вместо экранирования спецсимволы заменяются на визуально очень
+// похожие символы полноширинного набора. Это не даёт случайному
+// "*"/"_"/"~"/"|"/"`" в чужом тексте сломать разметку остального сообщения.
+function sanitizeForMarkdown(value) {
+  const text = value === null || value === undefined ? "" : String(value);
+
+  return text
+    .replace(/\*/g, "＊")
+    .replace(/_/g, "＿")
+    .replace(/~/g, "～")
+    .replace(/`/g, "｀")
+    .replace(/\|/g, "｜");
 }
 
 function buildTaggedButton(label, identifier) {
@@ -2824,14 +2875,14 @@ function parseTaggedButton(text, label) {
 
 function formatMeasurementDetail(item) {
   return (
-    `Дата замера: ${item.measure_date || "—"}\n` +
-    `Время замера: ${item.measure_time || "—"}\n` +
-    `Адрес замера: ${mono(item.address)}\n` +
-    `Продукт: ${item.product || "—"}\n` +
-    `Имя контакта: ${item.contact_name || "—"}\n` +
-    `№ телефона (-ов) контакта: ${mono(item.contact_phones)}\n` +
-    `№ договора: ${item.contract_number || "—"}\n` +
-    `Ссылка на сделку: ${item.lead_link}`
+    `${mdField("Дата замера", item.measure_date)}\n` +
+    `${mdField("Время замера", item.measure_time)}\n` +
+    `${mdMonoField("Адрес замера", item.address)}\n` +
+    `${mdField("Продукт", item.product)}\n` +
+    `${mdField("Имя контакта", item.contact_name)}\n` +
+    `${mdField("№ телефона (-ов) контакта", item.contact_phones)}\n` +
+    `${mdField("№ договора", item.contract_number)}\n` +
+    `${mdLink("Ссылка на сделку", item.lead_link)}`
   );
 }
 
@@ -2865,12 +2916,14 @@ async function sendStaleButtonNotice(send, currentStoredItem, kind) {
     if (kind === "conduct") {
       await send(
         formatConductMeasurementDetail(currentStoredItem),
-        buildConductActionButtons(currentStoredItem)
+        buildConductActionButtons(currentStoredItem),
+        { markdown: true }
       );
     } else {
       await send(
         formatMeasurementDetail(currentStoredItem),
-        buildMeasurementActionButtons(currentStoredItem)
+        buildMeasurementActionButtons(currentStoredItem),
+        { markdown: true }
       );
     }
 
@@ -3004,7 +3057,7 @@ async function waitForResultTask(leadId) {
 
 // Показывается после загрузки фото договора и после веток
 // "Думает (свяжусь сам)" / "Думает/отказ (передать менеджеру)" /
-// выбора результата по КП — предлагает перейти к загрузке отчета
+// выбора результата по КП — предлагает Загрузить отчет
 // и замерного листа по этой же сделке.
 async function offerReportStart(send, userKey, leadId, contractNumber) {
   userPendingReportStart[userKey] = {
@@ -3014,7 +3067,7 @@ async function offerReportStart(send, userKey, leadId, contractNumber) {
 
   await send(
     "Загрузите отчет и замерный лист",
-    [tagButtonWithDeal("Перейти к загрузке отчета", contractNumber, leadId)]
+    [tagButtonWithDeal("Загрузить отчет", contractNumber, leadId)]
   );
 }
 
@@ -3964,15 +4017,15 @@ function formatCorrectionLine(
 
 function formatCorrectionDetail(item) {
   return (
-    `Дата замера: ${item.measure_date || "—"}\n` +
-    `Адрес замера: ${mono(item.address)}\n` +
-    `Ответственный менеджер: ${item.manager_name || "—"}\n` +
-    `Бюджет: ${item.budget || "—"}\n` +
-    `Продукт: ${item.product || "—"}\n` +
-    `Имя клиента: ${item.contact_name || "—"}\n` +
-    `№ телефона клиента: ${mono(item.contact_phones)}\n` +
-    `№ договора: ${item.contract_number || "—"}\n` +
-    `[Бот] Не принято: ${item.bot_not_accepted || "—"}`
+    `${mdField("Дата замера", item.measure_date)}\n` +
+    `${mdMonoField("Адрес замера", item.address)}\n` +
+    `${mdField("Ответственный менеджер", item.manager_name)}\n` +
+    `${mdField("Бюджет", item.budget)}\n` +
+    `${mdField("Продукт", item.product)}\n` +
+    `${mdField("Имя клиента", item.contact_name)}\n` +
+    `${mdField("№ телефона клиента", item.contact_phones)}\n` +
+    `${mdField("№ договора", item.contract_number)}\n` +
+    `${mdField("[Бот] Не принято", item.bot_not_accepted)}`
   );
 }
 
@@ -4760,7 +4813,7 @@ async function processUserMessage({
     if (
       parseTaggedButton(
         trimmedText,
-        "Перейти к загрузке замерн.листа"
+        "Загрузить замерн.лист"
       ) !== null
     ) {
       try {
@@ -4900,7 +4953,7 @@ async function processUserMessage({
 
          const reportHubButtons = [
   tagButtonWithDeal(
-    "Перейти к загрузке замерн.листа",
+    "Загрузить замерн.лист",
     currentHub.contract_number,
     currentHub.lead_id
   ),
@@ -4939,7 +4992,7 @@ if (uploaded > 0) {
     latestHub.notice_uploaded_paths = [];
 
     let text =
-      `Фото получено (${count}). Когда закончите — нажмите «Перейти к загрузке замерн.листа».`;
+      `Фото получено (${count}). Когда закончите — нажмите «Загрузить замерн.лист».`;
 
     if (note) {
       text = `${text}\n\n${note}`;
@@ -4986,7 +5039,7 @@ return;
 
   // ------------------------------------------------------
   // ОЖИДАЕМ ФАЙЛЫ ЗАМЕРНОГО ЛИСТА
-  // (после кнопки "Перейти к загрузке замерн.листа")
+  // (после кнопки "Загрузить замерн.лист")
   // ------------------------------------------------------
 
   const pendingMeasureSheet = userPendingMeasureSheetUpload[userKey];
@@ -4995,7 +5048,7 @@ return;
     // Пользователь нажал одну из двух кнопок завершения загрузки.
 
     const isGoToVideoButton =
-      parseTaggedButton(trimmedText, "Перейти к загрузке видео") !== null;
+      parseTaggedButton(trimmedText, "Загрузить видео") !== null;
     const isFinishReportButton =
       parseTaggedButton(trimmedText, "Завершить отчет") !== null;
 
@@ -5160,7 +5213,7 @@ return;
 
           const measureSheetButtons = [
             tagButtonWithDeal(
-              "Перейти к загрузке видео",
+              "Загрузить видео",
               currentPending.contract_number,
               currentPending.lead_id
             ),
@@ -5254,7 +5307,7 @@ return;
         "Загрузите замерный лист или выберите действие:",
         [
           tagButtonWithDeal(
-            "Перейти к загрузке видео",
+            "Загрузить видео",
             pendingMeasureSheet.contract_number,
             pendingMeasureSheet.lead_id
           ),
@@ -5273,7 +5326,7 @@ return;
   }
 
   // ------------------------------------------------------
-  // ОЖИДАЕМ ВИДЕО (после кнопки "Перейти к загрузке видео")
+  // ОЖИДАЕМ ВИДЕО (после кнопки "Загрузить видео")
   // ------------------------------------------------------
 
   const pendingVideo = userPendingVideoUpload[userKey];
@@ -6036,7 +6089,8 @@ if (
       buildCorrectionActionButtons(
         selectedCorrection.contract_number,
         selectedCorrection.lead_id
-      )
+      ),
+      { markdown: true }
     );
 
     return;
@@ -6766,11 +6820,11 @@ return;
   }
 
   // ------------------------------------------------------
-  // ПЕРЕЙТИ К ЗАГРУЗКЕ ОТЧЕТА
+  // Загрузить отчет
   // (кнопка после фото договора / "Думает" / выбора по КП)
   // ------------------------------------------------------
 
-  if (parseTaggedButton(trimmedText, "Перейти к загрузке отчета") !== null) {
+  if (parseTaggedButton(trimmedText, "Загрузить отчет") !== null) {
     const stored = userPendingReportStart[userKey];
 
     if (!stored) {
@@ -6843,7 +6897,8 @@ return;
 
           await send(
             formatConductMeasurementDetail(selected),
-            buildConductActionButtons(selected)
+            buildConductActionButtons(selected),
+            { markdown: true }
           );
 
           return;
@@ -6933,7 +6988,8 @@ return;
 
           await send(
             detailMessage,
-            buildMeasurementActionButtons(selected)
+            buildMeasurementActionButtons(selected),
+            { markdown: true }
           );
 
           return;
@@ -7273,11 +7329,12 @@ await processUserMessage({
 
   send: wrapSendWithLastMessageTracking(
     userKey,
-    (msgText, buttons) =>
+    (msgText, buttons, options) =>
       sendDirectMessage(
         directId,
         msgText,
-        buttons
+        buttons,
+        options
       )
   ),
 
@@ -7331,11 +7388,13 @@ const designerBotContext = {
   getUrlExtension,
   escapeRegExp,
   mono,
+  sanitizeForMarkdown,
   isStartCommand,
   buildTaggedButton,
   parseTaggedButton,
   extractAmoMessengerUserName,
   extractImageUrlsFromMessage,
+  buildUploadedFilesLinksText,
   redisRequest,
   getMoscowDate,
   todayMoscowDateText,
