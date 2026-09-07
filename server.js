@@ -6704,11 +6704,11 @@ return;
       await senseiCompleteTask(
         stored.lead_id,
         stored.result_task_id,
-        "Нужны КП и/или черновой проект"
+        "Нужно подготовить КП и/или черновой проект"
       );
     } catch (error) {
       console.error(
-        "Ошибка завершения задачи (Нужно подготовить КП):",
+        "Ошибка завершения задачи (Нужны КП и/или черновой проект):",
         error.message
       );
 
