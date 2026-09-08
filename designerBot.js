@@ -853,7 +853,11 @@ function buildDesignerFileName(baseName, number, extension) {
   return `${baseName}${suffix}.${ext}`;
 }
 
-async function getNextDesignerFileNumber(ctx, folderPath, baseName) {
+// Номер (1), (2)... нужен только при повторной загрузке файла ТОГО ЖЕ
+// формата — dxf и pdf одного договора должны называться одинаково (без
+// номера), поэтому существующие файлы ищутся строго с тем же расширением,
+// каким сейчас загружается файл, а не с любым.
+async function getNextDesignerFileNumber(ctx, folderPath, baseName, extension) {
   const response = await axios.get("https://cloud-api.yandex.net/v1/disk/resources", {
     params: { path: folderPath, limit: 1000, fields: "_embedded.items.name" },
     headers: ctx.yandexDiskHeaders(),
@@ -873,7 +877,8 @@ async function getNextDesignerFileNumber(ctx, folderPath, baseName) {
       : [];
 
   const escapedBase = ctx.escapeRegExp(baseName);
-  const pattern = new RegExp(`^${escapedBase}(?:\\((\\d+)\\))?(?:\\.[^.]*)?$`, "i");
+  const escapedExt = ctx.escapeRegExp(extension);
+  const pattern = new RegExp(`^${escapedBase}(?:\\((\\d+)\\))?\\.${escapedExt}$`, "i");
 
   let maxNumber = -1;
 
@@ -1082,12 +1087,9 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
   for (const file of validFiles) {
     try {
-      const nextNumber = await getNextDesignerFileNumber(ctx, targetPath, baseName);
-      const fileName = buildDesignerFileName(
-        baseName,
-        nextNumber,
-        file.extension || fileConfig.defaultExtension
-      );
+      const extension = file.extension || fileConfig.defaultExtension;
+      const nextNumber = await getNextDesignerFileNumber(ctx, targetPath, baseName, extension);
+      const fileName = buildDesignerFileName(baseName, nextNumber, extension);
       const uploadedPath = `${targetPath}/${fileName}`;
 
       await ctx.ydUploadFromUrlAndWait(uploadedPath, file.url);
@@ -1142,13 +1144,16 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
     task.noticeUploadedPaths = [];
 
-    const linksSuffix = linksText ? `\n\n${linksText}` : "";
-
     if (nextIndex < keys.length) {
       upload.sequenceIndex = nextIndex;
       upload.key = keys[nextIndex];
 
-      await send(`Файл получен (${uploaded}). ${FILE_TYPE_CONFIGS[upload.key].promptText}${linksSuffix}`);
+      const receivedText = linksText
+        ? `Файл получен (${uploaded}).\n\n${linksText}`
+        : `Файл получен (${uploaded}).`;
+
+      await send(receivedText);
+      await send(FILE_TYPE_CONFIGS[upload.key].promptText);
       return;
     }
 
@@ -1169,11 +1174,13 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
     state.upload = null;
     task.menuUploadStarted = true;
 
-    const menuText = linksText
-      ? `Файл(ы) получено. Можно загрузить дополнительные файлы или завершить загрузку:\n\n${linksText}`
-      : "Файл(ы) получено. Можно загрузить дополнительные файлы или завершить загрузку:";
+    const receivedText = linksText ? `Файл(ы) получено.\n\n${linksText}` : "Файл(ы) получено.";
 
-    await send(menuText, buildTaskSelectedButtons(ctx, config, task));
+    await send(receivedText);
+    await send(
+      "Можно загрузить дополнительные файлы или завершить загрузку:",
+      buildTaskSelectedButtons(ctx, config, task)
+    );
     return;
   }
 
@@ -1194,11 +1201,13 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
     const linksText = await ctx.buildUploadedFilesLinksText(paths);
 
-    const text = linksText
-      ? `Файл(ы) получено. Когда закончите — выберите действие:\n\n${linksText}`
-      : "Файл(ы) получено. Когда закончите — выберите действие:";
+    const receivedText = linksText ? `Файл(ы) получено.\n\n${linksText}` : "Файл(ы) получено.";
 
-    await send(text, buildTaskSelectedButtons(ctx, cfg, latestState.task));
+    await send(receivedText);
+    await send(
+      "Когда закончите — выберите действие:",
+      buildTaskSelectedButtons(ctx, cfg, latestState.task)
+    );
   });
 }
 
