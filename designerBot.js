@@ -237,14 +237,27 @@ const TASK_TYPE_CONFIG = {
     pipelineDependent: true,
     extended: true,
     completeResult: "Проект готов",
-    // В воронках "Металл"/"Дерево" dwg и pdf грузятся последовательно
-    // автоматически, а dxf и excel предлагаются друг за другом по одной
-    // кнопке за раз (тоже без выбора формата) — см. postSequenceKeys и
-    // processUploadBatch/buildTaskSelectedButtons. В остальных воронках
-    // (getEffectiveListMode === "menu") все 4 формата из menuKeys доступны
-    // сразу как обычный выбор.
+    // dwg и pdf грузятся последовательно и полностью автоматически в обеих
+    // "последовательных" воронках. Дальше сценарии расходятся:
+    // - "Металл" (metalTailKeys): та же автоматика без единой кнопки едет
+    //   дальше через dxf (с запросом "Раскрой") и excel и сама завершает
+    //   задачу — см. startSequentialUpload/processUploadBatch.
+    // - "Дерево" (woodDecision): dxf не обязателен, поэтому вместо
+    //   автопродолжения пользователю задаётся один явный вопрос с двумя
+    //   кнопками, и в зависимости от ответа последовательность
+    //   возобновляется либо с dxf, либо сразу с excel (тот же сценарий,
+    //   что и у "Металла", просто с другой точки входа).
+    // В остальных воронках (getEffectiveListMode === "menu") действует
+    // обычный выбор формата из menuKeys.
     sequenceKeys: ["productionDwg", "productionPdf"],
-    postSequenceKeys: ["productionDxf", "productionExcel"],
+    metalTailKeys: ["productionDxf", "productionExcel"],
+    woodDecision: {
+      question: 'Нужна ли загрузка файла .dxf?',
+      options: [
+        { label: "Перейти к загрузке .dxf", tailKeys: ["productionDxf", "productionExcel"] },
+        { label: "Перейти к загрузке excel", tailKeys: ["productionExcel"] }
+      ]
+    },
     menuKeys: ["productionDwg", "productionPdf", "productionDxf", "productionExcel"],
     specialResults: ["Нет предоплаты", "Не хватает информации", "Проект не согласован"],
     requireAllForFinish: true,
@@ -779,36 +792,20 @@ const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проект
 // того, что будет дальше (последовательная загрузка или выбор формата,
 // см. getEffectiveListMode/startUploadFlow). Кнопки конкретных файлов и
 // "Завершить загрузку проекта" появляются, только когда task.menuUploadStarted
-// стал true — это происходит либо сразу по клику (воронки с выбором
-// формата), либо позже, после последовательной загрузки обязательных
-// файлов (см. processUploadBatch).
-//
-// task.postSequenceKeys — задаётся только когда в menu переходят ПОСЛЕ
-// обязательной последовательности в воронке "Металл"/"Дерево" (у задачи
-// остались необязательные форматы сверх sequenceKeys, напр. dxf/excel у
-// "Проект для цеха"). Раз пипелайн уже определил "без выбора формата", эти
-// необязательные форматы тоже показываются по одной кнопке за раз (в
-// порядке списка), а не полным меню — иначе после последовательной
-// dwg/pdf у пользователя внезапно появляется выбор формата, чего в этой
-// воронке быть не должно. Полный список config.menuKeys используется
-// только в настоящем menu-режиме (любая другая воронка).
+// стал true — это бывает только в настоящем menu-режиме (воронки без
+// последовательной загрузки, см. startUploadFlow). В "sequential"-режиме
+// ("Металл"/"Дерево") этот экран вообще не используется — там бот сам ведёт
+// пользователя по шагам без выбора формата (см. startSequentialUpload,
+// runSequentialUpload, askWoodDxfDecision в processUploadBatch).
 function buildTaskSelectedButtons(ctx, config, task) {
   const item = task.item;
   const buttons = [];
   const tag = (label) => ctx.buildTaggedButton(label, tagId(item));
 
   const hasUploadedAny = Object.keys(task.uploadedKeys || {}).some((k) => task.uploadedKeys[k]);
-  const postSequenceKeys = task.postSequenceKeys || null;
-  const postSequenceDone = !postSequenceKeys || task.postSequenceIndex >= postSequenceKeys.length;
 
   if (!task.menuUploadStarted) {
     buttons.push(tag("Перейти к загрузке проекта"));
-  } else if (postSequenceKeys) {
-    if (!postSequenceDone) {
-      const key = postSequenceKeys[task.postSequenceIndex];
-
-      buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
-    }
   } else {
     for (const key of config.menuKeys) {
       buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
@@ -820,9 +817,8 @@ function buildTaskSelectedButtons(ctx, config, task) {
   }
 
   // "Завершить загрузку проекта" — последней кнопкой, и только после того,
-  // как загружен хотя бы один файл, и (для последовательных воронок) после
-  // того, как пройдены все необязательные форматы по очереди.
-  if (task.menuUploadStarted && hasUploadedAny && postSequenceDone) {
+  // как загружен хотя бы один файл.
+  if (task.menuUploadStarted && hasUploadedAny) {
     buttons.push(tag(FINISH_UPLOAD_LABEL));
   }
 
@@ -1154,13 +1150,6 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
   const config = TASK_TYPE_CONFIG[task.task_type_id];
 
-  // Продвигаем "по одному формату за раз" после обязательной
-  // последовательности (см. buildTaskSelectedButtons) — как только текущий
-  // формат из очереди загружен, дальше предлагается следующий.
-  if (task.postSequenceKeys && task.postSequenceKeys[task.postSequenceIndex] === upload.key) {
-    task.postSequenceIndex++;
-  }
-
   if (upload.mode === "sequential") {
     const keys = upload.sequenceKeys;
     const nextIndex = upload.sequenceIndex + 1;
@@ -1181,36 +1170,32 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
         : `Файл получен (${uploaded}).`;
 
       await send(receivedText);
-      await send(FILE_TYPE_CONFIGS[upload.key].promptText);
+      await promptForSequentialKey(state, send);
       return;
     }
 
-    // Обязательная последовательность загружена. Если у задачи есть ещё
-    // необязательные форматы (напр. dxf/excel у "Проект для цеха") —
-    // предлагаем их по одному (postSequenceKeys) вместо автозавершения.
-    const postSequenceKeys = config.postSequenceKeys || [];
+    if (linksText) {
+      await send(linksText);
+    }
 
-    if (postSequenceKeys.length === 0) {
-      if (linksText) {
-        await send(linksText);
-      }
+    // "base"-цепочка (dwg/pdf, а в "Металле" сразу и dxf/excel) закончена.
+    // В "Дереве" dxf не обязателен — вместо автозавершения задаём один
+    // явный вопрос и по ответу либо продолжаем той же автоматикой с dxf,
+    // либо сразу с excel (см. woodDecision в TASK_TYPE_CONFIG). Во всех
+    // остальных случаях (Металл, либо это уже "tail"-цепочка после ответа
+    // на этот вопрос) последовательность полностью пройдена — завершаем
+    // задачу автоматически, без отдельной кнопки.
+    const isPendingWoodDecision =
+      upload.stage === "base" &&
+      task.item.pipeline_id === PIPELINE_WOOD_ID &&
+      config.woodDecision;
 
-      await finalizeDesignerTask(ctx, state, userKey, keys, config.completeResult, send);
+    if (isPendingWoodDecision) {
+      await askWoodDxfDecision(ctx, state, send);
       return;
     }
 
-    state.upload = null;
-    task.menuUploadStarted = true;
-    task.postSequenceKeys = postSequenceKeys;
-    task.postSequenceIndex = 0;
-
-    const receivedText = linksText ? `Файл(ы) получено.\n\n${linksText}` : "Файл(ы) получено.";
-
-    await send(receivedText);
-    await send(
-      "Можно продолжить загрузку или завершить:",
-      buildTaskSelectedButtons(ctx, config, task)
-    );
+    await finalizeDesignerTask(ctx, state, userKey, config.menuKeys, config.completeResult, send);
     return;
   }
 
@@ -1295,19 +1280,73 @@ async function startSequentialUpload(ctx, state, userKey, send) {
   const task = state.task;
   const config = TASK_TYPE_CONFIG[task.task_type_id];
 
+  // В "Металле" сразу продолжаем той же автоматикой в dxf/excel (см.
+  // metalTailKeys) — там, в отличие от "Дерева", dxf обязателен, поэтому
+  // отдельный вопрос не нужен.
+  const isMetal = task.item.pipeline_id === PIPELINE_METAL_ID;
+  const keys =
+    isMetal && config.metalTailKeys
+      ? [...config.sequenceKeys, ...config.metalTailKeys]
+      : config.sequenceKeys;
+
+  await runSequentialUpload(ctx, state, keys, "base", send);
+}
+
+// Запускает (или возобновляет) автоматическую последовательную загрузку
+// файлов без выбора формата — используется и для базовой цепочки
+// (dwg/pdf, см. startSequentialUpload), и для "хвоста" после ответа на
+// вопрос о dxf в "Дереве" (см. askWoodDxfDecision).
+async function runSequentialUpload(ctx, state, keys, stage, send) {
+  const task = state.task;
   const folders = buildDesignerFolderPaths(ctx, task.lead_id);
-  const keys = config.sequenceKeys;
 
   state.upload = {
     mode: "sequential",
     sequenceKeys: keys,
     sequenceIndex: 0,
     key: keys[0],
-    folders
+    folders,
+    stage
   };
   state.step = "WAITING_UPLOAD";
 
-  await send(FILE_TYPE_CONFIGS[keys[0]].promptText);
+  await promptForSequentialKey(state, send);
+}
+
+// Просит либо значение "Раскрой" (для форматов с needsCutName — сейчас это
+// только dxf, если оно ещё не указано в рамках этой задачи), либо сразу
+// файл нужного формата — используется на каждом шаге последовательной
+// загрузки.
+async function promptForSequentialKey(state, send) {
+  const upload = state.upload;
+  const task = state.task;
+  const fileConfig = FILE_TYPE_CONFIGS[upload.key];
+
+  if (fileConfig.needsCutName && !task.dxfCutValue) {
+    upload.awaitingCutName = true;
+    await send("Укажите значение «Раскрой»");
+    return;
+  }
+
+  await send(fileConfig.promptText);
+}
+
+// "Дерево": dxf не обязателен, поэтому вместо автопродолжения задаём один
+// явный вопрос; по ответу возобновляем ту же автоматику либо с dxf, либо
+// сразу с excel (config.woodDecision.options[].tailKeys).
+async function askWoodDxfDecision(ctx, state, send) {
+  const task = state.task;
+  const config = TASK_TYPE_CONFIG[task.task_type_id];
+  const decision = config.woodDecision;
+
+  state.upload = null;
+  state.step = "TASK_SELECTED";
+  task.pendingWoodDecision = decision;
+
+  const tag = (label) => ctx.buildTaggedButton(label, tagId(task.item));
+  const buttons = decision.options.map((option) => tag(option.label));
+
+  await send(decision.question, buttons);
 }
 
 async function startMenuUpload(ctx, state, userKey, key, send) {
@@ -1391,6 +1430,23 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
       await send("Укажите комментарий");
       return true;
     }
+  }
+
+  // Вопрос "Нужна ли загрузка файла .dxf?" в "Дереве" (см. askWoodDxfDecision) —
+  // единственное место, где для sequential-режима вообще есть выбор из
+  // нескольких кнопок; после ответа последовательность продолжается сама.
+  if (task.pendingWoodDecision) {
+    const decision = task.pendingWoodDecision;
+
+    for (const option of decision.options) {
+      if (ctx.parseTaggedButton(trimmedText, option.label) === expectedTag) {
+        task.pendingWoodDecision = null;
+        await runSequentialUpload(ctx, state, option.tailKeys, "tail", send);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   if (!task.menuUploadStarted) {
@@ -1627,7 +1683,8 @@ async function selectDesignerTask(ctx, state, userKey, item, send) {
     uploadedKeys: {},
     uploadedLastPath: {},
     dxfCutValue: null,
-    menuUploadStarted: false
+    menuUploadStarted: false,
+    pendingWoodDecision: null
   };
   state.tasks = null;
   state.upload = null;
