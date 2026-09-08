@@ -921,20 +921,37 @@ function classifyByExtension(ctx, urls, allowedExtensions) {
   const validFiles = [];
   const invalidFiles = [];
 
+  // Если у формата ровно одно разрешённое расширение (approvalPdf,
+  // productionPdf, productionDxf, productionExcel) — проверять/угадывать
+  // по ссылке нечего: бот и так ждёт на этом шаге ровно один конкретный
+  // формат. Это важно, потому что amoMessenger для некоторых форматов
+  // (замечено на .dxf) отдаёт ссылку на файл без расширения в пути или с
+  // посторонним "хвостом" вместо реального расширения — getUrlExtension в
+  // таком случае возвращает "" или значение, не совпадающее с ожидаемым, и
+  // корректный файл ошибочно браковался. Раз формат всё равно только один
+  // возможный — используем его напрямую, не полагаясь на ссылку.
+  const singleExpectedExtension = allowedExtensions.length === 1 ? allowedExtensions[0] : null;
+
   for (const url of urls || []) {
     const extension = ctx.getUrlExtension(url);
 
-    // Для некоторых форматов (например .dxf) amoMessenger отдаёт ссылку на
-    // файл без расширения в пути (getUrlExtension возвращает "") — само имя
-    // файла с расширением в вебхук не попадает. На каждом шаге загрузки
-    // здесь всегда ожидается ровно один конкретный формат (upload.key), так
-    // что неопределённое расширение — не повод отклонять файл: он всё равно
-    // сохранится с ожидаемым расширением (см. fileConfig.defaultExtension в
-    // processUploadBatch). Отклоняем только когда расширение определено И
-    // оно точно не из списка разрешённых.
+    if (singleExpectedExtension) {
+      validFiles.push({ url, extension: singleExpectedExtension });
+      continue;
+    }
+
+    // Для форматов с несколькими вариантами (dwg/zip/sat) неопределённое
+    // расширение (та же особенность ссылок amoMessenger) тоже не повод
+    // отклонять файл — он сохранится с расширением по умолчанию (см.
+    // fileConfig.defaultExtension в processUploadBatch). Отклоняем только
+    // когда расширение определено И оно точно не из списка разрешённых.
     if (extension === "" || allowedExtensions.includes(extension)) {
       validFiles.push({ url, extension });
     } else {
+      console.log(
+        "[Бот проектировщиков] Файл отклонён по расширению:",
+        JSON.stringify({ url, extension, allowedExtensions })
+      );
       invalidFiles.push({ url, extension });
     }
   }
