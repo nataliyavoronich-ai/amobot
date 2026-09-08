@@ -924,7 +924,15 @@ function classifyByExtension(ctx, urls, allowedExtensions) {
   for (const url of urls || []) {
     const extension = ctx.getUrlExtension(url);
 
-    if (allowedExtensions.includes(extension)) {
+    // Для некоторых форматов (например .dxf) amoMessenger отдаёт ссылку на
+    // файл без расширения в пути (getUrlExtension возвращает "") — само имя
+    // файла с расширением в вебхук не попадает. На каждом шаге загрузки
+    // здесь всегда ожидается ровно один конкретный формат (upload.key), так
+    // что неопределённое расширение — не повод отклонять файл: он всё равно
+    // сохранится с ожидаемым расширением (см. fileConfig.defaultExtension в
+    // processUploadBatch). Отклоняем только когда расширение определено И
+    // оно точно не из списка разрешённых.
+    if (extension === "" || allowedExtensions.includes(extension)) {
       validFiles.push({ url, extension });
     } else {
       invalidFiles.push({ url, extension });
