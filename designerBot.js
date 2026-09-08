@@ -87,9 +87,12 @@ const PAYMENT_FIELDS = [
   { valueId: 551104, dateId: 440095 }
 ];
 
-const PIPELINE_RETAIL_ID = 207259;
+// Воронки, в которых загрузка файлов идёт последовательно (без выбора
+// формата) — "Металл" и "Дерево". Во всех остальных воронках (включая
+// "Рекламацию" — она отдельно не проверяется, а просто не входит в этот
+// список) пользователь сам выбирает, какой файл загрузить.
+const PIPELINE_METAL_ID = 207259;
 const PIPELINE_WOOD_ID = 585508;
-const PIPELINE_CLAIM_ID = 4689981;
 
 // --- Типы задач проектировщика ---
 
@@ -182,38 +185,47 @@ const FILE_TYPE_CONFIGS = {
 
 // --- Типы задач: какие кнопки/поля/результаты им соответствуют ---
 
+// pipelineDependent: true — режим загрузки (последовательно/с выбором)
+// зависит от воронки сделки (см. getEffectiveListMode): "Металл"/"Дерево" —
+// последовательная загрузка без выбора, любая другая воронка — выбор
+// формата вручную. Без этого флага (SHOP_CORRECTION) воронка не проверяется,
+// всегда используется выбор формата.
 const TASK_TYPE_CONFIG = {
   [DRAFT_TASK_TYPE_ID]: {
     label: "Подготовить черновой проект",
-    listMode: "sequential",
+    pipelineDependent: true,
     extended: false,
     completeResult: "Проект готов",
     sequenceKeys: ["approvalDwg", "approvalPdf"],
-    specialResults: ["Недостаточно данных", "Нереализуемо"]
+    menuKeys: ["approvalDwg", "approvalPdf"],
+    specialResults: ["Недостаточно данных", "Нереализуемо"],
+    requireAllForFinish: false
   },
   [CLEAN_TASK_TYPE_ID]: {
     label: "Подготовить чистовой проект",
-    listMode: "sequential",
+    pipelineDependent: true,
     extended: false,
     completeResult: "Проект готов",
     sequenceKeys: ["approvalDwg", "approvalPdf"],
-    specialResults: ["Недостаточно данных", "Нереализуемо"]
+    menuKeys: ["approvalDwg", "approvalPdf"],
+    specialResults: ["Недостаточно данных", "Нереализуемо"],
+    requireAllForFinish: false
   },
   [CLIENT_CORRECTION_TASK_TYPE_ID]: {
     label: "Внести правки в проект клиента",
-    listMode: "menu",
+    pipelineDependent: true,
     extended: false,
     completeResult: "Правки внесены",
     // Как подтвердил заказчик: эта задача пишет в "Проект для согласования"
     // (543248/543250), а не в "Проект в производство" — раньше здесь
     // ошибочно использовались productionDwg/productionPdf.
+    sequenceKeys: ["approvalDwg", "approvalPdf"],
     menuKeys: ["approvalDwg", "approvalPdf"],
     specialResults: ["Не хватает информации", "Нереализуемо"],
     requireAllForFinish: false
   },
   [SHOP_CORRECTION_TASK_TYPE_ID]: {
     label: "Внести правки в проект для цеха",
-    listMode: "menu",
     extended: true,
     completeResult: "Правки внесены",
     menuKeys: ["productionDwg", "productionPdf", "productionDxf", "productionExcel"],
@@ -222,15 +234,32 @@ const TASK_TYPE_CONFIG = {
   },
   [SHOP_PROJECT_TASK_TYPE_ID]: {
     label: "Подготовить проект для цеха",
-    listMode: "menu",
+    pipelineDependent: true,
     extended: true,
     completeResult: "Проект готов",
+    // В воронках "Металл"/"Дерево" dwg и pdf грузятся последовательно
+    // автоматически, а dxf/excel — уже необязательным меню после них
+    // (см. processUploadBatch: extraKeys после завершения sequenceKeys).
+    sequenceKeys: ["productionDwg", "productionPdf"],
     menuKeys: ["productionDwg", "productionPdf", "productionDxf", "productionExcel"],
     specialResults: ["Нет предоплаты", "Не хватает информации", "Проект не согласован"],
     requireAllForFinish: true,
     requiredKeys: ["productionDwg", "productionPdf"]
   }
 };
+
+// Режим загрузки для конкретной сделки: "sequential" (без выбора, только
+// для воронок "Металл"/"Дерево") или "menu" (выбор формата — всё остальное).
+function getEffectiveListMode(config, item) {
+  if (!config.pipelineDependent) {
+    return "menu";
+  }
+
+  const isSequentialPipeline =
+    item.pipeline_id === PIPELINE_METAL_ID || item.pipeline_id === PIPELINE_WOOD_ID;
+
+  return isSequentialPipeline ? "sequential" : "menu";
+}
 
 // --- Главное меню ---
 // Кнопок больше нет (см. пояснение к изменению): "главное меню" — это
@@ -741,25 +770,24 @@ function parseAnyDesignerTag(text) {
 
 const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проекта";
 
-// В "menu"-режиме кнопки конкретных файлов и "Завершить загрузку проекта"
-// показываются не сразу, а только после того, как пользователь нажал
-// "Перейти к загрузке проекта" (task.menuUploadStarted) — до этого видны
-// только сам переход к загрузке и спецрезультаты. "Завершить загрузку
-// проекта" дополнительно появляется только после успешной загрузки хотя бы
-// одного файла. В "sequential"-режиме кнопки не меняются: там всегда одна
-// кнопка перехода к загрузке плюс спецрезультаты (сама загрузка идёт без
-// кнопок, шаг за шагом).
+// До нажатия "Перейти к загрузке проекта" (task.menuUploadStarted === false)
+// видны только сам переход к загрузке и спецрезультаты — независимо от
+// того, что будет дальше (последовательная загрузка или выбор формата,
+// см. getEffectiveListMode/startUploadFlow). Кнопки конкретных файлов и
+// "Завершить загрузку проекта" появляются, только когда task.menuUploadStarted
+// стал true — это происходит либо сразу по клику (воронки с выбором
+// формата), либо позже, после последовательной загрузки обязательных
+// файлов, если у задачи остались необязательные форматы (см.
+// processUploadBatch). "Завершить загрузку проекта" дополнительно
+// появляется только после загрузки хотя бы одного файла.
 function buildTaskSelectedButtons(ctx, config, task) {
   const item = task.item;
   const buttons = [];
   const tag = (label) => ctx.buildTaggedButton(label, tagId(item));
 
-  const menuUploadStarted = config.listMode !== "sequential" && !!task.menuUploadStarted;
   const hasUploadedAny = Object.keys(task.uploadedKeys || {}).some((k) => task.uploadedKeys[k]);
 
-  if (config.listMode === "sequential") {
-    buttons.push(tag("Перейти к загрузке проекта"));
-  } else if (!menuUploadStarted) {
+  if (!task.menuUploadStarted) {
     buttons.push(tag("Перейти к загрузке проекта"));
   } else {
     for (const key of config.menuKeys) {
@@ -773,7 +801,7 @@ function buildTaskSelectedButtons(ctx, config, task) {
 
   // "Завершить загрузку проекта" — последней кнопкой, и только после того,
   // как загружен хотя бы один файл.
-  if (config.listMode !== "sequential" && menuUploadStarted && hasUploadedAny) {
+  if (task.menuUploadStarted && hasUploadedAny) {
     buttons.push(tag(FINISH_UPLOAD_LABEL));
   }
 
@@ -1124,11 +1152,28 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
       return;
     }
 
-    if (linksText) {
-      await send(linksText);
+    // Обязательная последовательность загружена. Если у задачи есть ещё
+    // необязательные форматы (напр. dxf/excel у "Проект для цеха") —
+    // предлагаем их или сразу завершение вместо автозавершения.
+    const extraKeys = (config.menuKeys || []).filter((k) => !keys.includes(k));
+
+    if (extraKeys.length === 0) {
+      if (linksText) {
+        await send(linksText);
+      }
+
+      await finalizeDesignerTask(ctx, state, userKey, keys, config.completeResult, send);
+      return;
     }
 
-    await finalizeDesignerTask(ctx, state, userKey, keys, config.completeResult, send);
+    state.upload = null;
+    task.menuUploadStarted = true;
+
+    const menuText = linksText
+      ? `Файл(ы) получено. Можно загрузить дополнительные файлы или завершить загрузку:\n\n${linksText}`
+      : "Файл(ы) получено. Можно загрузить дополнительные файлы или завершить загрузку:";
+
+    await send(menuText, buildTaskSelectedButtons(ctx, config, task));
     return;
   }
 
@@ -1205,33 +1250,11 @@ async function finalizeDesignerTask(ctx, state, userKey, uploadedKeysOrder, resu
 // 11. СЦЕНАРИИ TASK_SELECTED (переход к загрузке / завершение / спецрезультаты)
 // ============================================================
 
+// Вызывается только когда getEffectiveListMode уже определил "sequential"
+// (воронка "Металл" или "Дерево") — здесь пипелайн повторно не проверяется.
 async function startSequentialUpload(ctx, state, userKey, send) {
   const task = state.task;
-  const item = task.item;
   const config = TASK_TYPE_CONFIG[task.task_type_id];
-
-  const isKnownPipeline =
-    item.pipeline_id === PIPELINE_RETAIL_ID ||
-    item.pipeline_id === PIPELINE_WOOD_ID ||
-    item.pipeline_id === PIPELINE_CLAIM_ID;
-
-  if (!isKnownPipeline) {
-    await send(
-      "⚠️ Не удалось определить воронку сделки для загрузки проекта. Обратитесь к администратору.",
-      buildTaskSelectedButtons(ctx, config, task)
-    );
-    return;
-  }
-
-  if (item.pipeline_id === PIPELINE_CLAIM_ID) {
-    // Отдельная ветка для воронки "Рекламация" описана только в исходном
-    // (недоступном для этой реализации) ТЗ. Как наиболее безопасный
-    // вариант используется тот же порядок загрузки, что и для Retail/Дерево —
-    // см. пояснение в сопроводительном сообщении к коду.
-    console.log(
-      "[Бот проектировщиков] Сделка в воронке «Рекламация» — используется общий сценарий загрузки."
-    );
-  }
 
   const folders = buildDesignerFolderPaths(ctx, task.lead_id);
   const keys = config.sequenceKeys;
@@ -1331,34 +1354,47 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
     }
   }
 
-  if (config.listMode === "sequential") {
+  if (!task.menuUploadStarted) {
     if (ctx.parseTaggedButton(trimmedText, "Перейти к загрузке проекта") === expectedTag) {
-      await startSequentialUpload(ctx, state, userKey, send);
-      return true;
-    }
-  } else {
-    if (ctx.parseTaggedButton(trimmedText, "Перейти к загрузке проекта") === expectedTag) {
-      task.menuUploadStarted = true;
-      await send("Выберите, какой файл загрузить:", buildTaskSelectedButtons(ctx, config, task));
+      await startUploadFlow(ctx, state, userKey, send);
       return true;
     }
 
-    for (const key of config.menuKeys) {
-      const fileConfig = FILE_TYPE_CONFIGS[key];
+    return false;
+  }
 
-      if (ctx.parseTaggedButton(trimmedText, fileConfig.buttonLabel) === expectedTag) {
-        await startMenuUpload(ctx, state, userKey, key, send);
-        return true;
-      }
-    }
+  for (const key of config.menuKeys) {
+    const fileConfig = FILE_TYPE_CONFIGS[key];
 
-    if (ctx.parseTaggedButton(trimmedText, FINISH_UPLOAD_LABEL) === expectedTag) {
-      await finishMenuUpload(ctx, state, userKey, send);
+    if (ctx.parseTaggedButton(trimmedText, fileConfig.buttonLabel) === expectedTag) {
+      await startMenuUpload(ctx, state, userKey, key, send);
       return true;
     }
   }
 
+  if (ctx.parseTaggedButton(trimmedText, FINISH_UPLOAD_LABEL) === expectedTag) {
+    await finishMenuUpload(ctx, state, userKey, send);
+    return true;
+  }
+
   return false;
+}
+
+// По воронке сделки решает, как грузить файлы: последовательно без выбора
+// ("Металл"/"Дерево") или через выбор формата (все остальные воронки,
+// включая "Рекламацию" — она отдельно не проверяется).
+async function startUploadFlow(ctx, state, userKey, send) {
+  const task = state.task;
+  const config = TASK_TYPE_CONFIG[task.task_type_id];
+  const mode = getEffectiveListMode(config, task.item);
+
+  if (mode === "sequential") {
+    await startSequentialUpload(ctx, state, userKey, send);
+    return;
+  }
+
+  task.menuUploadStarted = true;
+  await send("Выберите, какой файл загрузить:", buildTaskSelectedButtons(ctx, config, task));
 }
 
 async function handlePendingComment(ctx, state, userKey, trimmedText, send) {
