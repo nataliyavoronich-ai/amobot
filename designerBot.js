@@ -233,25 +233,9 @@ const TASK_TYPE_CONFIG = {
 };
 
 // --- Главное меню ---
-
-const MAIN_MENU_TEXT = "Выберите задачу для выполнения:";
-
-const MAIN_MENU_BUTTONS = [
-  "Подготовить черновой проект",
-  "Подготовить чистовой проект",
-  "Внести правки в проект клиента",
-  "Внести правки в проект для цеха",
-  "Подготовить проект для цеха",
-  "Все задачи"
-];
-
-const MENU_BUTTON_TO_TASK_TYPE = {
-  "Подготовить черновой проект": DRAFT_TASK_TYPE_ID,
-  "Подготовить чистовой проект": CLEAN_TASK_TYPE_ID,
-  "Внести правки в проект клиента": CLIENT_CORRECTION_TASK_TYPE_ID,
-  "Внести правки в проект для цеха": SHOP_CORRECTION_TASK_TYPE_ID,
-  "Подготовить проект для цеха": SHOP_PROJECT_TASK_TYPE_ID
-};
+// Кнопок больше нет (см. пояснение к изменению): "главное меню" — это
+// сразу список всех открытых задач проектировщика, как раньше делала
+// кнопка "Все задачи".
 
 // ============================================================
 // 2. ТОКЕНЫ amoMessenger (бот проектировщиков) + Redis
@@ -671,9 +655,9 @@ function mdLink(label, url) {
 function formatDesignerListLine(ctx, item, index) {
   const parts = [];
 
-  // Список может смешивать несколько типов задач (кнопка "Все задачи",
-  // ежедневная рассылка) — без явного указания типа непонятно, что именно
-  // нужно подготовить/поправить.
+  // Список может смешивать несколько типов задач (главное меню = список всех
+  // задач, ежедневная рассылка) — без явного указания типа непонятно, что
+  // именно нужно подготовить/поправить.
   const typeConfig = TASK_TYPE_CONFIG[item.task_type_id];
 
   if (typeConfig) parts.push(`Тип задачи: **${ctx.sanitizeForMarkdown(typeConfig.label)}**`);
@@ -743,7 +727,7 @@ function tagId(item) {
   // Предпочитаем номер договора (ТЗ п.19): он понятнее пользователю в
   // кнопке, чем технический task_id. Если номера договора нет — резервный
   // вариант с task_id, чтобы идентификатор всё равно оставался уникальным.
-  return item.contract_number ? `№${item.contract_number}` : `задача ${item.task_id}`;
+  return item.contract_number ? `№ ${item.contract_number}` : `задача ${item.task_id}`;
 }
 
 function parseAnyDesignerTag(text) {
@@ -757,11 +741,25 @@ function parseAnyDesignerTag(text) {
 
 const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проекта";
 
-function buildTaskSelectedButtons(ctx, config, item) {
+// В "menu"-режиме кнопки конкретных файлов и "Завершить загрузку проекта"
+// показываются не сразу, а только после того, как пользователь нажал
+// "Перейти к загрузке проекта" (task.menuUploadStarted) — до этого видны
+// только сам переход к загрузке и спецрезультаты. "Завершить загрузку
+// проекта" дополнительно появляется только после успешной загрузки хотя бы
+// одного файла. В "sequential"-режиме кнопки не меняются: там всегда одна
+// кнопка перехода к загрузке плюс спецрезультаты (сама загрузка идёт без
+// кнопок, шаг за шагом).
+function buildTaskSelectedButtons(ctx, config, task) {
+  const item = task.item;
   const buttons = [];
   const tag = (label) => ctx.buildTaggedButton(label, tagId(item));
 
+  const menuUploadStarted = config.listMode !== "sequential" && !!task.menuUploadStarted;
+  const hasUploadedAny = Object.keys(task.uploadedKeys || {}).some((k) => task.uploadedKeys[k]);
+
   if (config.listMode === "sequential") {
+    buttons.push(tag("Перейти к загрузке проекта"));
+  } else if (!menuUploadStarted) {
     buttons.push(tag("Перейти к загрузке проекта"));
   } else {
     for (const key of config.menuKeys) {
@@ -773,8 +771,9 @@ function buildTaskSelectedButtons(ctx, config, item) {
     buttons.push(tag(label));
   }
 
-  // "Завершить загрузку проекта" — всегда последней кнопкой в списке.
-  if (config.listMode !== "sequential") {
+  // "Завершить загрузку проекта" — последней кнопкой, и только после того,
+  // как загружен хотя бы один файл.
+  if (config.listMode !== "sequential" && menuUploadStarted && hasUploadedAny) {
     buttons.push(tag(FINISH_UPLOAD_LABEL));
   }
 
@@ -1154,7 +1153,7 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
       ? `Файл(ы) получено. Когда закончите — выберите действие:\n\n${linksText}`
       : "Файл(ы) получено. Когда закончите — выберите действие:";
 
-    await send(text, buildTaskSelectedButtons(ctx, cfg, latestState.task.item));
+    await send(text, buildTaskSelectedButtons(ctx, cfg, latestState.task));
   });
 }
 
@@ -1219,7 +1218,7 @@ async function startSequentialUpload(ctx, state, userKey, send) {
   if (!isKnownPipeline) {
     await send(
       "⚠️ Не удалось определить воронку сделки для загрузки проекта. Обратитесь к администратору.",
-      buildTaskSelectedButtons(ctx, config, item)
+      buildTaskSelectedButtons(ctx, config, task)
     );
     return;
   }
@@ -1278,7 +1277,7 @@ async function finishMenuUpload(ctx, state, userKey, send) {
   if (!hasAny) {
     await send(
       "Пока не получено ни одного файла. Загрузите хотя бы один файл, прежде чем завершить загрузку.",
-      buildTaskSelectedButtons(ctx, config, task.item)
+      buildTaskSelectedButtons(ctx, config, task)
     );
     return;
   }
@@ -1291,7 +1290,7 @@ async function finishMenuUpload(ctx, state, userKey, send) {
 
       await send(
         `Не хватает обязательных файлов: ${missingLabels}.`,
-        buildTaskSelectedButtons(ctx, config, task.item)
+        buildTaskSelectedButtons(ctx, config, task)
       );
       return;
     }
@@ -1317,7 +1316,7 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
     );
     await send(
       formatDesignerDetailCard(ctx, task.item, config.extended),
-      buildTaskSelectedButtons(ctx, config, task.item),
+      buildTaskSelectedButtons(ctx, config, task),
       { markdown: true }
     );
     return true;
@@ -1338,6 +1337,12 @@ async function handleTaskSelectedButtons(ctx, state, userKey, trimmedText, send)
       return true;
     }
   } else {
+    if (ctx.parseTaggedButton(trimmedText, "Перейти к загрузке проекта") === expectedTag) {
+      task.menuUploadStarted = true;
+      await send("Выберите, какой файл загрузить:", buildTaskSelectedButtons(ctx, config, task));
+      return true;
+    }
+
     for (const key of config.menuKeys) {
       const fileConfig = FILE_TYPE_CONFIGS[key];
 
@@ -1479,11 +1484,16 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     state.pendingComment = null;
 
     if (items.length === 0) {
+      if (taskTypeId) {
+        await send("🔍 Задач данного типа не найдено.");
+        await showDesignerTaskList(ctx, state, userKey, null, send);
+        return;
+      }
+
       state.tasks = null;
       state.step = "MAIN_MENU";
 
-      await send("🔍 Задач данного типа не найдено.");
-      await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
+      await send("🔍 Задач не найдено.");
       return;
     }
 
@@ -1541,7 +1551,8 @@ async function selectDesignerTask(ctx, state, userKey, item, send) {
     item,
     uploadedKeys: {},
     uploadedLastPath: {},
-    dxfCutValue: null
+    dxfCutValue: null,
+    menuUploadStarted: false
   };
   state.tasks = null;
   state.upload = null;
@@ -1552,7 +1563,7 @@ async function selectDesignerTask(ctx, state, userKey, item, send) {
 
   await send(
     formatDesignerDetailCard(ctx, item, config.extended),
-    buildTaskSelectedButtons(ctx, config, item),
+    buildTaskSelectedButtons(ctx, config, state.task),
     { markdown: true }
   );
 }
@@ -1574,7 +1585,7 @@ async function processDesignerMessage(ctx, { text, userKey, userName, directId, 
 
   if (ctx.isStartCommand(trimmedText)) {
     resetDesignerState(userKey, designerName);
-    await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
+    await showDesignerTaskList(ctx, designerState[userKey], userKey, null, send);
     return;
   }
 
@@ -1636,18 +1647,6 @@ async function processDesignerMessage(ctx, { text, userKey, userName, directId, 
       await selectDesignerTask(ctx, state, userKey, selected, send);
       return;
     }
-  }
-
-  if (trimmedText === "Все задачи") {
-    await showDesignerTaskList(ctx, state, userKey, null, send);
-    return;
-  }
-
-  const menuTaskType = MENU_BUTTON_TO_TASK_TYPE[trimmedText];
-
-  if (menuTaskType) {
-    await showDesignerTaskList(ctx, state, userKey, menuTaskType, send);
-    return;
   }
 
   console.log("[Бот проектировщиков] Неизвестная команда:", trimmedText);
