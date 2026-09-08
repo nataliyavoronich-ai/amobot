@@ -1287,12 +1287,12 @@ async function finalizeDesignerTask(ctx, state, userKey, uploadedKeysOrder, resu
 
   await send(`✅ Задача завершена с результатом "${resultCaption}".`);
 
-  const taskTypeId = task.task_type_id;
-
   state.task = null;
   state.upload = null;
 
-  await showDesignerTaskList(ctx, state, userKey, taskTypeId, send);
+  // Сразу ищем все открытые задачи проектировщика, а не только задачи
+  // только что завершённого типа.
+  await showDesignerTaskList(ctx, state, userKey, null, send);
 }
 
 // ============================================================
@@ -1559,13 +1559,13 @@ async function handlePendingComment(ctx, state, userKey, trimmedText, send) {
 
   await send(`Текущая задача amoCRM закрыта с результатом "${pending.resultCaption}".`);
 
-  const taskTypeId = task.task_type_id;
-
   state.task = null;
   state.pendingComment = null;
   state.upload = null;
 
-  await showDesignerTaskList(ctx, state, userKey, taskTypeId, send);
+  // Сразу ищем все открытые задачи проектировщика, а не только задачи
+  // только что завершённого типа.
+  await showDesignerTaskList(ctx, state, userKey, null, send);
 }
 
 async function handleUploadStep(ctx, state, userKey, trimmedText, imageUrls, send) {
