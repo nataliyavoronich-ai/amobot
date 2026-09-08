@@ -238,9 +238,13 @@ const TASK_TYPE_CONFIG = {
     extended: true,
     completeResult: "Проект готов",
     // В воронках "Металл"/"Дерево" dwg и pdf грузятся последовательно
-    // автоматически, а dxf/excel — уже необязательным меню после них
-    // (см. processUploadBatch: extraKeys после завершения sequenceKeys).
+    // автоматически, а dxf и excel предлагаются друг за другом по одной
+    // кнопке за раз (тоже без выбора формата) — см. postSequenceKeys и
+    // processUploadBatch/buildTaskSelectedButtons. В остальных воронках
+    // (getEffectiveListMode === "menu") все 4 формата из menuKeys доступны
+    // сразу как обычный выбор.
     sequenceKeys: ["productionDwg", "productionPdf"],
+    postSequenceKeys: ["productionDxf", "productionExcel"],
     menuKeys: ["productionDwg", "productionPdf", "productionDxf", "productionExcel"],
     specialResults: ["Нет предоплаты", "Не хватает информации", "Проект не согласован"],
     requireAllForFinish: true,
@@ -777,18 +781,34 @@ const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проект
 // "Завершить загрузку проекта" появляются, только когда task.menuUploadStarted
 // стал true — это происходит либо сразу по клику (воронки с выбором
 // формата), либо позже, после последовательной загрузки обязательных
-// файлов, если у задачи остались необязательные форматы (см.
-// processUploadBatch). "Завершить загрузку проекта" дополнительно
-// появляется только после загрузки хотя бы одного файла.
+// файлов (см. processUploadBatch).
+//
+// task.postSequenceKeys — задаётся только когда в menu переходят ПОСЛЕ
+// обязательной последовательности в воронке "Металл"/"Дерево" (у задачи
+// остались необязательные форматы сверх sequenceKeys, напр. dxf/excel у
+// "Проект для цеха"). Раз пипелайн уже определил "без выбора формата", эти
+// необязательные форматы тоже показываются по одной кнопке за раз (в
+// порядке списка), а не полным меню — иначе после последовательной
+// dwg/pdf у пользователя внезапно появляется выбор формата, чего в этой
+// воронке быть не должно. Полный список config.menuKeys используется
+// только в настоящем menu-режиме (любая другая воронка).
 function buildTaskSelectedButtons(ctx, config, task) {
   const item = task.item;
   const buttons = [];
   const tag = (label) => ctx.buildTaggedButton(label, tagId(item));
 
   const hasUploadedAny = Object.keys(task.uploadedKeys || {}).some((k) => task.uploadedKeys[k]);
+  const postSequenceKeys = task.postSequenceKeys || null;
+  const postSequenceDone = !postSequenceKeys || task.postSequenceIndex >= postSequenceKeys.length;
 
   if (!task.menuUploadStarted) {
     buttons.push(tag("Перейти к загрузке проекта"));
+  } else if (postSequenceKeys) {
+    if (!postSequenceDone) {
+      const key = postSequenceKeys[task.postSequenceIndex];
+
+      buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
+    }
   } else {
     for (const key of config.menuKeys) {
       buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
@@ -800,8 +820,9 @@ function buildTaskSelectedButtons(ctx, config, task) {
   }
 
   // "Завершить загрузку проекта" — последней кнопкой, и только после того,
-  // как загружен хотя бы один файл.
-  if (task.menuUploadStarted && hasUploadedAny) {
+  // как загружен хотя бы один файл, и (для последовательных воронок) после
+  // того, как пройдены все необязательные форматы по очереди.
+  if (task.menuUploadStarted && hasUploadedAny && postSequenceDone) {
     buttons.push(tag(FINISH_UPLOAD_LABEL));
   }
 
@@ -1133,6 +1154,13 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
   const config = TASK_TYPE_CONFIG[task.task_type_id];
 
+  // Продвигаем "по одному формату за раз" после обязательной
+  // последовательности (см. buildTaskSelectedButtons) — как только текущий
+  // формат из очереди загружен, дальше предлагается следующий.
+  if (task.postSequenceKeys && task.postSequenceKeys[task.postSequenceIndex] === upload.key) {
+    task.postSequenceIndex++;
+  }
+
   if (upload.mode === "sequential") {
     const keys = upload.sequenceKeys;
     const nextIndex = upload.sequenceIndex + 1;
@@ -1159,10 +1187,10 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
     // Обязательная последовательность загружена. Если у задачи есть ещё
     // необязательные форматы (напр. dxf/excel у "Проект для цеха") —
-    // предлагаем их или сразу завершение вместо автозавершения.
-    const extraKeys = (config.menuKeys || []).filter((k) => !keys.includes(k));
+    // предлагаем их по одному (postSequenceKeys) вместо автозавершения.
+    const postSequenceKeys = config.postSequenceKeys || [];
 
-    if (extraKeys.length === 0) {
+    if (postSequenceKeys.length === 0) {
       if (linksText) {
         await send(linksText);
       }
@@ -1173,12 +1201,14 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
 
     state.upload = null;
     task.menuUploadStarted = true;
+    task.postSequenceKeys = postSequenceKeys;
+    task.postSequenceIndex = 0;
 
     const receivedText = linksText ? `Файл(ы) получено.\n\n${linksText}` : "Файл(ы) получено.";
 
     await send(receivedText);
     await send(
-      "Можно загрузить дополнительные файлы или завершить загрузку:",
+      "Можно продолжить загрузку или завершить:",
       buildTaskSelectedButtons(ctx, config, task)
     );
     return;
