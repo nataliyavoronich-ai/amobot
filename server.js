@@ -920,6 +920,26 @@ async function getUserName(userId) {
 }
 
 // ============================================================
+// ЗАКРЕПЛЕНИЕ ПРИМЕЧАНИЯ СДЕЛКИ
+// ============================================================
+
+async function pinLeadNote(noteId) {
+  const url =
+    `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/notes/${noteId}/pin`;
+
+  const response = await amoCrmPost(url, {});
+
+  if (response.status >= 400) {
+    throw new Error(
+      `amoCRM notes pin HTTP ${response.status}: ` +
+      `${JSON.stringify(response.data)}`
+    );
+  }
+
+  return true;
+}
+
+// ============================================================
 // ДОБАВЛЕНИЕ КОММЕНТАРИЯ (ПРИМЕЧАНИЯ) К СДЕЛКЕ
 // ============================================================
 
@@ -943,6 +963,28 @@ async function addLeadNote(leadId, text) {
       `amoCRM notes HTTP ${response.status}: ` +
       `${JSON.stringify(response.data)}`
     );
+  }
+
+  // Закрепляем добавленное примечание в карточке сделки. Ошибка
+  // закрепления не должна ронять основной сценарий (сама заметка уже
+  // успешно создана) — только логируем её.
+  const createdNotes =
+    response.data &&
+    Array.isArray(response.data._embedded?.notes)
+      ? response.data._embedded.notes
+      : [];
+
+  for (const note of createdNotes) {
+    if (note && note.id) {
+      try {
+        await pinLeadNote(note.id);
+      } catch (pinError) {
+        console.error(
+          "Не удалось закрепить примечание сделки:",
+          pinError.message
+        );
+      }
+    }
   }
 
   return response.data;
@@ -2822,10 +2864,17 @@ function buildDealTag(contractNumber, fallbackId) {
     : `сделка ${fallbackId}`;
 }
 
-// Добавляет к тексту кнопки "ярлык" сделки в скобках, например:
-// tagButtonWithDeal("Готово", "тест 3") -> "Готово (№ тест 3)"
-function tagButtonWithDeal(label, contractNumber, fallbackId) {
-  return `${label} (${buildDealTag(contractNumber, fallbackId)})`;
+// "Ярлык" сделки для текста СООБЩЕНИЯ (а не кнопки). Раньше этот же ярлык
+// добавлялся прямо в текст кнопки, но в мобильном приложении amoMessenger
+// длинный текст кнопки обрезается посередине, из-за чего терялось само
+// название действия (например, "Загрузить замерн.лист (№ ...)" превращалось
+// в "Загрузить замерн.л...№ ...)"). Поэтому номер сделки теперь выводится
+// в тексте сообщения, а кнопка остаётся коротким "чистым" текстом действия.
+// Пример:
+// `Загрузите отчет и замерный лист${dealTagSuffix(contractNumber, leadId)}`
+// -> "Загрузите отчет и замерный лист (№ тест 3)"
+function dealTagSuffix(contractNumber, fallbackId) {
+  return ` (${buildDealTag(contractNumber, fallbackId)})`;
 }
 
 function escapeRegExp(text) {
@@ -3071,8 +3120,8 @@ async function offerReportStart(send, userKey, leadId, contractNumber) {
   };
 
   await send(
-    "Загрузите отчет и замерный лист",
-    [tagButtonWithDeal("Загрузить отчет", contractNumber, leadId)]
+    `Загрузите отчет и замерный лист${dealTagSuffix(contractNumber, leadId)}`,
+    ["Загрузить отчет"]
   );
 }
 
@@ -3127,7 +3176,7 @@ async function enterReportHub(
     };
 
     await send(
-  "Загрузите фото замера",
+  `Загрузите фото замера${dealTagSuffix(contractNumber, leadId)}`,
   ["Вернуться к списку замеров"]
 );
   } catch (error) {
@@ -3284,8 +3333,8 @@ async function startBudgetEditStep(send, userKey, leadId, contractNumber) {
   };
 
   await send(
-    `Бюджет сделки: ${budgetText}\nВнесите изменения`,
-    [tagButtonWithDeal("Без изменений", contractNumber, leadId)]
+    `Бюджет сделки${dealTagSuffix(contractNumber, leadId)}: ${budgetText}\nВнесите изменения`,
+    ["Без изменений"]
   );
 }
 
@@ -3328,8 +3377,8 @@ async function startEmailEditStep(send, userKey, leadId, contractNumber) {
   };
 
   await send(
-    `E-mail клиента: ${emailText}\nВнесите изменения`,
-    [tagButtonWithDeal("Без изменений", contractNumber, leadId)]
+    `E-mail клиента${dealTagSuffix(contractNumber, leadId)}: ${emailText}\nВнесите изменения`,
+    ["Без изменений"]
   );
 }
 
@@ -4035,14 +4084,14 @@ function formatCorrectionDetail(item) {
   );
 }
 
-function buildCorrectionActionButtons(contractNumber, leadId) {
+function buildCorrectionActionButtons() {
   return [
     "Замерный лист",
     "Фотоотчет",
     "Видеоотчет",
     "Договор",
     "Правки внесены"
-  ].map((label) => tagButtonWithDeal(label, contractNumber, leadId));
+  ];
 }
 // ------------------------------------------------------------
 // СЦЕНАРИЙ "ВНЕСТИ ПРАВКИ": ЗАГРУЗКА ФАЙЛОВ ПО ТИПАМ
@@ -4538,7 +4587,7 @@ async function processUserMessage({
   if (pendingPhoto) {
     // Кнопка "Готово" — пользователь закончил загрузку фото.
 
-    if (parseTaggedButton(trimmedText, "Готово") !== null) {
+    if (trimmedText === "Готово") {
       if (!pendingPhoto.has_uploaded_photo) {
         await send(
           "Пока не получено ни одного фото договора. " +
@@ -4715,15 +4764,10 @@ async function processUserMessage({
             latest.notice_mismatch_note = "";
             latest.notice_uploaded_paths = [];
 
-            const doneButtonPhoto = tagButtonWithDeal(
-              "Готово",
-              latest.contract_number,
-              latest.lead_id
-            );
-
             let text =
-              `Фото получено (${count}). ` +
-              "Когда закончите — нажмите «Готово».";
+              `Фото получено (${count})` +
+              dealTagSuffix(latest.contract_number, latest.lead_id) +
+              ". Когда закончите — нажмите «Готово».";
 
             if (note) {
               text = `${text}\n\n${note}`;
@@ -4735,18 +4779,18 @@ async function processUserMessage({
               text = `${text}\n\n${linksText}`;
             }
 
-            await send(text, [doneButtonPhoto]);
+            await send(text, ["Готово"]);
           });
         } else if (currentPendingPhoto.has_uploaded_photo) {
            await send(
-            "❌ Не удалось сохранить фото на Яндекс.Диске. " +
-            "Попробуйте ещё раз или нажмите «Готово», " +
-            "чтобы закончить.",
-            [tagButtonWithDeal(
-              "Готово",
+            "❌ Не удалось сохранить фото на Яндекс.Диске" +
+            dealTagSuffix(
               currentPendingPhoto.contract_number,
               currentPendingPhoto.lead_id
-            )]
+            ) +
+            ". Попробуйте ещё раз или нажмите «Готово», " +
+            "чтобы закончить.",
+            ["Готово"]
           );
         } else {
           await send(
@@ -4780,12 +4824,10 @@ async function processUserMessage({
 
    if (pendingPhoto.has_uploaded_photo) {
       await send(
-        "Загрузите фото договора и нажмите «Готово», когда закончите.",
-        [tagButtonWithDeal(
-          "Готово",
-          pendingPhoto.contract_number,
-          pendingPhoto.lead_id
-        )]
+        "Загрузите фото договора и нажмите «Готово», когда закончите" +
+          dealTagSuffix(pendingPhoto.contract_number, pendingPhoto.lead_id) +
+          ".",
+        ["Готово"]
       );
     } else {
       await send(
@@ -4816,12 +4858,7 @@ async function processUserMessage({
       return;
     }
 
-    if (
-      parseTaggedButton(
-        trimmedText,
-        "Загрузить замерн.лист"
-      ) !== null
-    ) {
+    if (trimmedText === "Загрузить замерн.лист") {
       try {
         const dateText = todayMoscowDateText();
 
@@ -4958,11 +4995,7 @@ async function processUserMessage({
           }
 
          const reportHubButtons = [
-  tagButtonWithDeal(
-    "Загрузить замерн.лист",
-    currentHub.contract_number,
-    currentHub.lead_id
-  ),
+  "Загрузить замерн.лист",
   "Вернуться к списку замеров"
 ];
 
@@ -4998,7 +5031,8 @@ if (uploaded > 0) {
     latestHub.notice_uploaded_paths = [];
 
     let text =
-      `Фото получено (${count}). Когда закончите — нажмите «Загрузить замерн.лист».`;
+      `Фото получено (${count})${dealTagSuffix(latestHub.contract_number, latestHub.lead_id)}. ` +
+      "Когда закончите — нажмите «Загрузить замерн.лист».";
 
     if (note) {
       text = `${text}\n\n${note}`;
@@ -5014,8 +5048,9 @@ if (uploaded > 0) {
   });
 } else {
             await send(
-              "❌ Не удалось сохранить фото на Яндекс.Диске. " +
-                "Попробуйте ещё раз.",
+              "❌ Не удалось сохранить фото на Яндекс.Диске" +
+                dealTagSuffix(currentHub.contract_number, currentHub.lead_id) +
+                ". Попробуйте ещё раз.",
               reportHubButtons
             );
           }
@@ -5053,10 +5088,8 @@ return;
   if (pendingMeasureSheet) {
     // Пользователь нажал одну из двух кнопок завершения загрузки.
 
-    const isGoToVideoButton =
-      parseTaggedButton(trimmedText, "Загрузить видео") !== null;
-    const isFinishReportButton =
-      parseTaggedButton(trimmedText, "Завершить отчет") !== null;
+    const isGoToVideoButton = trimmedText === "Загрузить видео";
+    const isFinishReportButton = trimmedText === "Завершить отчет";
 
     if (isGoToVideoButton || isFinishReportButton) {
       if (!pendingMeasureSheet.has_uploaded_file) {
@@ -5218,16 +5251,8 @@ return;
           }
 
           const measureSheetButtons = [
-            tagButtonWithDeal(
-              "Загрузить видео",
-              currentPending.contract_number,
-              currentPending.lead_id
-            ),
-            tagButtonWithDeal(
-              "Завершить отчет",
-              currentPending.contract_number,
-              currentPending.lead_id
-            )
+            "Загрузить видео",
+            "Завершить отчет"
           ];
 
           const mismatchNote = buildKindMismatchNote(
@@ -5267,7 +5292,9 @@ return;
               latest.notice_uploaded_paths = [];
 
               let text =
-                `Файл(ы) получено (${count}). Когда закончите — выберите действие:`;
+                `Файл(ы) получено (${count})` +
+                dealTagSuffix(latest.contract_number, latest.lead_id) +
+                ". Когда закончите — выберите действие:";
 
               if (note) {
                 text = `${text}\n\n${note}`;
@@ -5283,8 +5310,9 @@ return;
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
-              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
-                "Попробуйте ещё раз или выберите действие:",
+              "❌ Не удалось сохранить файл на Яндекс.Диске" +
+                dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
+                ". Попробуйте ещё раз или выберите действие:",
               measureSheetButtons
             );
           } else {
@@ -5310,19 +5338,13 @@ return;
 
     if (pendingMeasureSheet.has_uploaded_file) {
       await send(
-        "Загрузите замерный лист или выберите действие:",
-        [
-          tagButtonWithDeal(
-            "Загрузить видео",
+        "Загрузите замерный лист или выберите действие" +
+          dealTagSuffix(
             pendingMeasureSheet.contract_number,
             pendingMeasureSheet.lead_id
-          ),
-          tagButtonWithDeal(
-            "Завершить отчет",
-            pendingMeasureSheet.contract_number,
-            pendingMeasureSheet.lead_id
-          )
-        ]
+          ) +
+          ":",
+        ["Загрузить видео", "Завершить отчет"]
       );
     } else {
       await send("Загрузите замерный лист.");
@@ -5338,7 +5360,7 @@ return;
   const pendingVideo = userPendingVideoUpload[userKey];
 
   if (pendingVideo) {
-    if (parseTaggedButton(trimmedText, "Завершить отчет") !== null) {
+    if (trimmedText === "Завершить отчет") {
       if (!pendingVideo.has_uploaded_file) {
         await send(
           "Пока не получено ни одного видео. " +
@@ -5483,8 +5505,9 @@ return;
               latest.notice_uploaded_paths = [];
 
               let text =
-                `Файл(ы) получено (${count}). ` +
-                "Когда закончите — нажмите «Завершить отчет».";
+                `Файл(ы) получено (${count})` +
+                dealTagSuffix(latest.contract_number, latest.lead_id) +
+                ". Когда закончите — нажмите «Завершить отчет».";
 
               if (note) {
                 text = `${text}\n\n${note}`;
@@ -5496,21 +5519,14 @@ return;
                 text = `${text}\n\n${linksText}`;
               }
 
-              await send(text, [tagButtonWithDeal(
-                "Завершить отчет",
-                latest.contract_number,
-                latest.lead_id
-              )]);
+              await send(text, ["Завершить отчет"]);
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
-              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
-                "Попробуйте ещё раз или нажмите «Завершить отчет».",
-              [tagButtonWithDeal(
-                "Завершить отчет",
-                currentPending.contract_number,
-                currentPending.lead_id
-              )]
+              "❌ Не удалось сохранить файл на Яндекс.Диске" +
+                dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
+                ". Попробуйте ещё раз или нажмите «Завершить отчет».",
+              ["Завершить отчет"]
             );
           } else {
             await send(
@@ -5535,12 +5551,10 @@ return;
 
     if (pendingVideo.has_uploaded_file) {
       await send(
-        "Загрузите видео или нажмите «Завершить отчет».",
-        [tagButtonWithDeal(
-          "Завершить отчет",
-          pendingVideo.contract_number,
-          pendingVideo.lead_id
-        )]
+        "Загрузите видео или нажмите «Завершить отчет»" +
+          dealTagSuffix(pendingVideo.contract_number, pendingVideo.lead_id) +
+          ".",
+        ["Завершить отчет"]
       );
     } else {
       await send("Загрузите видео.");
@@ -5556,7 +5570,7 @@ return;
   const pendingBudget = userPendingBudgetEdit[userKey];
 
   if (pendingBudget) {
-    if (parseTaggedButton(trimmedText, "Без изменений") !== null) {
+    if (trimmedText === "Без изменений") {
       delete userPendingBudgetEdit[userKey];
 
       await startEmailEditStep(
@@ -5612,7 +5626,7 @@ return;
   const pendingEmail = userPendingEmailEdit[userKey];
 
   if (pendingEmail) {
-    if (parseTaggedButton(trimmedText, "Без изменений") !== null) {
+    if (trimmedText === "Без изменений") {
       delete userPendingEmailEdit[userKey];
 
       await returnToReportList(send, finish, userKey, currentEngineerName);
@@ -5672,7 +5686,7 @@ return;
     userPendingCorrectionUpload[userKey];
 
   if (pendingCorrectionUpload) {
-    if (parseTaggedButton(trimmedText, "Завершить загрузку") !== null) {
+    if (trimmedText === "Завершить загрузку") {
       if (!pendingCorrectionUpload.has_uploaded_file) {
         await send(
           "Пока не получено ни одного файла. " +
@@ -5685,11 +5699,13 @@ return;
       delete userPendingCorrectionUpload[userKey];
 
       await send(
-        "✅ Файлы сохранены. Выберите, что ещё нужно поправить:",
-        buildCorrectionActionButtons(
-          pendingCorrectionUpload.contract_number,
-          pendingCorrectionUpload.lead_id
-        )
+        "✅ Файлы сохранены" +
+          dealTagSuffix(
+            pendingCorrectionUpload.contract_number,
+            pendingCorrectionUpload.lead_id
+          ) +
+          ". Выберите, что ещё нужно поправить:",
+        buildCorrectionActionButtons()
       );
 
       return;
@@ -5817,7 +5833,9 @@ return;
               latest.notice_uploaded_paths = [];
 
               let text =
-                `Файл(ы) получено (${count}). Когда закончите — нажмите «Завершить загрузку».`;
+                `Файл(ы) получено (${count})` +
+                dealTagSuffix(latest.contract_number, latest.lead_id) +
+                ". Когда закончите — нажмите «Завершить загрузку».";
 
               if (note) {
                 text = `${text}\n\n${note}`;
@@ -5829,21 +5847,14 @@ return;
                 text = `${text}\n\n${linksText}`;
               }
 
-              await send(text, [tagButtonWithDeal(
-                "Завершить загрузку",
-                latest.contract_number,
-                latest.lead_id
-              )]);
+              await send(text, ["Завершить загрузку"]);
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
-              "❌ Не удалось сохранить файл на Яндекс.Диске. " +
-                "Попробуйте ещё раз или нажмите «Завершить загрузку».",
-              [tagButtonWithDeal(
-                "Завершить загрузку",
-                currentPending.contract_number,
-                currentPending.lead_id
-              )]
+              "❌ Не удалось сохранить файл на Яндекс.Диске" +
+                dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
+                ". Попробуйте ещё раз или нажмите «Завершить загрузку».",
+              ["Завершить загрузку"]
             );
           } else {
             await send(
@@ -5868,12 +5879,13 @@ return;
 
     if (pendingCorrectionUpload.has_uploaded_file) {
       await send(
-        "Загрузите файл или нажмите «Завершить загрузку».",
-        [tagButtonWithDeal(
-          "Завершить загрузку",
-          pendingCorrectionUpload.contract_number,
-          pendingCorrectionUpload.lead_id
-        )]
+        "Загрузите файл или нажмите «Завершить загрузку»" +
+          dealTagSuffix(
+            pendingCorrectionUpload.contract_number,
+            pendingCorrectionUpload.lead_id
+          ) +
+          ".",
+        ["Завершить загрузку"]
       );
     } else {
       await send(pendingCorrectionUpload.prompt_text + ".");
@@ -5971,7 +5983,7 @@ if (selectedCorrection) {
   ];
 
   const matchedCorrectionType = CORRECTION_TYPE_LABELS.find(
-    (label) => parseTaggedButton(trimmedText, label) !== null
+    (label) => trimmedText === label
   );
 
   if (matchedCorrectionType) {
@@ -5986,7 +5998,7 @@ if (selectedCorrection) {
     return;
   }
 
-  if (parseTaggedButton(trimmedText, "Правки внесены") !== null) {
+  if (trimmedText === "Правки внесены") {
     userPendingCorrectionComment[userKey] = {
       lead_id: selectedCorrection.lead_id,
       task_id: selectedCorrection.task_id
@@ -6092,10 +6104,7 @@ if (
       formatCorrectionDetail(
         selectedCorrection
       ),
-      buildCorrectionActionButtons(
-        selectedCorrection.contract_number,
-        selectedCorrection.lead_id
-      ),
+      buildCorrectionActionButtons(),
       { markdown: true }
     );
 
@@ -6453,15 +6462,16 @@ if (
       contract_number: stored.contract_number
     };
 
-    const resultDealTag = (label) =>
-      tagButtonWithDeal(label, stored.contract_number, stored.lead_id);
-
-    await send("Укажите результат замера", [
-      resultDealTag("Заключен договор"),
-      resultDealTag("Нужны КП и/или черновой проект"),
-      resultDealTag("Думает (свяжусь сам)"),
-      resultDealTag("Думает/отказ (передать менеджеру)")
-    ]);
+    await send(
+      "Укажите результат замера" +
+        dealTagSuffix(stored.contract_number, stored.lead_id),
+      [
+        "Заключен договор",
+        "Нужны КП и/или черновой проект",
+        "Думает (свяжусь сам)",
+        "Думает/отказ (передать менеджеру)"
+      ]
+    );
 
     return;
   }
@@ -6504,7 +6514,7 @@ if (
   // ЗАКЛЮЧЕН ДОГОВОР
   // ------------------------------------------------------
 
-  if (parseTaggedButton(trimmedText, "Заключен договор") !== null) {
+  if (trimmedText === "Заключен договор") {
     const stored = userPendingResultTask[userKey];
 
     if (!stored) {
@@ -6643,9 +6653,9 @@ return;
   const THINKING_MANAGER_LABEL = "Думает/отказ (передать менеджеру)";
 
   const matchedThinkingLabel =
-    parseTaggedButton(trimmedText, THINKING_SELF_LABEL) !== null
+    trimmedText === THINKING_SELF_LABEL
       ? THINKING_SELF_LABEL
-      : parseTaggedButton(trimmedText, THINKING_MANAGER_LABEL) !== null
+      : trimmedText === THINKING_MANAGER_LABEL
       ? THINKING_MANAGER_LABEL
       : null;
 
@@ -6681,12 +6691,7 @@ return;
   // Нужны КП и/или черновой проект
   // ------------------------------------------------------
 
-  if (
-    parseTaggedButton(
-      trimmedText,
-      "Нужны КП и/или черновой проект"
-    ) !== null
-  ) {
+  if (trimmedText === "Нужны КП и/или черновой проект") {
     const stored = userPendingResultTask[userKey];
 
     if (!stored) {
@@ -6750,14 +6755,11 @@ return;
       contract_number: stored.contract_number
     };
 
-    const kpDealTag = (label) =>
-      tagButtonWithDeal(label, stored.contract_number, stored.lead_id);
-
-    await send("Укажите что нужно подготовить клиенту", [
-      kpDealTag("КП"),
-      kpDealTag("Черновой проект"),
-      kpDealTag("КП + черновой проект")
-    ]);
+    await send(
+      "Укажите что нужно подготовить клиенту" +
+        dealTagSuffix(stored.contract_number, stored.lead_id),
+      ["КП", "Черновой проект", "КП + черновой проект"]
+    );
 
     return;
   }
@@ -6769,7 +6771,7 @@ return;
   const KP_LABELS = ["КП", "Черновой проект", "КП + черновой проект"];
 
   const matchedKpLabel = KP_LABELS.find(
-    (label) => parseTaggedButton(trimmedText, label) !== null
+    (label) => trimmedText === label
   );
 
   if (matchedKpLabel) {
@@ -6830,7 +6832,7 @@ return;
   // (кнопка после фото договора / "Думает" / выбора по КП)
   // ------------------------------------------------------
 
-  if (parseTaggedButton(trimmedText, "Загрузить отчет") !== null) {
+  if (trimmedText === "Загрузить отчет") {
     const stored = userPendingReportStart[userKey];
 
     if (!stored) {
