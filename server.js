@@ -943,7 +943,15 @@ async function pinLeadNote(noteId) {
 // ДОБАВЛЕНИЕ КОММЕНТАРИЯ (ПРИМЕЧАНИЯ) К СДЕЛКЕ
 // ============================================================
 
-async function addLeadNote(leadId, text) {
+async function addLeadNote(leadId, text, options = {}) {
+  const shouldPin = options.pin !== false;
+
+  console.log(
+    "addLeadNote: leadId=" + leadId +
+    ", options=" + JSON.stringify(options) +
+    ", shouldPin=" + shouldPin
+  );
+
   const url =
     `https://${AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}/notes`;
 
@@ -965,24 +973,30 @@ async function addLeadNote(leadId, text) {
     );
   }
 
-  // Закрепляем добавленное примечание в карточке сделки. Ошибка
-  // закрепления не должна ронять основной сценарий (сама заметка уже
-  // успешно создана) — только логируем её.
-  const createdNotes =
-    response.data &&
-    Array.isArray(response.data._embedded?.notes)
-      ? response.data._embedded.notes
-      : [];
+  // Закрепляем добавленное примечание в карточке сделки — только когда
+  // это запрошено (по умолчанию да). Бот проектировщиков передаёт
+  // { pin: false }: закреплённым должно быть только примечание с
+  // комментарием инженера (бот инженеров), а не отбивки о загрузке файлов
+  // или комментарии проектировщика. Ошибка закрепления не должна ронять
+  // основной сценарий (сама заметка уже успешно создана) — только
+  // логируем её.
+  if (shouldPin) {
+    const createdNotes =
+      response.data &&
+      Array.isArray(response.data._embedded?.notes)
+        ? response.data._embedded.notes
+        : [];
 
-  for (const note of createdNotes) {
-    if (note && note.id) {
-      try {
-        await pinLeadNote(note.id);
-      } catch (pinError) {
-        console.error(
-          "Не удалось закрепить примечание сделки:",
-          pinError.message
-        );
+    for (const note of createdNotes) {
+      if (note && note.id) {
+        try {
+          await pinLeadNote(note.id);
+        } catch (pinError) {
+          console.error(
+            "Не удалось закрепить примечание сделки:",
+            pinError.message
+          );
+        }
       }
     }
   }
@@ -1506,6 +1520,43 @@ async function buildUploadedFilesLinksText(filePaths) {
   }
 
   return `Ссылки на загруженные файлы:\n${lines.join("\n")}`;
+}
+
+// ============================================================
+// ОТБИВКА О ЗАГРУЗКЕ ФАЙЛОВ — ДВУМЯ ОТДЕЛЬНЫМИ СООБЩЕНИЯМИ
+// ============================================================
+// Первое сообщение: сколько файлов получено + ссылки на них (без кнопок).
+// Второе сообщение: что делать дальше (текст + кнопки следующего шага).
+// Разделены специально — пользователю проще воспринимать ссылки на
+// загруженные файлы отдельно от вопроса "что дальше".
+async function sendUploadNotice(send, {
+  uploadedLabel,
+  count,
+  contractNumber,
+  fallbackId,
+  mismatchNote,
+  uploadedPaths,
+  nextActionText,
+  buttons
+}) {
+  let uploadedText =
+    `${uploadedLabel} получено (${count})` +
+    dealTagSuffix(contractNumber, fallbackId) +
+    ".";
+
+  if (mismatchNote) {
+    uploadedText = `${uploadedText}\n\n${mismatchNote}`;
+  }
+
+  const linksText = await buildUploadedFilesLinksText(uploadedPaths);
+
+  if (linksText) {
+    uploadedText = `${uploadedText}\n\n${linksText}`;
+  }
+
+  await send(uploadedText);
+
+  await send(nextActionText, buttons);
 }
 
 // ============================================================
@@ -4764,22 +4815,16 @@ async function processUserMessage({
             latest.notice_mismatch_note = "";
             latest.notice_uploaded_paths = [];
 
-            let text =
-              `Фото получено (${count})` +
-              dealTagSuffix(latest.contract_number, latest.lead_id) +
-              ". Когда закончите — нажмите «Готово».";
-
-            if (note) {
-              text = `${text}\n\n${note}`;
-            }
-
-            const linksText = await buildUploadedFilesLinksText(uploadedPaths);
-
-            if (linksText) {
-              text = `${text}\n\n${linksText}`;
-            }
-
-            await send(text, ["Готово"]);
+            await sendUploadNotice(send, {
+              uploadedLabel: "Фото",
+              count,
+              contractNumber: latest.contract_number,
+              fallbackId: latest.lead_id,
+              mismatchNote: note,
+              uploadedPaths,
+              nextActionText: "Когда закончите — нажмите «Готово».",
+              buttons: ["Готово"]
+            });
           });
         } else if (currentPendingPhoto.has_uploaded_photo) {
            await send(
@@ -5030,21 +5075,16 @@ if (uploaded > 0) {
     latestHub.notice_mismatch_note = "";
     latestHub.notice_uploaded_paths = [];
 
-    let text =
-      `Фото получено (${count})${dealTagSuffix(latestHub.contract_number, latestHub.lead_id)}. ` +
-      "Когда закончите — нажмите «Загрузить замерн.лист».";
-
-    if (note) {
-      text = `${text}\n\n${note}`;
-    }
-
-    const linksText = await buildUploadedFilesLinksText(uploadedPaths);
-
-    if (linksText) {
-      text = `${text}\n\n${linksText}`;
-    }
-
-    await send(text, reportHubButtons);
+    await sendUploadNotice(send, {
+      uploadedLabel: "Фото",
+      count,
+      contractNumber: latestHub.contract_number,
+      fallbackId: latestHub.lead_id,
+      mismatchNote: note,
+      uploadedPaths,
+      nextActionText: "Когда закончите — нажмите «Загрузить замерн.лист».",
+      buttons: reportHubButtons
+    });
   });
 } else {
             await send(
@@ -5291,22 +5331,16 @@ return;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
 
-              let text =
-                `Файл(ы) получено (${count})` +
-                dealTagSuffix(latest.contract_number, latest.lead_id) +
-                ". Когда закончите — выберите действие:";
-
-              if (note) {
-                text = `${text}\n\n${note}`;
-              }
-
-              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
-
-              if (linksText) {
-                text = `${text}\n\n${linksText}`;
-              }
-
-              await send(text, measureSheetButtons);
+              await sendUploadNotice(send, {
+                uploadedLabel: "Файл(ы)",
+                count,
+                contractNumber: latest.contract_number,
+                fallbackId: latest.lead_id,
+                mismatchNote: note,
+                uploadedPaths,
+                nextActionText: "Когда закончите — выберите действие:",
+                buttons: measureSheetButtons
+              });
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
@@ -5504,22 +5538,16 @@ return;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
 
-              let text =
-                `Файл(ы) получено (${count})` +
-                dealTagSuffix(latest.contract_number, latest.lead_id) +
-                ". Когда закончите — нажмите «Завершить отчет».";
-
-              if (note) {
-                text = `${text}\n\n${note}`;
-              }
-
-              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
-
-              if (linksText) {
-                text = `${text}\n\n${linksText}`;
-              }
-
-              await send(text, ["Завершить отчет"]);
+              await sendUploadNotice(send, {
+                uploadedLabel: "Файл(ы)",
+                count,
+                contractNumber: latest.contract_number,
+                fallbackId: latest.lead_id,
+                mismatchNote: note,
+                uploadedPaths,
+                nextActionText: "Когда закончите — нажмите «Завершить отчет».",
+                buttons: ["Завершить отчет"]
+              });
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
@@ -5832,22 +5860,16 @@ return;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
 
-              let text =
-                `Файл(ы) получено (${count})` +
-                dealTagSuffix(latest.contract_number, latest.lead_id) +
-                ". Когда закончите — нажмите «Завершить загрузку».";
-
-              if (note) {
-                text = `${text}\n\n${note}`;
-              }
-
-              const linksText = await buildUploadedFilesLinksText(uploadedPaths);
-
-              if (linksText) {
-                text = `${text}\n\n${linksText}`;
-              }
-
-              await send(text, ["Завершить загрузку"]);
+              await sendUploadNotice(send, {
+                uploadedLabel: "Файл(ы)",
+                count,
+                contractNumber: latest.contract_number,
+                fallbackId: latest.lead_id,
+                mismatchNote: note,
+                uploadedPaths,
+                nextActionText: "Когда закончите — нажмите «Завершить загрузку».",
+                buttons: ["Завершить загрузку"]
+              });
             });
           } else if (currentPending.has_uploaded_file) {
             await send(
