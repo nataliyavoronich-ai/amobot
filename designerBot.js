@@ -790,13 +790,16 @@ const FINISH_UPLOAD_LABEL = "✅Завершить загрузку проект
 // До нажатия "Перейти к загрузке проекта" (task.menuUploadStarted === false)
 // видны только сам переход к загрузке и спецрезультаты — независимо от
 // того, что будет дальше (последовательная загрузка или выбор формата,
-// см. getEffectiveListMode/startUploadFlow). Кнопки конкретных файлов и
-// "Завершить загрузку проекта" появляются, только когда task.menuUploadStarted
-// стал true — это бывает только в настоящем menu-режиме (воронки без
-// последовательной загрузки, см. startUploadFlow). В "sequential"-режиме
-// ("Металл"/"Дерево") этот экран вообще не используется — там бот сам ведёт
-// пользователя по шагам без выбора формата (см. startSequentialUpload,
-// runSequentialUpload, askWoodDxfDecision в processUploadBatch).
+// см. getEffectiveListMode/startUploadFlow). После нажатия спецрезультаты
+// (например, "Недостаточно данных"/"Нереализуемо") уже не показываются —
+// на этом экране пользователь либо продолжает выбирать/грузить файлы,
+// либо завершает загрузку. Кнопки конкретных файлов и "Завершить загрузку
+// проекта" появляются, только когда task.menuUploadStarted стал true — это
+// бывает только в настоящем menu-режиме (воронки без последовательной
+// загрузки, см. startUploadFlow). В "sequential"-режиме ("Металл"/"Дерево")
+// этот экран вообще не используется — там бот сам ведёт пользователя по
+// шагам без выбора формата (см. startSequentialUpload, runSequentialUpload,
+// askWoodDxfDecision в processUploadBatch).
 function buildTaskSelectedButtons(ctx, config, task) {
   const item = task.item;
   const buttons = [];
@@ -806,20 +809,20 @@ function buildTaskSelectedButtons(ctx, config, task) {
 
   if (!task.menuUploadStarted) {
     buttons.push(tag("Перейти к загрузке проекта"));
+
+    for (const label of config.specialResults) {
+      buttons.push(tag(label));
+    }
   } else {
     for (const key of config.menuKeys) {
       buttons.push(tag(FILE_TYPE_CONFIGS[key].buttonLabel));
     }
-  }
 
-  for (const label of config.specialResults) {
-    buttons.push(tag(label));
-  }
-
-  // "Завершить загрузку проекта" — последней кнопкой, и только после того,
-  // как загружен хотя бы один файл.
-  if (task.menuUploadStarted && hasUploadedAny) {
-    buttons.push(tag(FINISH_UPLOAD_LABEL));
+    // "Завершить загрузку проекта" — последней кнопкой, и только после
+    // того, как загружен хотя бы один файл.
+    if (hasUploadedAny) {
+      buttons.push(tag(FINISH_UPLOAD_LABEL));
+    }
   }
 
   return buttons;
@@ -1279,7 +1282,7 @@ async function finalizeDesignerTask(ctx, state, userKey, uploadedKeysOrder, resu
     );
 
     if (noteText) {
-      await ctx.addLeadNote(task.lead_id, noteText);
+      await ctx.addLeadNote(task.lead_id, noteText, { pin: false });
     }
   } catch (error) {
     console.error("[Бот проектировщиков] Не удалось добавить примечание о загрузке:", error.message);
@@ -1537,7 +1540,7 @@ async function handlePendingComment(ctx, state, userKey, trimmedText, send) {
   }
 
   try {
-    await ctx.addLeadNote(task.lead_id, comment);
+    await ctx.addLeadNote(task.lead_id, comment, { pin: false });
   } catch (error) {
     console.error("[Бот проектировщиков] Не удалось добавить примечание с комментарием:", error.message);
   }
@@ -1665,7 +1668,7 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     let index = 0;
 
     if (overdue.length > 0) {
-      message += "Просроченные задачи:\n";
+      message += "**Просроченные задачи:**\n\n";
       overdue.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1673,7 +1676,7 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     }
 
     if (current.length > 0) {
-      message += "Актуальные задачи:\n";
+      message += "**Актуальные задачи:**\n\n";
       current.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1891,7 +1894,7 @@ async function runDailyDigest(ctx) {
     let index = 0;
 
     if (overdue.length > 0) {
-      message += "Просроченные задачи:\n";
+      message += "**Просроченные задачи:**\n\n";
       overdue.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1899,7 +1902,7 @@ async function runDailyDigest(ctx) {
     }
 
     if (today.length > 0) {
-      message += "Задачи на сегодня:\n";
+      message += "**Задачи на сегодня:**\n\n";
       today.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -2077,6 +2080,15 @@ async function pollNewTasks(ctx) {
 
 let lastDigestDateText = "";
 
+// Ежедневная рассылка (08:55 МСК) временно отключена: на бесплатном тарифе
+// Render сервис засыпает при отсутствии входящих запросов, из-за чего
+// рассылка ненадёжно доходит до пользователей (см. фикс в самом
+// runDailyDigest/планировщике — код исправен, проблема в хостинге).
+// Функциональность сознательно оставлена в коде нетронутой — просто не
+// запускается. Включить обратно после перехода на платный тариф Render:
+// поставить true.
+const DAILY_DIGEST_ENABLED = false;
+
 function startSchedulers(ctx) {
   loadRegistry(ctx);
   loadSeenTaskIds(ctx);
@@ -2085,24 +2097,37 @@ function startSchedulers(ctx) {
     flushRegistry(ctx);
   }, 10000);
 
-  setInterval(async () => {
-    try {
-      const now = ctx.getMoscowDate();
-      const hh = String(now.getUTCHours()).padStart(2, "0");
-      const mm = String(now.getUTCMinutes()).padStart(2, "0");
-      const dateText = ctx.todayMoscowDateText();
+  if (DAILY_DIGEST_ENABLED) {
+    setInterval(async () => {
+      try {
+        const now = ctx.getMoscowDate();
+        const hh = now.getUTCHours();
+        const mm = now.getUTCMinutes();
+        const dateText = ctx.todayMoscowDateText();
 
-      if (hh === "08" && mm === "55" && lastDigestDateText !== dateText) {
-        lastDigestDateText = dateText;
-        await runDailyDigest(ctx);
+        // Раньше здесь была проверка на ТОЧНОЕ совпадение "08:55" — если в
+        // этот момент процесс не выполнял код (например, Render "усыпил"
+        // бесплатный веб-сервис из-за отсутствия входящих запросов и разбудил
+        // его только позже по следующему вебхуку), проверка срабатывала и
+        // рассылка не уходила вообще, до следующего дня. Теперь вместо
+        // точного совпадения проверяется "уже наступило или прошло 08:55
+        // сегодня, а рассылка за сегодня ещё не отправлялась" — рассылка
+        // уйдёт при первой же возможности после пробуждения процесса, пусть
+        // и с опозданием, вместо того чтобы пропасть на весь день.
+        const isDigestTimeReached = hh > 8 || (hh === 8 && mm >= 55);
+
+        if (isDigestTimeReached && lastDigestDateText !== dateText) {
+          lastDigestDateText = dateText;
+          await runDailyDigest(ctx);
+        }
+      } catch (error) {
+        console.error(
+          "[Бот проектировщиков] Ошибка планировщика ежедневной рассылки:",
+          error.message
+        );
       }
-    } catch (error) {
-      console.error(
-        "[Бот проектировщиков] Ошибка планировщика ежедневной рассылки:",
-        error.message
-      );
-    }
-  }, 30000);
+    }, 30000);
+  }
 
   setInterval(() => {
     pollNewTasks(ctx).catch((error) => {
@@ -2110,7 +2135,11 @@ function startSchedulers(ctx) {
     });
   }, 90000);
 
-  console.log("[Бот проектировщиков] Планировщики (рассылка 08:55, опрос новых задач) запущены.");
+  console.log(
+    "[Бот проектировщиков] Планировщики запущены: рассылка 08:55 — " +
+      (DAILY_DIGEST_ENABLED ? "включена" : "отключена (DAILY_DIGEST_ENABLED = false)") +
+      ", опрос новых задач — включён."
+  );
 }
 
 // ============================================================
