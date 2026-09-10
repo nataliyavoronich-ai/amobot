@@ -696,6 +696,12 @@ function mdLink(label, url) {
   return url ? `*${label}:* ${url}` : `*${label}:* —`;
 }
 
+// amoMessenger в режиме formatting_mode: "md" схлопывает полностью пустую
+// строку ("\n\n") — визуально пропадает пустая строка между задачами и
+// после заголовков разделов. Строка с невидимым символом (zero-width
+// space, U+200B) не считается пустой, и перенос сохраняется.
+const BLANK_LINE = "\n" + "​" + "\n";
+
 // Короткая строка для списков (ежедневная рассылка, список задач одного типа) —
 // показывать только заполненные поля (ТЗ п.6).
 function formatDesignerListLine(ctx, item, index) {
@@ -717,7 +723,7 @@ function formatDesignerListLine(ctx, item, index) {
 
   parts.push(`Ссылка на сделку: ${item.lead_link}`);
 
-  return `${index + 1}. ${parts.join("; ")}\n\n`;
+  return `${index + 1}. ${parts.join("; ")}${BLANK_LINE}`;
 }
 
 // Полная карточка задачи (ТЗ п.8-13) — все поля показываются всегда,
@@ -1664,11 +1670,11 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
 
     state.tasks = orderedItems;
 
-    let message = "🔍 Найдены задачи:\n\n";
+    let message = `🔍 Найдены задачи:${BLANK_LINE}`;
     let index = 0;
 
     if (overdue.length > 0) {
-      message += "**Просроченные задачи:**\n\n";
+      message += `**Просроченные задачи:**${BLANK_LINE}`;
       overdue.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1676,7 +1682,7 @@ async function showDesignerTaskList(ctx, state, userKey, taskTypeId, send) {
     }
 
     if (current.length > 0) {
-      message += "**Актуальные задачи:**\n\n";
+      message += `**Актуальные задачи:**${BLANK_LINE}`;
       current.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1890,11 +1896,11 @@ async function runDailyDigest(ctx) {
       continue;
     }
 
-    let message = `Доброе утро, ${registrant.name}! Вам нужно выполнить следующие задачи:\n\n`;
+    let message = `Доброе утро, ${registrant.name}! Вам нужно выполнить следующие задачи:${BLANK_LINE}`;
     let index = 0;
 
     if (overdue.length > 0) {
-      message += "**Просроченные задачи:**\n\n";
+      message += `**Просроченные задачи:**${BLANK_LINE}`;
       overdue.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
@@ -1902,7 +1908,7 @@ async function runDailyDigest(ctx) {
     }
 
     if (today.length > 0) {
-      message += "**Задачи на сегодня:**\n\n";
+      message += `**Задачи на сегодня:**${BLANK_LINE}`;
       today.forEach((item) => {
         message += formatDesignerListLine(ctx, item, index);
         index++;
