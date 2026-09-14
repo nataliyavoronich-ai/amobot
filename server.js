@@ -1519,19 +1519,17 @@ async function buildUploadedFilesLinksText(filePaths) {
     return "";
   }
 
-  return `Ссылки на загруженные файлы:\n${lines.join("\n")}`;
+  return `Ссылки на файлы:\n${lines.join("\n")}`;
 }
 
 // ============================================================
 // ОТБИВКА О ЗАГРУЗКЕ ФАЙЛОВ — ДВУМЯ ОТДЕЛЬНЫМИ СООБЩЕНИЯМИ
 // ============================================================
-// Первое сообщение: сколько файлов получено + ссылки на них (без кнопок).
+// Первое сообщение: подтверждение загрузки + ссылки на файлы (без кнопок).
 // Второе сообщение: что делать дальше (текст + кнопки следующего шага).
 // Разделены специально — пользователю проще воспринимать ссылки на
 // загруженные файлы отдельно от вопроса "что дальше".
 async function sendUploadNotice(send, {
-  uploadedLabel,
-  count,
   contractNumber,
   fallbackId,
   mismatchNote,
@@ -1540,7 +1538,7 @@ async function sendUploadNotice(send, {
   buttons
 }) {
   let uploadedText =
-    `${uploadedLabel} получено (${count})` +
+    `Файлы загружены` +
     dealTagSuffix(contractNumber, fallbackId) +
     ".";
 
@@ -2859,7 +2857,8 @@ async function searchAndPresentReportMeasurements(send, engineerName) {
     searchFn: () => findReportMeasurementTasks(engineerName),
     emptyMessage: "📋 Задач на загрузку отчета не найдено.",
     formatLine: formatConductMeasurementLine,
-    errorLogLabel: " (Загрузить фотоотчет)"
+    errorLogLabel: " (Загрузить фотоотчет)",
+    listHeader: "Найдены задачи на загрузку отчета"
   });
 }
 
@@ -3071,7 +3070,8 @@ async function runMeasurementSearchAndPresent(send, {
   searchFn,
   emptyMessage,
   formatLine,
-  errorLogLabel
+  errorLogLabel,
+  listHeader
 }) {
   let shouldFinish = true;
 
@@ -3081,7 +3081,7 @@ async function runMeasurementSearchAndPresent(send, {
     if (result.measurements.length === 0) {
       await send(emptyMessage);
     } else {
-      let message = "📋 Найдены замеры:\n\n";
+      let message = `📋 ${listHeader}:\n\n`;
 
       result.measurements.forEach((item, index) => {
         message += formatLine(item, index);
@@ -3115,7 +3115,8 @@ async function searchAndPresentConductMeasurements(send, engineerName) {
     searchFn: () => findConductMeasurementTasks(engineerName),
     emptyMessage: "📋 Замеров для проведения не найдено.",
     formatLine: formatConductMeasurementLine,
-    errorLogLabel: " (Провести замер)"
+    errorLogLabel: " (Провести замер)",
+    listHeader: "Найдены задачи на проведение замера"
   });
 }
 
@@ -4267,7 +4268,7 @@ async function searchAndPresentCorrections(
   }
 
   let message =
-    "📋 Найдены замеры:\n\n";
+    "📋 Найдены задачи на внесение правок:\n\n";
 
   result.measurements.forEach(
     (item, index) => {
@@ -4316,7 +4317,8 @@ async function searchAndPresentMeasurements(send, engineerName) {
     searchFn: () => findMeasurementTasks(engineerName),
     emptyMessage: "📋 Замеров для подтверждения не найдено.",
     formatLine: formatMeasurementLine,
-    errorLogLabel: ""
+    errorLogLabel: "",
+    listHeader: "Найдены задачи на подтверждение замера"
   });
 }
 
@@ -4687,6 +4689,8 @@ async function processUserMessage({
     return;
   }
 
+  await send("Файл(ы) получены, загружаю на Яндекс диск");
+
   // --------------------------------------------------------
   // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
   // --------------------------------------------------------
@@ -4807,7 +4811,6 @@ async function processUserMessage({
               return;
             }
 
-            const count = latest.notice_uploaded_count || 0;
             const note = latest.notice_mismatch_note || "";
             const uploadedPaths = latest.notice_uploaded_paths || [];
 
@@ -4816,8 +4819,6 @@ async function processUserMessage({
             latest.notice_uploaded_paths = [];
 
             await sendUploadNotice(send, {
-              uploadedLabel: "Фото",
-              count,
               contractNumber: latest.contract_number,
               fallbackId: latest.lead_id,
               mismatchNote: note,
@@ -4967,6 +4968,8 @@ async function processUserMessage({
         return;
       }
 
+      await send("Файл(ы) получены, загружаю на Яндекс диск");
+
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ФОТО ОТЧЕТА В ОЧЕРЕДЬ
       // --------------------------------------------------------
@@ -5067,7 +5070,6 @@ if (uploaded > 0) {
       return;
     }
 
-    const count = latestHub.notice_uploaded_count || 0;
     const note = latestHub.notice_mismatch_note || "";
     const uploadedPaths = latestHub.notice_uploaded_paths || [];
 
@@ -5076,8 +5078,6 @@ if (uploaded > 0) {
     latestHub.notice_uploaded_paths = [];
 
     await sendUploadNotice(send, {
-      uploadedLabel: "Фото",
-      count,
       contractNumber: latestHub.contract_number,
       fallbackId: latestHub.lead_id,
       mismatchNote: note,
@@ -5217,6 +5217,8 @@ return;
         return;
       }
 
+      await send("Файл(ы) получены, загружаю на Яндекс диск");
+
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ (по аналогии с фото договора)
       // --------------------------------------------------------
@@ -5323,7 +5325,6 @@ return;
                 return;
               }
 
-              const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
               const uploadedPaths = latest.notice_uploaded_paths || [];
 
@@ -5332,8 +5333,6 @@ return;
               latest.notice_uploaded_paths = [];
 
               await sendUploadNotice(send, {
-                uploadedLabel: "Файл(ы)",
-                count,
                 contractNumber: latest.contract_number,
                 fallbackId: latest.lead_id,
                 mismatchNote: note,
@@ -5434,6 +5433,8 @@ return;
         return;
       }
 
+      await send("Файл(ы) получены, загружаю на Яндекс диск");
+
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ВИДЕО В ОЧЕРЕДЬ
       // --------------------------------------------------------
@@ -5530,7 +5531,6 @@ return;
                 return;
               }
 
-              const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
               const uploadedPaths = latest.notice_uploaded_paths || [];
 
@@ -5539,8 +5539,6 @@ return;
               latest.notice_uploaded_paths = [];
 
               await sendUploadNotice(send, {
-                uploadedLabel: "Файл(ы)",
-                count,
                 contractNumber: latest.contract_number,
                 fallbackId: latest.lead_id,
                 mismatchNote: note,
@@ -5764,6 +5762,8 @@ return;
         return;
       }
 
+      await send("Файл(ы) получены, загружаю на Яндекс диск");
+
       const previousQueue =
         userCorrectionUploadQueue[userKey] || Promise.resolve();
 
@@ -5852,7 +5852,6 @@ return;
                 return;
               }
 
-              const count = latest.notice_uploaded_count || 0;
               const note = latest.notice_mismatch_note || "";
               const uploadedPaths = latest.notice_uploaded_paths || [];
 
@@ -5861,8 +5860,6 @@ return;
               latest.notice_uploaded_paths = [];
 
               await sendUploadNotice(send, {
-                uploadedLabel: "Файл(ы)",
-                count,
                 contractNumber: latest.contract_number,
                 fallbackId: latest.lead_id,
                 mismatchNote: note,
