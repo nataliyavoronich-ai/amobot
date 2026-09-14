@@ -438,8 +438,9 @@ const userEngineerName = {};
 // ------------------------------------------------------------
 
 // После завершения фото договора / "Думает" / "Думает-отказ" / выбора результата КП
-// бот показывает кнопку "Загрузить отчет". Здесь храним сделку,
-// к которой эта кнопка относится, до тех пор пока пользователь её не нажал.
+// бот показывает кнопки "Перейти к загрузке отчета" / "Вернуться к проведению
+// замеров". Здесь храним сделку, к которой эти кнопки относятся, до тех пор
+// пока пользователь не нажмёт одну из них.
 const userPendingReportStart = {};
 
 // Выбранный пользователем замер в сценарии "Загрузить фотоотчет"
@@ -447,7 +448,7 @@ const userPendingReportStart = {};
 const userSelectedReportMeasurement = {};
 
 // Пользователь находится на экране "Загрузите фотоотчет" (после выбора сделки
-// или после нажатия "Загрузить отчет") и видит кнопки
+// или после нажатия "Перейти к загрузке отчета") и видит кнопки
 // "Загрузить замерн.лист" / "Вернуться к списку замеров".
 // Здесь же хранятся пути к папкам сделки на Яндекс.Диске (чтобы не запрашивать
 // их заново на каждом шаге) и счётчик номера следующего файла фотоотчета.
@@ -3184,8 +3185,8 @@ async function waitForResultTask(leadId) {
 
 // Показывается после загрузки фото договора и после веток
 // "Думает (свяжусь сам)" / "Думает/отказ (передать менеджеру)" /
-// выбора результата по КП — предлагает Загрузить отчет
-// и замерного листа по этой же сделке.
+// выбора результата по КП — предлагает перейти к загрузке отчета
+// и замерного листа по этой же сделке либо вернуться к проведению замеров.
 async function offerReportStart(send, userKey, leadId, contractNumber) {
   userPendingReportStart[userKey] = {
     lead_id: leadId,
@@ -3193,8 +3194,14 @@ async function offerReportStart(send, userKey, leadId, contractNumber) {
   };
 
   await send(
-    `Загрузите отчет и замерный лист${dealTagSuffix(contractNumber, leadId)}`,
-    ["Загрузить отчет"]
+    "Перейти к загрузке отчета или вернуться к проведению замеров",
+    [
+      buildTaggedButton(
+        "Перейти к загрузке отчета",
+        buildDealTag(contractNumber, leadId)
+      ),
+      "Вернуться к проведению замеров"
+    ]
   );
 }
 
@@ -3211,7 +3218,8 @@ async function enterReportHub(
   userKey,
   leadId,
   reportTaskId,
-  contractNumber
+  contractNumber,
+  { showReturnToListButton = true } = {}
 ) {
   try {
     const lead = await getLead(leadId);
@@ -3252,7 +3260,7 @@ async function enterReportHub(
 
     await send(
   `Загрузите фото замера${dealTagSuffix(contractNumber, leadId)}`,
-  ["Вернуться к списку замеров"]
+  showReturnToListButton ? ["Вернуться к списку замеров"] : undefined
 );
   } catch (error) {
     console.error(
@@ -6899,11 +6907,16 @@ return;
   }
 
   // ------------------------------------------------------
-  // Загрузить отчет
+  // Перейти к загрузке отчета
   // (кнопка после фото договора / "Думает" / выбора по КП)
   // ------------------------------------------------------
 
-  if (trimmedText === "Загрузить отчет") {
+  const startReportTagId = parseTaggedButton(
+    trimmedText,
+    "Перейти к загрузке отчета"
+  );
+
+  if (startReportTagId !== null) {
     const stored = userPendingReportStart[userKey];
 
     if (!stored) {
@@ -6943,8 +6956,42 @@ return;
       userKey,
       stored.lead_id,
       Number(reportTask.id),
-      stored.contract_number
+      stored.contract_number,
+      { showReturnToListButton: false }
     );
+
+    return;
+  }
+
+  // ------------------------------------------------------
+  // Вернуться к проведению замеров
+  // (кнопка после фото договора / "Думает" / выбора по КП)
+  // ------------------------------------------------------
+
+  if (trimmedText === "Вернуться к проведению замеров") {
+    delete userPendingReportStart[userKey];
+
+    if (!currentEngineerName) {
+      await send(
+        "⚠️ Не удалось определить пользователя. " +
+          "Перезапустите бота командой /старт."
+      );
+
+      return;
+    }
+
+    userLastSearchMode[userKey] = "conduct";
+
+    await send(
+      "⏳ Проверяю задачи на проведение замера..."
+    );
+
+    const shouldFinish =
+      await searchAndPresentConductMeasurements(send, currentEngineerName);
+
+    if (shouldFinish) {
+      await finish();
+    }
 
     return;
   }
