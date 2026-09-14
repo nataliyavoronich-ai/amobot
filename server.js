@@ -4944,7 +4944,10 @@ async function processUserMessage({
       return;
     }
 
-    if (trimmedText === "Загрузить замерн.лист") {
+    if (
+      trimmedText === "Загрузить замерн.лист" ||
+      trimmedText === "Перейти к загрузке замерного листа"
+    ) {
       try {
         const dateText = todayMoscowDateText();
 
@@ -5133,8 +5136,8 @@ if (uploaded > 0) {
             await send(
               "❌ Не удалось сохранить фото на Яндекс.Диске" +
                 dealTagSuffix(currentHub.contract_number, currentHub.lead_id) +
-                ". Попробуйте ещё раз.",
-              reportHubButtons
+                ". Загрузите файл(ы) повторно или перейдите к загрузке замерного листа.",
+              ["Перейти к загрузке замерного листа", "Вернуться к списку замеров"]
             );
           }
         });
@@ -5171,7 +5174,9 @@ return;
   if (pendingMeasureSheet) {
     // Пользователь нажал одну из двух кнопок завершения загрузки.
 
-    const isGoToVideoButton = trimmedText === "Загрузить видео";
+    const isGoToVideoButton =
+      trimmedText === "Загрузить видео" ||
+      trimmedText === "Перейти к загрузке видео";
     const isFinishReportButton = trimmedText === "Завершить отчет";
 
     if (isGoToVideoButton || isFinishReportButton) {
@@ -5391,8 +5396,8 @@ return;
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске" +
                 dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
-                ". Попробуйте ещё раз или выберите действие:",
-              measureSheetButtons
+                ". Загрузите файл(ы) повторно или перейдите к загрузке видео.",
+              ["Перейти к загрузке видео", "Завершить отчет"]
             );
           } else {
             currentPending.notice_received_sent = false;
