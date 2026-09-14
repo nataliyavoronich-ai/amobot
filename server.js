@@ -3080,6 +3080,7 @@ async function runMeasurementSearchAndPresent(send, {
 
     if (result.measurements.length === 0) {
       await send(emptyMessage);
+      await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
     } else {
       let message = `📋 ${listHeader}:\n\n`;
 
@@ -4263,6 +4264,8 @@ async function searchAndPresentCorrections(
     await send(
       "Задач на внесение правок не найдено"
     );
+
+    await send(MAIN_MENU_TEXT, MAIN_MENU_BUTTONS);
 
     return true;
   }
