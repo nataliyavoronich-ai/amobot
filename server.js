@@ -5086,8 +5086,7 @@ async function processUserMessage({
           }
 
          const reportHubButtons = [
-  "Загрузить замерн.лист",
-  "Вернуться к списку замеров"
+  "Загрузить замерн.лист"
 ];
 
 const mismatchNote = buildKindMismatchNote(invalidFiles, ["photo"]);
