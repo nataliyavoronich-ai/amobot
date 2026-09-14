@@ -1524,32 +1524,18 @@ async function buildUploadedFilesLinksText(filePaths) {
 }
 
 // ============================================================
-// ОТБИВКА "ФАЙЛ(Ы) ПОЛУЧЕНЫ" — ОДНО СООБЩЕНИЕ НА ВСЮ ПАЧКУ ФАЙЛОВ
-// ============================================================
-// Если пользователь присылает несколько файлов несколькими подряд
-// идущими сообщениями (как и с итоговой отбивкой о загрузке — см.
-// scheduleUploadNotice ниже), отбивка "получены, загружаю" должна
-// прийти только один раз на всю пачку, а не на каждое сообщение с
-// файлом. pendingState — тот же объект состояния, что хранится в
-// соответствующей userPending*Upload/userPendingReportHub карте
-// (передаётся по ссылке, поэтому флаг сохраняется между вызовами).
-async function sendReceivedNoticeIfNeeded(send, pendingState) {
-  if (pendingState.notice_received_sent) {
-    return;
-  }
-
-  pendingState.notice_received_sent = true;
-
-  await send("Файл(ы) получены, загружаю на Яндекс диск");
-}
-
-// ============================================================
 // ОТБИВКА О ЗАГРУЗКЕ ФАЙЛОВ — ДВУМЯ ОТДЕЛЬНЫМИ СООБЩЕНИЯМИ
 // ============================================================
-// Первое сообщение: подтверждение загрузки + ссылки на файлы (без кнопок).
-// Второе сообщение: что делать дальше (текст + кнопки следующего шага).
-// Разделены специально — пользователю проще воспринимать ссылки на
-// загруженные файлы отдельно от вопроса "что дальше".
+// Если пользователь присылает несколько файлов несколькими подряд
+// идущими сообщениями (каждое — отдельный вебхук amoMessenger), вся
+// отбивка (и "получены, загружаю", и итоговое сообщение со ссылками)
+// должна прийти только один раз на всю пачку, а не на каждое сообщение
+// с файлом. Поэтому обе части отправляются отсюда — из отложенного
+// ("схлопнутого") коллбэка scheduleUploadNotice (см. ниже), который
+// срабатывает только после того, как вся пачка файлов получена.
+// Первое сообщение: подтверждение получения (без кнопок).
+// Второе сообщение: подтверждение загрузки + ссылки на файлы (без кнопок).
+// Третье сообщение: что делать дальше (текст + кнопки следующего шага).
 async function sendUploadNotice(send, {
   contractNumber,
   fallbackId,
@@ -1558,6 +1544,8 @@ async function sendUploadNotice(send, {
   nextActionText,
   buttons
 }) {
+  await send("Файл(ы) получены, загружаю на Яндекс диск");
+
   let uploadedText =
     `Файлы загружены` +
     dealTagSuffix(contractNumber, fallbackId) +
@@ -4724,8 +4712,6 @@ async function processUserMessage({
     return;
   }
 
-  await sendReceivedNoticeIfNeeded(send, pendingPhoto);
-
   // --------------------------------------------------------
   // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ
   // --------------------------------------------------------
@@ -4852,7 +4838,6 @@ async function processUserMessage({
             latest.notice_uploaded_count = 0;
             latest.notice_mismatch_note = "";
             latest.notice_uploaded_paths = [];
-            latest.notice_received_sent = false;
 
             await sendUploadNotice(send, {
               contractNumber: latest.contract_number,
@@ -4864,8 +4849,6 @@ async function processUserMessage({
             });
           });
         } else if (currentPendingPhoto.has_uploaded_photo) {
-           currentPendingPhoto.notice_received_sent = false;
-
            await send(
             "❌ Не удалось сохранить фото на Яндекс.Диске" +
             dealTagSuffix(
@@ -4877,8 +4860,6 @@ async function processUserMessage({
             ["Готово"]
           );
         } else {
-          currentPendingPhoto.notice_received_sent = false;
-
           await send(
             "❌ Не удалось сохранить фото на Яндекс.Диске. " +
             "Попробуйте загрузить его ещё раз."
@@ -5011,8 +4992,6 @@ async function processUserMessage({
         return;
       }
 
-      await sendReceivedNoticeIfNeeded(send, pendingReportHub);
-
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ФОТО ОТЧЕТА В ОЧЕРЕДЬ
       // --------------------------------------------------------
@@ -5118,7 +5097,6 @@ if (uploaded > 0) {
     latestHub.notice_uploaded_count = 0;
     latestHub.notice_mismatch_note = "";
     latestHub.notice_uploaded_paths = [];
-    latestHub.notice_received_sent = false;
 
     await sendUploadNotice(send, {
       contractNumber: latestHub.contract_number,
@@ -5130,8 +5108,6 @@ if (uploaded > 0) {
     });
   });
 } else {
-            currentHub.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить фото на Яндекс.Диске" +
                 dealTagSuffix(currentHub.contract_number, currentHub.lead_id) +
@@ -5264,8 +5240,6 @@ return;
         return;
       }
 
-      await sendReceivedNoticeIfNeeded(send, pendingMeasureSheet);
-
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ В ОЧЕРЕДЬ (по аналогии с фото договора)
       // --------------------------------------------------------
@@ -5378,7 +5352,6 @@ return;
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
-              latest.notice_received_sent = false;
 
               await sendUploadNotice(send, {
                 contractNumber: latest.contract_number,
@@ -5390,8 +5363,6 @@ return;
               });
             });
           } else if (currentPending.has_uploaded_file) {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске" +
                 dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
@@ -5399,8 +5370,6 @@ return;
               ["Перейти к загрузке видео", "Завершить отчет"]
             );
           } else {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
                 "Попробуйте загрузить его ещё раз."
@@ -5484,8 +5453,6 @@ return;
 
         return;
       }
-
-      await sendReceivedNoticeIfNeeded(send, pendingVideo);
 
       // --------------------------------------------------------
       // СТАВИМ ЗАГРУЗКУ ВИДЕО В ОЧЕРЕДЬ
@@ -5589,7 +5556,6 @@ return;
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
-              latest.notice_received_sent = false;
 
               await sendUploadNotice(send, {
                 contractNumber: latest.contract_number,
@@ -5601,8 +5567,6 @@ return;
               });
             });
           } else if (currentPending.has_uploaded_file) {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске" +
                 dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
@@ -5610,8 +5574,6 @@ return;
               ["Завершить отчет"]
             );
           } else {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
                 "Попробуйте загрузить его ещё раз."
@@ -5819,8 +5781,6 @@ return;
         return;
       }
 
-      await sendReceivedNoticeIfNeeded(send, pendingCorrectionUpload);
-
       const previousQueue =
         userCorrectionUploadQueue[userKey] || Promise.resolve();
 
@@ -5915,7 +5875,6 @@ return;
               latest.notice_uploaded_count = 0;
               latest.notice_mismatch_note = "";
               latest.notice_uploaded_paths = [];
-              latest.notice_received_sent = false;
 
               await sendUploadNotice(send, {
                 contractNumber: latest.contract_number,
@@ -5927,8 +5886,6 @@ return;
               });
             });
           } else if (currentPending.has_uploaded_file) {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске" +
                 dealTagSuffix(currentPending.contract_number, currentPending.lead_id) +
@@ -5936,8 +5893,6 @@ return;
               ["Завершить загрузку"]
             );
           } else {
-            currentPending.notice_received_sent = false;
-
             await send(
               "❌ Не удалось сохранить файл на Яндекс.Диске. " +
                 "Попробуйте загрузить его ещё раз."
