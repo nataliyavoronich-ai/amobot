@@ -1544,7 +1544,7 @@ async function sendUploadNotice(send, {
   nextActionText,
   buttons
 }) {
-  await send("Файл(ы) получены, загружаю на Яндекс диск");
+  await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
 
   let uploadedText =
     `Файлы загружены` +
@@ -3216,7 +3216,7 @@ async function enterReportHub(
       throw new Error("Сделка не найдена");
     }
 
-    await send("Проверяю папку на яндекс диске...");
+    await send("⏳ Проверяю папку на яндекс диске...");
 
     const folders = await ensureLeadYandexFolders(lead);
 
@@ -4220,7 +4220,7 @@ async function startCorrectionUpload(
 
     const folderPath = folders[config.folderKey];
 
-    await send("Проверяю папку на яндекс диске...");
+    await send("⏳ Проверяю папку на яндекс диске...");
 
     await ensureSingleLeadFolder(folders.reportsPath, folderPath);
 
@@ -6589,7 +6589,7 @@ if (
 
     let folders;
 
-    await send("Проверяю папку на яндекс диске...");
+    await send("⏳ Проверяю папку на яндекс диске...");
 
     try {
       const lead = await getLead(stored.lead_id);
