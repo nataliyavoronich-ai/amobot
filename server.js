@@ -3200,6 +3200,8 @@ async function enterReportHub(
       throw new Error("Сделка не найдена");
     }
 
+    await send("Проверяю папку на яндекс диске...");
+
     const folders = await ensureLeadYandexFolders(lead);
 
     const dateText = todayMoscowDateText();
@@ -4201,6 +4203,8 @@ async function startCorrectionUpload(
     const folders = buildLeadYandexFolderPaths(leadId);
 
     const folderPath = folders[config.folderKey];
+
+    await send("Проверяю папку на яндекс диске...");
 
     await ensureSingleLeadFolder(folders.reportsPath, folderPath);
 
@@ -6574,6 +6578,8 @@ if (
     }
 
     let folders;
+
+    await send("Проверяю папку на яндекс диске...");
 
     try {
       const lead = await getLead(stored.lead_id);
