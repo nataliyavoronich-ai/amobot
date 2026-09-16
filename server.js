@@ -5674,6 +5674,8 @@ return;
     if (trimmedText === "Без изменений") {
       delete userPendingEmailEdit[userKey];
 
+      await send("Принято. ⏳ Ищу другие задачи на проведение замера...");
+
       await returnToReportList(send, finish, userKey, currentEngineerName);
 
       return;
@@ -5717,6 +5719,8 @@ return;
     await send("Правки внесены");
 
     delete userPendingEmailEdit[userKey];
+
+    await send("Принято. ⏳ Ищу другие задачи на проведение замера...");
 
     await returnToReportList(send, finish, userKey, currentEngineerName);
 
