@@ -2251,6 +2251,25 @@ function init(app, ctx) {
     });
   });
 
+  // ВРЕМЕННЫЙ ЭНДПОИНТ (по аналогии с /debug/tokens в server.js) — дамп
+  // реестра amoMessenger-пользователей проектировщиков для диагностики
+  // ошибочной доставки уведомлений не по адресу.
+  app.get("/debug/project/registry", (req, res) => {
+    const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
+
+    if (!DEBUG_SECRET) {
+      return res.status(500).send(
+        "DEBUG_SECRET не задан в Environment Variables. Задайте его, чтобы использовать этот эндпоинт."
+      );
+    }
+
+    if (req.query.secret !== DEBUG_SECRET) {
+      return res.status(403).send("Forbidden");
+    }
+
+    res.json({ registry, registryLoaded });
+  });
+
   // Отдельный webhook-маршрут для отдельного amoMessenger-приложения —
   // гарантирует, что события бота проектировщиков не попадают в
   // обработчик бота инженеров ("/") и наоборот (ТЗ п.2.4).
