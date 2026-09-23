@@ -221,7 +221,7 @@ const TASK_TYPE_CONFIG = {
     // ошибочно использовались productionDwg/productionPdf.
     sequenceKeys: ["approvalDwg", "approvalPdf"],
     menuKeys: ["approvalDwg", "approvalPdf"],
-    specialResults: ["Не хватает информации", "Нереализуемо"],
+    specialResults: ["Недостаточно данных", "Нереализуемо"],
     requireAllForFinish: false
   },
   [SHOP_CORRECTION_TASK_TYPE_ID]: {
