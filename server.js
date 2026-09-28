@@ -3171,11 +3171,33 @@ async function waitForResultTask(leadId) {
   return waitForTaskOfType(leadId, RESULT_TASK_TYPE_ID);
 }
 
+async function waitForReportTask(leadId) {
+  return waitForTaskOfType(leadId, REPORT_TASK_TYPE_ID);
+}
+
 // Показывается после загрузки фото договора и после веток
 // "Думает (свяжусь сам)" / "Думает/отказ (передать менеджеру)" /
-// выбора результата по КП — предлагает перейти к загрузке отчета
-// и замерного листа по этой же сделке либо вернуться к проведению замеров.
-async function offerReportStart(send, userKey, leadId, contractNumber) {
+// выбора результата по КП — ждёт, пока в сделке появится задача
+// "Загруз. отчет(и)" (её ставит Sensei после закрытия текущей задачи),
+// и только затем предлагает перейти к загрузке отчета и замерного листа
+// по этой же сделке либо вернуться к проведению замеров.
+async function offerReportStart(send, finish, userKey, leadId, contractNumber) {
+  await send("⏳ Ожидаю, пока в сделке появится следующая задача...");
+
+  const reportTask = await waitForReportTask(leadId);
+
+  if (!reportTask) {
+    await send(
+      "❌ Не дождался появления задачи «Загруз. отчет(и)» в сделке " +
+        "(прошло 30 секунд). Проверьте сделку в amoCRM вручную " +
+        "или обратитесь к администратору."
+    );
+
+    await finish();
+
+    return;
+  }
+
   userPendingReportStart[userKey] = {
     lead_id: leadId,
     contract_number: contractNumber
@@ -4585,6 +4607,7 @@ async function processUserMessage({
 
     await offerReportStart(
       send,
+      finish,
       userKey,
       thinkingLeadId,
       thinkingContractNumber
@@ -4682,6 +4705,7 @@ async function processUserMessage({
 
       await offerReportStart(
         send,
+        finish,
         userKey,
         finishedLeadId,
         finishedContractNumber
@@ -6861,6 +6885,7 @@ return;
 
     await offerReportStart(
       send,
+      finish,
       userKey,
       stored.lead_id,
       stored.contract_number
