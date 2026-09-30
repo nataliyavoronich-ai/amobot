@@ -643,7 +643,12 @@ define(["jquery"], function ($) {
       headers.forEach(function (h) {
         $thead
           .find("tr")
-          .append('<th style="text-align:left;border-bottom:1px solid #ccc;padding:6px;">' + h + "</th>");
+          .append(
+            '<th style="text-align:left;border:1px solid #ccc;padding:6px;color:#333;' +
+              'background:#f7f7f7;">' +
+              h +
+              "</th>"
+          );
       });
 
       $table.append($thead);
@@ -883,13 +888,6 @@ define(["jquery"], function ($) {
         renderReadinessMatrixTable();
       });
 
-      var $addStatusBtn = $(
-        '<div style="margin-top:4px;cursor:pointer;color:#2d7ff9;">Добавить статус</div>'
-      ).on("click", function () {
-        matrix.statusIds.push(null);
-        renderReadinessMatrixTable();
-      });
-
       function currentProductField() {
         return liveData.fields.filter(function (f) {
           return f.id === matrix.productFieldId;
@@ -906,12 +904,10 @@ define(["jquery"], function ($) {
             '<div style="color:#999;">Выберите поле «Продукт», чтобы добавлять строки.</div>'
           );
           $addProductBtn.hide();
-          $addStatusBtn.hide();
           return;
         }
 
         $addProductBtn.show();
-        $addStatusBtn.show();
 
         var usedProductIds = matrix.products
           .map(function (p) {
@@ -957,6 +953,16 @@ define(["jquery"], function ($) {
           $th.append($select).append($delete);
           $headRow.append($th);
         });
+
+        var $addStatusTh = $(
+          '<th style="padding:6px;white-space:nowrap;"><span style="cursor:pointer;color:#2d7ff9;">' +
+            "Добавить статус</span></th>"
+        ).on("click", function () {
+          matrix.statusIds.push(null);
+          renderReadinessMatrixTable();
+        });
+
+        $headRow.append($addStatusTh);
 
         $table.append($("<thead></thead>").append($headRow));
 
@@ -1042,7 +1048,6 @@ define(["jquery"], function ($) {
       renderReadinessMatrixTable();
 
       $tab.append($addProductBtn);
-      $tab.append($addStatusBtn);
 
       return $tab;
     }
@@ -1093,7 +1098,7 @@ define(["jquery"], function ($) {
         '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
           'border-bottom:2px solid #ddd;margin-bottom:20px;padding-bottom:4px;font-size:15px;"></div>'
       );
-      var $tabBody = $('<div class="production-widget__tab-body"></div>');
+      var $tabBody = $('<div class="production-widget__tab-body"></div>').css({ "padding-top": "12px" });
 
       TABS.forEach(function (tab) {
         var $tabBtn = $(
@@ -1208,7 +1213,7 @@ define(["jquery"], function ($) {
           // собственного явного color, из-за чего заголовки/подписи
           // пропадали визуально, хотя реально присутствовали в DOM.
           $root = $('<div class="production-widget"></div>').css({
-            "margin-top": "80px",
+            "margin-top": "120px",
             "padding-top": "8px",
             color: "#333",
             "font-size": "13px"
@@ -1216,7 +1221,19 @@ define(["jquery"], function ($) {
 
           $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
 
-          $target.empty().append($root);
+          // Общая разметка таблиц виджета (сетка ячеек) — общий <style>,
+          // вынесенный ЗА пределы $root, т.к. renderShell() делает
+          // $root.empty() при каждом переключении вкладки/сохранении, а
+          // этот стиль должен переживать такие перерисовки.
+          var $style = $(
+            "<style>" +
+              ".production-widget table { border-collapse: collapse; }" +
+              ".production-widget table th, .production-widget table td {" +
+              " border: 1px solid #ccc; color: #333; }" +
+              "</style>"
+          );
+
+          $target.empty().append($style).append($root);
 
           $.when(loadAllLiveData(), loadSettings()).then(
             function (liveResult, loadedSettings) {
