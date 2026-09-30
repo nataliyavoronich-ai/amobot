@@ -432,7 +432,7 @@ define(["jquery"], function ($) {
           entries.forEach(function (entry, idx) {
             var $row = $('<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"></div>');
 
-            var $input = $('<input type="text" placeholder="@username" />')
+            var $input = $('<input type="text" placeholder="Имя в amoMessenger" />')
               .css({ flex: 1 })
               .val(entry.handle || "")
               .on("change input", function () {
@@ -766,7 +766,7 @@ define(["jquery"], function ($) {
     function renderShell() {
       $root.empty();
 
-      var $layout = $('<div style="display:flex;"></div>');
+      var $layout = $('<div style="display:flex;padding:16px 0;"></div>');
 
       // Левый список ботов — сейчас работает только "Производство".
       // "Монтажники" — задел на будущий бот (см. план Фазы 1), пункт
@@ -785,7 +785,10 @@ define(["jquery"], function ($) {
 
       var $content = $('<div style="flex:1;min-width:0;"></div>');
 
-      var $tabsBar = $('<div style="display:flex;gap:16px;border-bottom:1px solid #ddd;margin-bottom:16px;"></div>');
+      var $tabsBar = $(
+        '<div style="display:flex;gap:24px;border-bottom:2px solid #ddd;' +
+          'margin-bottom:20px;padding-bottom:0;font-size:15px;"></div>'
+      );
       var $tabBody = $('<div class="production-widget__tab-body"></div>');
 
       TABS.forEach(function (tab) {
@@ -896,7 +899,10 @@ define(["jquery"], function ($) {
             return true;
           }
 
-          $root = $('<div class="production-widget"></div>');
+          $root = $('<div class="production-widget"></div>').css({
+            "margin-top": "32px",
+            "padding-top": "8px"
+          });
 
           $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
 
