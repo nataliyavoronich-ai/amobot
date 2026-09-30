@@ -272,18 +272,20 @@ define(["jquery"], function ($) {
     // (productionBot.js: validateProductionWidgetSettings) — именно её
     // результат блокирует реальное сохранение.
     function validateClientSide(settings) {
-      var activeUserIds = {};
+      var activeHandles = {};
 
       for (var i = 0; i < ROLE_DEFS.length; i++) {
         var entries = settings.roles[ROLE_DEFS[i].key] || [];
 
         for (var j = 0; j < entries.length; j++) {
-          if (entries[j].active) {
-            if (activeUserIds[entries[j].userId]) {
+          var handle = (entries[j].handle || "").trim();
+
+          if (entries[j].active && handle) {
+            if (activeHandles[handle]) {
               return "Один пользователь не может одновременно состоять в двух активных ролях.";
             }
 
-            activeUserIds[entries[j].userId] = true;
+            activeHandles[handle] = true;
           }
         }
       }
@@ -392,20 +394,6 @@ define(["jquery"], function ($) {
       return html;
     }
 
-    function userOptionsHtml(excludeIds) {
-      var html = '<option value="">— выбрать пользователя —</option>';
-
-      liveData.users.forEach(function (u) {
-        if (excludeIds && excludeIds.indexOf(u.id) !== -1) {
-          return;
-        }
-
-        html += '<option value="' + u.id + '">' + escapeHtml(u.name) + "</option>";
-      });
-
-      return html;
-    }
-
     function escapeHtml(text) {
       return String(text == null ? "" : text)
         .replace(/&/g, "&amp;")
@@ -418,6 +406,12 @@ define(["jquery"], function ($) {
     // ВКЛАДКА "РОЛИ"
     // ------------------------------------------------------------
 
+    // Роли назначаются по имени пользователя amoMessenger (например,
+    // "@nataliya_voronich"), а НЕ по пользователю amoCRM — это два разных
+    // списка людей, и список amoMessenger-пользователей браузер напрямую
+    // получить не может (отдельный сервис, нужен токен бота, а не сессия
+    // администратора amoCRM). Поэтому имя вводится вручную текстом —
+    // администратор копирует его из мессенджера.
     function renderRolesTab() {
       var $tab = $('<div class="production-widget__roles"></div>');
       $tab.css({ display: "flex", gap: "32px", flexWrap: "wrap" });
@@ -436,15 +430,16 @@ define(["jquery"], function ($) {
           $list.empty();
 
           entries.forEach(function (entry, idx) {
-            var user = liveData.users.filter(function (u) {
-              return u.id === entry.userId;
-            })[0];
-
             var $row = $('<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"></div>');
 
-            $row.append(
-              '<span style="flex:1;">' + escapeHtml(user ? user.name : "#" + entry.userId) + "</span>"
-            );
+            var $input = $('<input type="text" placeholder="@username" />')
+              .css({ flex: 1 })
+              .val(entry.handle || "")
+              .on("change input", function () {
+                entry.handle = $(this).val();
+              });
+
+            $row.append($input);
 
             var $checkbox = $(
               '<input type="checkbox"' + (entry.active ? " checked" : "") + " />"
@@ -457,7 +452,7 @@ define(["jquery"], function ($) {
             var $delete = $('<span style="cursor:pointer;color:#c0392b;" title="Удалить">🗑</span>').on(
               "click",
               function () {
-                if (window.confirm("Удалить пользователя «" + (user ? user.name : entry.userId) + "» из роли «" + role.label + "»?")) {
+                if (window.confirm("Удалить «" + (entry.handle || "") + "» из роли «" + role.label + "»?")) {
                   entries.splice(idx, 1);
                   renderList();
                 }
@@ -474,33 +469,15 @@ define(["jquery"], function ($) {
 
         $col.append($list);
 
-        var $addRow = $('<div style="margin-top:8px;"></div>');
-        var $select = $("<select></select>").css({ width: "100%", marginBottom: "4px" });
-
-        function refreshAddSelect() {
-          var excludeIds = entries.map(function (e) {
-            return e.userId;
-          });
-
-          $select.html(userOptionsHtml(excludeIds));
-        }
-
-        refreshAddSelect();
-
-        var $addBtn = $('<button type="button">+ Добавить пользователя</button>').on("click", function () {
-          var userId = Number($select.val());
-
-          if (!userId) {
-            return;
+        var $addBtn = $('<div style="margin-top:8px;cursor:pointer;color:#2d7ff9;">+ Добавить пользователя</div>').on(
+          "click",
+          function () {
+            entries.push({ handle: "", active: true });
+            renderList();
           }
+        );
 
-          entries.push({ userId: userId, active: true });
-          refreshAddSelect();
-          renderList();
-        });
-
-        $addRow.append($select).append($addBtn);
-        $col.append($addRow);
+        $col.append($addBtn);
 
         $tab.append($col);
       });

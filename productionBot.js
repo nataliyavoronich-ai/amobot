@@ -232,7 +232,11 @@ function validateProductionWidgetSettings(settings) {
     return { valid: false, error: "Не заполнен раздел «Роли».", field: "roles" };
   }
 
-  const activeUserIds = new Set();
+  // Роли назначаются по имени пользователя amoMessenger (свободный текст,
+  // например "@nataliya_voronich"), а не по id пользователя amoCRM — это
+  // разные системы, и живой список пользователей amoMessenger браузер
+  // виджета получить не может.
+  const activeHandles = new Set();
 
   for (const roleKey of KNOWN_ROLE_KEYS) {
     const entries = roles[roleKey];
@@ -250,16 +254,18 @@ function validateProductionWidgetSettings(settings) {
     }
 
     for (const entry of entries) {
-      if (!entry || !isPositiveInteger(entry.userId)) {
+      const handle = entry && typeof entry.handle === "string" ? entry.handle.trim() : "";
+
+      if (!handle) {
         return {
           valid: false,
-          error: `В роли «${roleKey}» указан некорректный пользователь.`,
+          error: `В роли «${roleKey}» указан пустой пользователь — заполните имя или удалите строку.`,
           field: `roles.${roleKey}`
         };
       }
 
       if (entry.active) {
-        if (activeUserIds.has(entry.userId)) {
+        if (activeHandles.has(handle)) {
           return {
             valid: false,
             error: "Один пользователь не может одновременно состоять в двух активных ролях.",
@@ -267,7 +273,7 @@ function validateProductionWidgetSettings(settings) {
           };
         }
 
-        activeUserIds.add(entry.userId);
+        activeHandles.add(handle);
       }
     }
   }
