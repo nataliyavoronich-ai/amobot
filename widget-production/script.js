@@ -293,12 +293,26 @@ define(["jquery"], function ($) {
       for (var k = 0; k < settings.statusFieldMap.length; k++) {
         var row = settings.statusFieldMap[k];
 
-        if (!row.botStatus) {
-          return "Не для всех статусов указан статус бота (Исполнение/Распределение).";
+        if (!row.amoStatusId || !row.botStatus) {
+          return "В таблице есть незаполненные данные";
         }
       }
 
-      var cells = (settings.readinessMatrix && settings.readinessMatrix.cells) || {};
+      var matrix = settings.readinessMatrix || {};
+
+      for (var p = 0; p < (matrix.products || []).length; p++) {
+        if (!matrix.products[p].enumId) {
+          return "В таблице есть незаполненные данные";
+        }
+      }
+
+      for (var s = 0; s < (matrix.statusIds || []).length; s++) {
+        if (!matrix.statusIds[s]) {
+          return "В таблице есть незаполненные данные";
+        }
+      }
+
+      var cells = matrix.cells || {};
 
       for (var cellKey in cells) {
         if (Object.prototype.hasOwnProperty.call(cells, cellKey)) {
@@ -404,6 +418,114 @@ define(["jquery"], function ($) {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;");
+    }
+
+    // ------------------------------------------------------------
+    // КАСТОМНОЕ ОКНО ПОДТВЕРЖДЕНИЯ "ДА/НЕТ" (вместо системного confirm)
+    // ------------------------------------------------------------
+
+    var $confirmOverlay = null;
+
+    function showConfirmDialog(message, onYes) {
+      if ($confirmOverlay) {
+        $confirmOverlay.remove();
+      }
+
+      $confirmOverlay = $(
+        '<div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.35);' +
+          'z-index:1000;display:flex;align-items:center;justify-content:center;"></div>'
+      );
+
+      var $box = $(
+        '<div style="background:#fff;border-radius:6px;padding:20px 24px;max-width:360px;' +
+          'box-shadow:0 4px 20px rgba(0,0,0,0.25);color:#333;font-size:14px;"></div>'
+      );
+
+      $box.append('<div style="margin-bottom:16px;">' + escapeHtml(message) + "</div>");
+
+      var $btnRow = $('<div style="display:flex;gap:12px;justify-content:flex-end;"></div>');
+
+      var $yesBtn = $(
+        '<button type="button" style="padding:6px 16px;background:#2d7ff9;color:#fff;' +
+          'border:none;border-radius:4px;cursor:pointer;">Да</button>'
+      ).on("click", function () {
+        $confirmOverlay.remove();
+        $confirmOverlay = null;
+        onYes();
+      });
+
+      var $noBtn = $(
+        '<button type="button" style="padding:6px 16px;background:#eee;color:#333;' +
+          'border:none;border-radius:4px;cursor:pointer;">Нет</button>'
+      ).on("click", function () {
+        $confirmOverlay.remove();
+        $confirmOverlay = null;
+      });
+
+      $btnRow.append($noBtn).append($yesBtn);
+      $box.append($btnRow);
+      $confirmOverlay.append($box);
+
+      $("body").append($confirmOverlay);
+    }
+
+    // ------------------------------------------------------------
+    // ПОЛЕ ВЫБОРА С ПОИСКОМ ПО НАЗВАНИЮ (input + datalist, без сторонних
+    // библиотек — по требованию "должен работать поиск по названию поля")
+    // ------------------------------------------------------------
+
+    var searchableFieldPickerCounter = 0;
+
+    function buildSearchableFieldPicker(selectedId, allowedTypes, onChange) {
+      searchableFieldPickerCounter++;
+
+      var listId = "production-widget-field-list-" + searchableFieldPickerCounter;
+
+      var options = liveData.fields.filter(function (f) {
+        return !allowedTypes || !allowedTypes.length || allowedTypes.indexOf(f.type) !== -1;
+      });
+
+      var selectedField = options.filter(function (f) {
+        return String(f.id) === String(selectedId);
+      })[0];
+
+      var $wrap = $('<div style="min-width:160px;"></div>');
+      var $input = $(
+        '<input type="text" placeholder="Поиск по названию…" list="' + listId + '" />'
+      )
+        .css({ width: "100%" })
+        .val(selectedField ? selectedField.name : "");
+
+      var $datalist = $('<datalist id="' + listId + '"></datalist>');
+
+      options.forEach(function (f) {
+        $datalist.append('<option value="' + escapeHtml(f.name) + '"></option>');
+      });
+
+      $input.on("change", function () {
+        var text = $(this).val().trim();
+
+        if (!text) {
+          onChange(null);
+          return;
+        }
+
+        var match = options.filter(function (f) {
+          return f.name === text;
+        })[0];
+
+        if (match) {
+          onChange(match.id);
+        } else {
+          // Введённый текст не совпадает ни с одним полем точно — не
+          // сохраняем "мусор", возвращаем предыдущее выбранное значение.
+          $(this).val(selectedField ? selectedField.name : "");
+        }
+      });
+
+      $wrap.append($input).append($datalist);
+
+      return $wrap;
     }
 
     // ------------------------------------------------------------
@@ -578,20 +700,18 @@ define(["jquery"], function ($) {
         $tr.append($botStatusTd);
 
         [
-          { key: "executorFieldId", types: null },
+          { key: "executorFieldId", types: ["select", "multiselect"] },
           { key: "planDateFieldId", types: ["date", "date_time"] },
           { key: "factDateFieldId", types: ["date", "date_time"] },
-          { key: "priceFieldId", types: ["numeric", "price", "monetary"] }
+          { key: "priceFieldId", types: ["numeric"] }
         ].forEach(function (fieldDef) {
           var $td = $('<td style="padding:6px;"></td>');
-          var $select = $("<select></select>").html(fieldOptionsHtml(row[fieldDef.key], fieldDef.types));
 
-          $select.on("change", function () {
-            var value = $(this).val();
-            row[fieldDef.key] = value ? Number(value) : null;
+          var $picker = buildSearchableFieldPicker(row[fieldDef.key], fieldDef.types, function (fieldId) {
+            row[fieldDef.key] = fieldId;
           });
 
-          $td.append($select);
+          $td.append($picker);
           $tr.append($td);
         });
 
@@ -610,7 +730,7 @@ define(["jquery"], function ($) {
         var $delete = $('<span style="cursor:pointer;color:#c0392b;" title="Удалить строку">🗑</span>').on(
           "click",
           function () {
-            if (window.confirm("Удалить эту строку из «Связь этапов и полей»?")) {
+            showConfirmDialog("Вы действительно хотите удалить?", function () {
               var idx = settingsState.statusFieldMap.indexOf(row);
 
               if (idx !== -1) {
@@ -618,7 +738,7 @@ define(["jquery"], function ($) {
               }
 
               rerenderTable();
-            }
+            });
           }
         );
 
@@ -642,7 +762,7 @@ define(["jquery"], function ($) {
       $tab.append($table);
 
       var $addBtn = $(
-        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">+ Добавить строку</div>'
+        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">Добавить группу</div>'
       ).on("click", function () {
         settingsState.statusFieldMap.push({
           amoStatusId: null,
@@ -757,14 +877,14 @@ define(["jquery"], function ($) {
       $tab.append($matrixContainer);
 
       var $addProductBtn = $(
-        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">+ Добавить продукт</div>'
+        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">Добавить продукт</div>'
       ).on("click", function () {
-        matrix.products.push({ enumId: null });
+        matrix.products.push({ enumId: null, readinessValue: 0 });
         renderReadinessMatrixTable();
       });
 
       var $addStatusBtn = $(
-        '<div style="margin-top:4px;cursor:pointer;color:#2d7ff9;">+ Добавить статус</div>'
+        '<div style="margin-top:4px;cursor:pointer;color:#2d7ff9;">Добавить статус</div>'
       ).on("click", function () {
         matrix.statusIds.push(null);
         renderReadinessMatrixTable();
@@ -802,7 +922,10 @@ define(["jquery"], function ($) {
         var usedStatusIds = matrix.statusIds.filter(Boolean);
 
         var $table = $("<table></table>").css({ width: "100%", minWidth: "900px", borderCollapse: "collapse" });
-        var $headRow = $("<tr><th></th></tr>");
+        var $headRow = $(
+          '<tr><th style="padding:6px;"></th>' +
+            '<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;">Готовность изделия</th></tr>'
+        );
 
         matrix.statusIds.forEach(function (statusId, colIdx) {
           var $th = $('<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;"></th>');
@@ -825,10 +948,10 @@ define(["jquery"], function ($) {
           var $delete = $(
             '<span style="cursor:pointer;color:#c0392b;margin-left:4px;" title="Удалить столбец">🗑</span>'
           ).on("click", function () {
-            if (window.confirm("Удалить этот столбец из «Плановая готовность»?")) {
+            showConfirmDialog("Вы действительно хотите удалить?", function () {
               matrix.statusIds.splice(colIdx, 1);
               renderReadinessMatrixTable();
-            }
+            });
           });
 
           $th.append($select).append($delete);
@@ -863,14 +986,29 @@ define(["jquery"], function ($) {
           var $deleteRow = $(
             '<span style="cursor:pointer;color:#c0392b;margin-left:4px;" title="Удалить строку">🗑</span>'
           ).on("click", function () {
-            if (window.confirm("Удалить эту строку из «Плановая готовность»?")) {
+            showConfirmDialog("Вы действительно хотите удалить?", function () {
               matrix.products.splice(rowIdx, 1);
               renderReadinessMatrixTable();
-            }
+            });
           });
 
           $labelTd.append($productSelect).append($deleteRow);
           $tr.append($labelTd);
+
+          var $readinessTd = $('<td style="padding:6px;"></td>');
+          var $readinessInput = $('<input type="number" min="0" step="0.01" />').val(
+            product.readinessValue || 0
+          );
+
+          $readinessInput.on("change", function () {
+            var num = parseFloat($(this).val());
+
+            matrix.products[rowIdx].readinessValue = isNaN(num) || num < 0 ? 0 : Math.round(num * 100) / 100;
+            $(this).val(matrix.products[rowIdx].readinessValue);
+          });
+
+          $readinessTd.append($readinessInput);
+          $tr.append($readinessTd);
 
           matrix.statusIds.forEach(function (statusId) {
             var cellKey = product.enumId + ":" + statusId;

@@ -367,6 +367,19 @@ function validateProductionWidgetSettings(settings) {
             field: "readinessMatrix.products"
           };
         }
+
+        if (
+          product.readinessValue !== undefined &&
+          product.readinessValue !== null &&
+          !isValidReadinessDays(product.readinessValue)
+        ) {
+          return {
+            valid: false,
+            error: "Некорректное значение «Готовность изделия» — допустимы 0 и положительные числа " +
+              "не более чем с двумя знаками после запятой.",
+            field: "readinessMatrix.products"
+          };
+        }
       }
     }
 
