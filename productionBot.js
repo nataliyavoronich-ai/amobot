@@ -537,10 +537,32 @@ function init(app, ctx) {
     });
   });
 
+  // CORS: виджет выполняется прямо на странице amoCRM (например
+  // https://zlmk.amocrm.ru), а запросы шлёт на ДРУГОЙ домен (этот backend)
+  // — то есть это настоящий межсайтовый (cross-origin) запрос из браузера,
+  // и без заголовков ниже браузер блокирует его политикой CORS ещё до
+  // отправки (preflight OPTIONS).
+  const widgetAllowedOrigin = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru`;
+
+  function setWidgetCorsHeaders(res) {
+    res.set({
+      "Access-Control-Allow-Origin": widgetAllowedOrigin,
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, X-Widget-Secret"
+    });
+  }
+
+  app.options("/widget/production/settings", (req, res) => {
+    setWidgetCorsHeaders(res);
+    res.sendStatus(204);
+  });
+
   // Гибридное сохранение настроек виджета: вызывается из onSave() в
   // widget-production/script.js после того, как виджет уже сохранил те же
   // данные через self.set_settings(). Redis — источник истины для бота.
   app.post("/widget/production/settings", async (req, res) => {
+    setWidgetCorsHeaders(res);
+
     if (!isValidWidgetSecret(req)) {
       return res.status(403).json({ error: "Forbidden" });
     }
@@ -563,6 +585,8 @@ function init(app, ctx) {
   });
 
   app.get("/widget/production/settings", (req, res) => {
+    setWidgetCorsHeaders(res);
+
     if (!isValidWidgetSecret(req)) {
       return res.status(403).json({ error: "Forbidden" });
     }

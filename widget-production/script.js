@@ -233,18 +233,21 @@ define(["jquery"], function ($) {
     }
 
     function loadSettings() {
-      return backendRequest("GET")
-        .then(function (data) {
+      // jQuery-промисы (то, что возвращает $.ajax) не всегда поддерживают
+      // .catch() — используем универсальную форму .then(успех, ошибка).
+      return backendRequest("GET").then(
+        function (data) {
           return data || parseNativeSettings() || emptySettings();
-        })
-        .catch(function () {
+        },
+        function () {
           console.warn(
             "[Виджет Производство] Не удалось получить настройки с backend — " +
               "использую встроенное хранилище amoCRM как запасной вариант."
           );
 
           return parseNativeSettings() || emptySettings();
-        });
+        }
+      );
     }
 
     // Записывает текущие настройки в скрытое поле формы "production_data"
@@ -322,17 +325,18 @@ define(["jquery"], function ($) {
       syncNativeSettingsField(JSON.stringify(settingsState));
 
       // 2) Backend / Redis — источник истины для бота в рантайме.
-      backendRequest("POST", settingsState)
-        .then(function () {
+      backendRequest("POST", settingsState).then(
+        function () {
           showSaveMessage("Настройки сохранены.", false);
-        })
-        .catch(function (xhr) {
+        },
+        function (xhr) {
           var message =
             (xhr && xhr.responseJSON && xhr.responseJSON.error) ||
             "Не удалось сохранить настройки на сервере.";
 
           showSaveMessage(message, true);
-        });
+        }
+      );
     }
 
     function showSaveMessage(text, isError) {
@@ -900,8 +904,8 @@ define(["jquery"], function ($) {
 
           $target.empty().append($root);
 
-          $.when(loadAllLiveData(), loadSettings())
-            .then(function (liveResult, loadedSettings) {
+          $.when(loadAllLiveData(), loadSettings()).then(
+            function (liveResult, loadedSettings) {
               settingsState = loadedSettings || emptySettings();
               settingsState.roles = settingsState.roles || {};
               settingsState.statusFieldMap = settingsState.statusFieldMap || [];
@@ -910,8 +914,8 @@ define(["jquery"], function ($) {
               settingsState.scenarios = settingsState.scenarios || {};
 
               renderShell();
-            })
-            .catch(function (error) {
+            },
+            function (error) {
               $root.empty();
               $root.append(
                 '<div style="color:#c0392b;padding:16px;">Не удалось загрузить данные amoCRM: ' +
@@ -920,7 +924,8 @@ define(["jquery"], function ($) {
               );
 
               console.error("[Виджет Производство] advancedSettings load error:", error);
-            });
+            }
+          );
         } catch (e) {
           console.error("[Виджет Производство] Ошибка в advancedSettings:", e);
         }
