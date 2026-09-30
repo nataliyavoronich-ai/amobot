@@ -41,7 +41,7 @@ define(["jquery"], function ($) {
     // КОНФИГ
     // ------------------------------------------------------------
 
-    var BACKEND_BASE = "https://manufacture.zavod-lestnic-na-metalle.ru";
+    var BACKEND_BASE = "https://amobot.zavod-lestnic-na-metalle.ru";
     // Это же значение должно быть задано в переменной окружения
     // PRODUCTION_WIDGET_SECRET на Selectel — иначе backend будет отвечать 403.
     var WIDGET_SECRET = "kVfqiFTx4sDt3ZG02SlEdTdO0jn2Hy1WCt5mcv2YGEk";
