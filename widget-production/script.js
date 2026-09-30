@@ -864,32 +864,66 @@ define(["jquery"], function ($) {
 
       // Вызывается при переходе на страницу "Расширенные настройки"
       // (см. manifest.json: locations содержит "advanced_settings").
-      advancedSettings: function () {
-        $root = $('<div class="production-widget"></div>');
+      // amoCRM, скорее всего, передаёт готовый контейнер первым аргументом
+      // (как и в callbacks.settings($modal_body) в других виджетах) —
+      // принимаем его, а если аргумента нет, ищем контейнер по нескольким
+      // вероятным селекторам как запасной вариант.
+      advancedSettings: function (containerArg) {
+        try {
+          var $target = null;
 
-        $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
+          if (containerArg && containerArg.jquery) {
+            $target = containerArg;
+          } else if (containerArg && containerArg.nodeType) {
+            $target = $(containerArg);
+          }
 
-        $(".advanced-settings-holder, #advanced_settings").empty().append($root); // фактический контейнер уточняется amoCRM при рендере страницы
+          if (!$target || !$target.length) {
+            $target = $(
+              "#advanced_settings, .advanced-settings-holder, " +
+                ".widget_settings_block__wrapper, .modal-body"
+            ).first();
+          }
 
-        $.when(loadAllLiveData(), loadSettings())
-          .then(function (liveResult, loadedSettings) {
-            settingsState = loadedSettings || emptySettings();
-            settingsState.roles = settingsState.roles || {};
-            settingsState.statusFieldMap = settingsState.statusFieldMap || [];
-            settingsState.readinessMatrix =
-              settingsState.readinessMatrix || { productFieldId: null, cells: {} };
-            settingsState.scenarios = settingsState.scenarios || {};
-
-            renderShell();
-          })
-          .catch(function (error) {
-            $root.empty();
-            $root.append(
-              '<div style="color:#c0392b;padding:16px;">Не удалось загрузить данные amoCRM: ' +
-                escapeHtml(error && error.statusText ? error.statusText : "неизвестная ошибка") +
-                "</div>"
+          if (!$target || !$target.length) {
+            console.error(
+              "[Виджет Производство] Не удалось найти контейнер расширенных настроек " +
+                "(проверьте в devtools, какой элемент реально используется на этой странице)."
             );
-          });
+
+            return true;
+          }
+
+          $root = $('<div class="production-widget"></div>');
+
+          $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
+
+          $target.empty().append($root);
+
+          $.when(loadAllLiveData(), loadSettings())
+            .then(function (liveResult, loadedSettings) {
+              settingsState = loadedSettings || emptySettings();
+              settingsState.roles = settingsState.roles || {};
+              settingsState.statusFieldMap = settingsState.statusFieldMap || [];
+              settingsState.readinessMatrix =
+                settingsState.readinessMatrix || { productFieldId: null, cells: {} };
+              settingsState.scenarios = settingsState.scenarios || {};
+
+              renderShell();
+            })
+            .catch(function (error) {
+              $root.empty();
+              $root.append(
+                '<div style="color:#c0392b;padding:16px;">Не удалось загрузить данные amoCRM: ' +
+                  escapeHtml(error && error.statusText ? error.statusText : "неизвестная ошибка") +
+                  "</div>"
+              );
+
+              console.error("[Виджет Производство] advancedSettings load error:", error);
+            });
+        } catch (e) {
+          console.error("[Виджет Производство] Ошибка в advancedSettings:", e);
+        }
 
         return true;
       },
