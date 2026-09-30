@@ -426,7 +426,9 @@ define(["jquery"], function ($) {
         var $col = $('<div class="production-widget__role-col"></div>');
         $col.css({ minWidth: "220px" });
 
-        $col.append('<div style="font-weight:600;margin-bottom:8px;">' + escapeHtml(role.label) + "</div>");
+        $col.append(
+          '<div style="font-weight:600;margin-bottom:8px;color:#333;">' + escapeHtml(role.label) + "</div>"
+        );
 
         var $list = $('<div class="production-widget__role-list"></div>');
 
@@ -677,7 +679,9 @@ define(["jquery"], function ($) {
       ].forEach(function (scenario) {
         var $row = $('<div style="margin-bottom:16px;"></div>');
 
-        $row.append('<div style="font-weight:600;margin-bottom:4px;">' + scenario.label + "</div>");
+        $row.append(
+          '<div style="font-weight:600;margin-bottom:4px;color:#333;">' + scenario.label + "</div>"
+        );
 
         var entry = settingsState.scenarios[scenario.key];
         var $select = $("<select></select>").html(statusOptionsHtml(entry.amoStatusId));
@@ -727,7 +731,9 @@ define(["jquery"], function ($) {
       matrix.cells = matrix.cells || {};
 
       var $productFieldRow = $('<div style="margin-bottom:12px;"></div>');
-      $productFieldRow.append('<div style="font-weight:600;margin-bottom:4px;">Поле «Продукт»</div>');
+      $productFieldRow.append(
+        '<div style="font-weight:600;margin-bottom:4px;color:#333;">Поле «Продукт»</div>'
+      );
 
       var $productFieldSelect = $("<select></select>").html(
         fieldOptionsHtml(matrix.productFieldId, ["select", "multiselect"])
@@ -1058,9 +1064,16 @@ define(["jquery"], function ($) {
             return true;
           }
 
+          // color/font-size заданы явно на корневом элементе — страница
+          // amoCRM может иначе "подсунуть" свой унаследованный цвет текста
+          // (например, невидимо-светлый) вложенным элементам без
+          // собственного явного color, из-за чего заголовки/подписи
+          // пропадали визуально, хотя реально присутствовали в DOM.
           $root = $('<div class="production-widget"></div>').css({
             "margin-top": "80px",
-            "padding-top": "8px"
+            "padding-top": "8px",
+            color: "#333",
+            "font-size": "13px"
           });
 
           $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
