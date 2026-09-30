@@ -903,7 +903,7 @@ define(["jquery"], function ($) {
           }
 
           $root = $('<div class="production-widget"></div>').css({
-            "margin-top": "48px",
+            "margin-top": "80px",
             "padding-top": "8px"
           });
 
