@@ -521,8 +521,11 @@ define(["jquery"], function ($) {
     function renderStatusFieldMapTab() {
       ensureStatusFieldMapRows();
 
-      var $tab = $('<div class="production-widget__status-map"></div>');
-      var $table = $("<table></table>").css({ width: "100%", borderCollapse: "collapse" });
+      var $tab = $('<div class="production-widget__status-map"></div>').css({
+        "overflow-x": "auto",
+        "max-width": "100%"
+      });
+      var $table = $("<table></table>").css({ width: "100%", minWidth: "1100px", borderCollapse: "collapse" });
 
       var headers = [
         "Текущий статус amoCRM",
@@ -670,7 +673,10 @@ define(["jquery"], function ($) {
       $productFieldRow.append($productFieldSelect);
       $tab.append($productFieldRow);
 
-      var $matrixContainer = $('<div class="production-widget__readiness-matrix"></div>');
+      var $matrixContainer = $('<div class="production-widget__readiness-matrix"></div>').css({
+        "overflow-x": "auto",
+        "max-width": "100%"
+      });
       $tab.append($matrixContainer);
 
       function renderReadinessMatrixTable() {
@@ -699,7 +705,7 @@ define(["jquery"], function ($) {
 
         var cells = settingsState.readinessMatrix.cells || (settingsState.readinessMatrix.cells = {});
 
-        var $table = $("<table></table>").css({ width: "100%", borderCollapse: "collapse" });
+        var $table = $("<table></table>").css({ width: "100%", minWidth: "900px", borderCollapse: "collapse" });
         var $thead = $("<thead><tr><th></th></tr></thead>");
 
         statuses.forEach(function (s) {
@@ -763,27 +769,27 @@ define(["jquery"], function ($) {
       { key: "readiness", label: "Плановая готовность", render: renderReadinessTab }
     ];
 
+    // Простая вертикальная раскладка (список ботов строкой сверху, затем
+    // вкладки, затем содержимое) — намеренно без "раскладки в два столбца"
+    // (сайдбар + контент рядом), т.к. реальная ширина области настроек в
+    // amoCRM оказалась непредсказуемой и узкой, и любая раскладка на
+    // несколько колонок на ней ломалась.
     function renderShell() {
       $root.empty();
 
-      var $layout = $('<div style="display:flex;flex-wrap:wrap;padding:16px 0;"></div>');
-
-      // Левый список ботов — сейчас работает только "Производство".
-      // "Монтажники" — задел на будущий бот (см. план Фазы 1), пункт
-      // неактивен до тех пор, пока для него не появится своя реализация.
-      var $sidebar = $('<div style="width:140px;flex-shrink:0;padding-right:16px;"></div>');
-
-      $sidebar.append(
-        '<div style="padding:8px;font-weight:600;color:#2d7ff9;border-left:3px solid #2d7ff9;">Производство</div>'
+      var $botsRow = $(
+        '<div style="display:flex;gap:20px;margin-bottom:16px;font-size:14px;"></div>'
       );
 
-      $sidebar.append(
-        '<div style="padding:8px;color:#bbb;cursor:not-allowed;" title="Появится позже">Монтажники</div>'
+      $botsRow.append(
+        '<span style="font-weight:600;color:#2d7ff9;border-bottom:2px solid #2d7ff9;padding-bottom:4px;">Производство</span>'
       );
 
-      $layout.append($sidebar);
+      $botsRow.append(
+        '<span style="color:#bbb;cursor:not-allowed;" title="Появится позже">Монтажники</span>'
+      );
 
-      var $content = $('<div style="flex:1;min-width:480px;"></div>');
+      $root.append($botsRow);
 
       var $tabsBar = $(
         '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
@@ -806,7 +812,7 @@ define(["jquery"], function ($) {
         $tabsBar.append($tabBtn);
       });
 
-      $content.append($tabsBar).append($tabBody);
+      $root.append($tabsBar).append($tabBody);
 
       var currentTab = TABS.filter(function (t) {
         return t.key === activeTab;
@@ -823,10 +829,7 @@ define(["jquery"], function ($) {
       $footer.append($saveBtn);
       $footer.append('<span class="production-widget__save-message"></span>');
 
-      $content.append($footer);
-      $layout.append($content);
-
-      $root.append($layout);
+      $root.append($footer);
     }
 
     // ------------------------------------------------------------
