@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const designerBot = require("./designerBot");
+const productionBot = require("./productionBot");
 
 const UPSTASH_REDIS_REST_URL =
   process.env.UPSTASH_REDIS_REST_URL || "";
@@ -7521,6 +7522,28 @@ const designerBotContext = {
 designerBot.init(app, designerBotContext);
 
 // ============================================================
+// БОТ ПРОИЗВОДСТВО (amoMessenger + виджет настроек amoCRM, Фаза 1)
+// ============================================================
+// Как и бот проектировщиков — отдельное amoMessenger-приложение, отдельный
+// webhook, своё состояние. Для чтения/записи сделок собственного токена
+// amoCRM не заводит — использует общий токен "Внешней интеграции" через ctx
+// (см. комментарий в начале productionBot.js). Регистрируется ДО catch-all
+// 404-обработчика, иначе Express не дойдёт до новых маршрутов.
+
+const productionBotContext = {
+  AMOCRM_SUBDOMAIN,
+  redisRequest,
+  isStartCommand,
+  extractAmoMessengerUserName,
+  extractImageUrlsFromMessage,
+  getMoscowDate,
+  todayMoscowDateText,
+  getUserName
+};
+
+productionBot.init(app, productionBotContext);
+
+// ============================================================
 // GET /
 // ============================================================
 
@@ -7569,6 +7592,8 @@ async function startServer() {
 await loadAmoMessengerTokensFromRedis();
   await designerBot.loadTokens(designerBotContext);
   designerBot.startSchedulers(designerBotContext);
+  await productionBot.loadTokens(productionBotContext);
+  productionBot.startSchedulers(productionBotContext);
   app.listen(
     PORT,
     () => {
