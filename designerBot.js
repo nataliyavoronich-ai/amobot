@@ -2086,6 +2086,39 @@ async function pollNewTasks(ctx) {
 
 let lastDigestDateText = "";
 
+// lastDigestDateText хранится и в Redis, не только в памяти процесса.
+// Раньше при каждом перезапуске сервера (после 08:55 МСК) эта отметка
+// обнулялась, и рассылка на сегодня уходила заново — даже если её уже
+// отправляли несколько раз за день (каждый перезапуск = новая отправка
+// всем подписчикам). Теперь при старте отметка подгружается из Redis,
+// поэтому рестарт сервера в течение дня больше не приводит к повторной
+// рассылке.
+async function loadLastDigestDateText(ctx) {
+  try {
+    const response = await ctx.redisRequest(["GET", "amomessenger_project_last_digest_date"]);
+
+    if (response.result) {
+      lastDigestDateText = response.result;
+    }
+  } catch (error) {
+    console.error(
+      "[Бот проектировщиков] Ошибка загрузки отметки последней ежедневной рассылки:",
+      error.message
+    );
+  }
+}
+
+async function saveLastDigestDateText(ctx, dateText) {
+  try {
+    await ctx.redisRequest(["SET", "amomessenger_project_last_digest_date", dateText]);
+  } catch (error) {
+    console.error(
+      "[Бот проектировщиков] Ошибка сохранения отметки последней ежедневной рассылки:",
+      error.message
+    );
+  }
+}
+
 // Ежедневная рассылка (08:55 МСК). Раньше была временно отключена: на
 // бесплатном тарифе Render сервис засыпал при отсутствии входящих запросов,
 // из-за чего рассылка ненадёжно доходила до пользователей (код был исправен,
@@ -2096,6 +2129,7 @@ const DAILY_DIGEST_ENABLED = true;
 function startSchedulers(ctx) {
   loadRegistry(ctx);
   loadSeenTaskIds(ctx);
+  loadLastDigestDateText(ctx);
 
   setInterval(() => {
     flushRegistry(ctx);
@@ -2122,6 +2156,7 @@ function startSchedulers(ctx) {
 
         if (isDigestTimeReached && lastDigestDateText !== dateText) {
           lastDigestDateText = dateText;
+          await saveLastDigestDateText(ctx, dateText);
           await runDailyDigest(ctx);
         }
       } catch (error) {
