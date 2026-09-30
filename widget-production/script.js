@@ -9,14 +9,19 @@
 // в manifest.json.
 //
 // ХРАНЕНИЕ (гибрид, см. план Фазы 1):
-// 1) self.set_settings()/self.get_settings() — встроенное хранилище
-//    amoCRM, только для нативного UX (подгрузка формы при повторном
-//    открытии, работает мгновенно, без сетевого запроса к нашему backend).
+// 1) Встроенное хранилище amoCRM — скрытое текстовое поле формы
+//    "production_data" (объявлено в manifest.json → settings), куда пишется
+//    JSON всех настроек целиком; читается через self.get_settings().
+//    Это подтверждённый рабочий способ для классических виджетов amoCRM —
+//    отдельного JS-метода записи (set_settings) в реальном рантайме нет,
+//    сохранение идёт через именованные поля формы. Нужно только для
+//    нативного UX (подгрузка при повторном открытии), не является
+//    источником истины.
 // 2) POST/GET на BACKEND_BASE + "/widget/production/settings" (наш
 //    Node-сервер, Selectel) — источник истины, который читает бот в
 //    рантайме. При открытии настроек сначала пробуем backend (сверить с
 //    самым актуальным сохранённым состоянием), при ошибке сети падаем на
-//    get_settings() как запасной вариант.
+//    встроенное хранилище amoCRM как запасной вариант.
 //
 // ЖИВЫЕ ДАННЫЕ (воронки/статусы/поля/пользователи) виджет читает сам,
 // напрямую из браузера администратора, обычным AJAX-запросом к
@@ -212,10 +217,25 @@ define(["jquery"], function ($) {
       });
     }
 
+    // Встроенное хранилище amoCRM отдаёт объект, где значения — это то,
+    // что сохранено в полях формы, описанных в manifest.json ("settings").
+    // У нас там одно служебное текстовое поле "production_data" со всем
+    // JSON настроек внутри (см. syncNativeSettingsField ниже).
+    function parseNativeSettings() {
+      try {
+        var raw = self.get_settings && self.get_settings();
+        var jsonText = raw && raw.production_data;
+
+        return jsonText ? JSON.parse(jsonText) : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
     function loadSettings() {
       return backendRequest("GET")
         .then(function (data) {
-          return data || self.get_settings() || emptySettings();
+          return data || parseNativeSettings() || emptySettings();
         })
         .catch(function () {
           console.warn(
@@ -223,8 +243,25 @@ define(["jquery"], function ($) {
               "использую встроенное хранилище amoCRM как запасной вариант."
           );
 
-          return self.get_settings() || emptySettings();
+          return parseNativeSettings() || emptySettings();
         });
+    }
+
+    // Записывает текущие настройки в скрытое поле формы "production_data"
+    // (объявлено в manifest.json → settings). Это и есть реальный механизм
+    // сохранения во встроенное хранилище amoCRM для классических виджетов —
+    // отдельного JS-метода для записи нет, amoCRM сама подхватывает значения
+    // именованных полей формы при нажатии родной кнопки сохранения.
+    function syncNativeSettingsField(jsonValue) {
+      var $scope = $root && $root.closest("form").length ? $root.closest("form") : $("body");
+      var $field = $scope.find('input[name="production_data"]');
+
+      if (!$field.length) {
+        $scope.append('<input type="text" name="production_data" style="display:none;">');
+        $field = $scope.find('input[name="production_data"]');
+      }
+
+      $field.val(jsonValue).trigger("input").trigger("change");
     }
 
     // Клиентская валидация — быстрая обратная связь до отправки на backend.
@@ -282,7 +319,7 @@ define(["jquery"], function ($) {
       }
 
       // 1) Встроенное хранилище amoCRM — для нативного UX при переоткрытии.
-      self.set_settings(settingsState);
+      syncNativeSettingsField(JSON.stringify(settingsState));
 
       // 2) Backend / Redis — источник истины для бота в рантайме.
       backendRequest("POST", settingsState)

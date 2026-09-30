@@ -1,11 +1,11 @@
 {
   "widget": {
+    "widget_code": "production_settings",
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
     "version": "0.1.0",
-    "interface_version": 2,
-    "init_once": false,
+    "author": "ZLMK",
     "locale": ["ru"],
     "installation": true,
     "support": {
@@ -15,5 +15,13 @@
   "locations": ["advanced_settings"],
   "advanced": {
     "title": "advanced.title"
+  },
+  "settings": {
+    "production_data": {
+      "type": "text",
+      "name": "settings.production_data",
+      "value": "{}",
+      "required": false
+    }
   }
 }
