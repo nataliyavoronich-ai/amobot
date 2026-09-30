@@ -201,7 +201,7 @@ define(["jquery"], function ($) {
         schemaVersion: 1,
         roles: {},
         statusFieldMap: [],
-        readinessMatrix: { productFieldId: null, cells: {} },
+        readinessMatrix: { productFieldId: null, products: [], statusIds: [], cells: {} },
         scenarios: {}
       };
     }
@@ -373,10 +373,14 @@ define(["jquery"], function ($) {
       return html;
     }
 
-    function statusOptionsHtml(selectedId) {
-      var html = '<option value="">— не выбрано —</option>';
+    function statusOptionsHtml(selectedId, excludeIds) {
+      var html = '<option value="">— выбрать статус —</option>';
 
       allLiveStatuses().forEach(function (s) {
+        if (excludeIds && excludeIds.indexOf(s.id) !== -1 && String(s.id) !== String(selectedId)) {
+          return;
+        }
+
         var selected = String(s.id) === String(selectedId) ? " selected" : "";
 
         html +=
@@ -489,38 +493,10 @@ define(["jquery"], function ($) {
     // ВКЛАДКА "СВЯЗЬ ЭТАПОВ И ПОЛЕЙ"
     // ------------------------------------------------------------
 
-    function ensureStatusFieldMapRows() {
-      var existingById = {};
-
-      settingsState.statusFieldMap.forEach(function (row) {
-        existingById[row.amoStatusId] = row;
-      });
-
-      var merged = [];
-
-      allLiveStatuses().forEach(function (s) {
-        if (existingById[s.id]) {
-          merged.push(existingById[s.id]);
-        } else {
-          merged.push({
-            amoStatusId: s.id,
-            amoPipelineId: liveData.statusesById[s.id] ? liveData.statusesById[s.id].pipeline_id : null,
-            botStatus: "",
-            executorFieldId: null,
-            planDateFieldId: null,
-            factDateFieldId: null,
-            priceFieldId: null,
-            nextAmoStatusId: null
-          });
-        }
-      });
-
-      settingsState.statusFieldMap = merged;
-    }
-
+    // Строки заводятся вручную администратором (кнопка "+ Добавить
+    // строку"), а не автоматически по всем живым статусам — статус для
+    // строки выбирается из выпадающего списка, как и в "Сценариях".
     function renderStatusFieldMapTab() {
-      ensureStatusFieldMapRows();
-
       var $tab = $('<div class="production-widget__status-map"></div>').css({
         "overflow-x": "auto",
         "max-width": "100%"
@@ -534,7 +510,8 @@ define(["jquery"], function ($) {
         "Поле «План готовности»",
         "Поле «Факт готовности»",
         "Поле «Цена»",
-        "Следующий статус amoCRM"
+        "Следующий статус amoCRM",
+        ""
       ];
 
       var $thead = $("<thead><tr></tr></thead>");
@@ -549,17 +526,36 @@ define(["jquery"], function ($) {
 
       var $tbody = $("<tbody></tbody>");
 
-      settingsState.statusFieldMap.forEach(function (row) {
-        var statusInfo = liveData.statusesById[row.amoStatusId];
+      function usedStatusIds(excludeRow) {
+        return settingsState.statusFieldMap
+          .filter(function (r) {
+            return r !== excludeRow && r.amoStatusId;
+          })
+          .map(function (r) {
+            return r.amoStatusId;
+          });
+      }
+
+      function renderRow(row) {
         var $tr = $("<tr></tr>").css({ borderBottom: "1px solid #eee" });
 
-        $tr.append(
-          '<td style="padding:6px;">' +
-            escapeHtml(statusInfo ? statusInfo.name : "#" + row.amoStatusId) +
-            '<div style="color:#999;font-size:11px;">' +
-            escapeHtml(statusInfo ? statusInfo.pipeline_name : "") +
-            "</div></td>"
+        var $statusTd = $('<td style="padding:6px;"></td>');
+        var $statusSelect = $("<select></select>").html(
+          statusOptionsHtml(row.amoStatusId, usedStatusIds(row))
         );
+
+        $statusSelect.on("change", function () {
+          var value = $(this).val();
+
+          row.amoStatusId = value ? Number(value) : null;
+          row.amoPipelineId =
+            row.amoStatusId && liveData.statusesById[row.amoStatusId]
+              ? liveData.statusesById[row.amoStatusId].pipeline_id
+              : null;
+        });
+
+        $statusTd.append($statusSelect);
+        $tr.append($statusTd);
 
         var $botStatusTd = $('<td style="padding:6px;"></td>');
         var $botStatusSelect = $("<select></select>");
@@ -608,11 +604,59 @@ define(["jquery"], function ($) {
         $nextStatusTd.append($nextStatusSelect);
         $tr.append($nextStatusTd);
 
-        $tbody.append($tr);
-      });
+        var $deleteTd = $('<td style="padding:6px;"></td>');
+        var $delete = $('<span style="cursor:pointer;color:#c0392b;" title="Удалить строку">🗑</span>').on(
+          "click",
+          function () {
+            if (window.confirm("Удалить эту строку из «Связь этапов и полей»?")) {
+              var idx = settingsState.statusFieldMap.indexOf(row);
+
+              if (idx !== -1) {
+                settingsState.statusFieldMap.splice(idx, 1);
+              }
+
+              rerenderTable();
+            }
+          }
+        );
+
+        $deleteTd.append($delete);
+        $tr.append($deleteTd);
+
+        return $tr;
+      }
+
+      function rerenderTable() {
+        $tbody.empty();
+
+        settingsState.statusFieldMap.forEach(function (row) {
+          $tbody.append(renderRow(row));
+        });
+      }
+
+      rerenderTable();
 
       $table.append($tbody);
       $tab.append($table);
+
+      var $addBtn = $(
+        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">+ Добавить строку</div>'
+      ).on("click", function () {
+        settingsState.statusFieldMap.push({
+          amoStatusId: null,
+          amoPipelineId: null,
+          botStatus: "",
+          executorFieldId: null,
+          planDateFieldId: null,
+          factDateFieldId: null,
+          priceFieldId: null,
+          nextAmoStatusId: null
+        });
+
+        rerenderTable();
+      });
+
+      $tab.append($addBtn);
 
       return $tab;
     }
@@ -654,19 +698,46 @@ define(["jquery"], function ($) {
     // ВКЛАДКА "ПЛАНОВАЯ ГОТОВНОСТЬ"
     // ------------------------------------------------------------
 
+    // Продукты (строки) и статусы (столбцы) добавляются вручную через
+    // выпадающие списки — так же, как строки на "Связь этапов и полей" и
+    // значения на "Сценарии", а не автоматически по всем живым значениям.
+    function productOptionsHtml(productField, selectedId, excludeIds) {
+      var html = '<option value="">— выбрать продукт —</option>';
+      var enums = (productField && productField.enums) || [];
+
+      enums.forEach(function (e) {
+        if (excludeIds && excludeIds.indexOf(e.id) !== -1 && String(e.id) !== String(selectedId)) {
+          return;
+        }
+
+        var selected = String(e.id) === String(selectedId) ? " selected" : "";
+
+        html += '<option value="' + e.id + '"' + selected + ">" + escapeHtml(e.value) + "</option>";
+      });
+
+      return html;
+    }
+
     function renderReadinessTab() {
       var $tab = $('<div class="production-widget__readiness"></div>');
+      var matrix = settingsState.readinessMatrix;
+
+      matrix.products = matrix.products || [];
+      matrix.statusIds = matrix.statusIds || [];
+      matrix.cells = matrix.cells || {};
 
       var $productFieldRow = $('<div style="margin-bottom:12px;"></div>');
       $productFieldRow.append('<div style="font-weight:600;margin-bottom:4px;">Поле «Продукт»</div>');
 
       var $productFieldSelect = $("<select></select>").html(
-        fieldOptionsHtml(settingsState.readinessMatrix.productFieldId, ["select", "multiselect"])
+        fieldOptionsHtml(matrix.productFieldId, ["select", "multiselect"])
       );
 
       $productFieldSelect.on("change", function () {
         var value = $(this).val();
-        settingsState.readinessMatrix.productFieldId = value ? Number(value) : null;
+
+        matrix.productFieldId = value ? Number(value) : null;
+        matrix.products = [];
         renderReadinessMatrixTable();
       });
 
@@ -679,67 +750,138 @@ define(["jquery"], function ($) {
       });
       $tab.append($matrixContainer);
 
+      var $addProductBtn = $(
+        '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">+ Добавить продукт</div>'
+      ).on("click", function () {
+        matrix.products.push({ enumId: null });
+        renderReadinessMatrixTable();
+      });
+
+      var $addStatusBtn = $(
+        '<div style="margin-top:4px;cursor:pointer;color:#2d7ff9;">+ Добавить статус</div>'
+      ).on("click", function () {
+        matrix.statusIds.push(null);
+        renderReadinessMatrixTable();
+      });
+
+      function currentProductField() {
+        return liveData.fields.filter(function (f) {
+          return f.id === matrix.productFieldId;
+        })[0];
+      }
+
       function renderReadinessMatrixTable() {
         $matrixContainer.empty();
 
-        var productField = liveData.fields.filter(function (f) {
-          return f.id === settingsState.readinessMatrix.productFieldId;
-        })[0];
+        var productField = currentProductField();
 
         if (!productField) {
           $matrixContainer.append(
-            '<div style="color:#999;">Выберите поле «Продукт», чтобы увидеть таблицу.</div>'
+            '<div style="color:#999;">Выберите поле «Продукт», чтобы добавлять строки.</div>'
           );
+          $addProductBtn.hide();
+          $addStatusBtn.hide();
           return;
         }
 
-        var products = productField.enums || [];
-        var statuses = settingsState.statusFieldMap
-          .filter(function (row) {
-            return row.botStatus;
-          })
-          .map(function (row) {
-            return liveData.statusesById[row.amoStatusId];
+        $addProductBtn.show();
+        $addStatusBtn.show();
+
+        var usedProductIds = matrix.products
+          .map(function (p) {
+            return p.enumId;
           })
           .filter(Boolean);
 
-        var cells = settingsState.readinessMatrix.cells || (settingsState.readinessMatrix.cells = {});
+        var usedStatusIds = matrix.statusIds.filter(Boolean);
 
         var $table = $("<table></table>").css({ width: "100%", minWidth: "900px", borderCollapse: "collapse" });
-        var $thead = $("<thead><tr><th></th></tr></thead>");
+        var $headRow = $("<tr><th></th></tr>");
 
-        statuses.forEach(function (s) {
-          $thead
-            .find("tr")
-            .append(
-              '<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;">' +
-                escapeHtml(s.name) +
-                "</th>"
-            );
+        matrix.statusIds.forEach(function (statusId, colIdx) {
+          var $th = $('<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;"></th>');
+          var $select = $("<select></select>").html(
+            statusOptionsHtml(
+              statusId,
+              usedStatusIds.filter(function (id) {
+                return id !== statusId;
+              })
+            )
+          );
+
+          $select.on("change", function () {
+            var value = $(this).val();
+
+            matrix.statusIds[colIdx] = value ? Number(value) : null;
+            renderReadinessMatrixTable();
+          });
+
+          var $delete = $(
+            '<span style="cursor:pointer;color:#c0392b;margin-left:4px;" title="Удалить столбец">🗑</span>'
+          ).on("click", function () {
+            if (window.confirm("Удалить этот столбец из «Плановая готовность»?")) {
+              matrix.statusIds.splice(colIdx, 1);
+              renderReadinessMatrixTable();
+            }
+          });
+
+          $th.append($select).append($delete);
+          $headRow.append($th);
         });
 
-        $table.append($thead);
+        $table.append($("<thead></thead>").append($headRow));
 
         var $tbody = $("<tbody></tbody>");
 
-        products.forEach(function (product) {
+        matrix.products.forEach(function (product, rowIdx) {
           var $tr = $("<tr></tr>");
+          var $labelTd = $('<td style="padding:6px;"></td>');
 
-          $tr.append(
-            '<td style="padding:6px;font-weight:600;">' + escapeHtml(product.value) + "</td>"
+          var $productSelect = $("<select></select>").html(
+            productOptionsHtml(
+              productField,
+              product.enumId,
+              usedProductIds.filter(function (id) {
+                return id !== product.enumId;
+              })
+            )
           );
 
-          statuses.forEach(function (status) {
-            var cellKey = product.id + ":" + status.id;
-            var value = Object.prototype.hasOwnProperty.call(cells, cellKey) ? cells[cellKey] : 0;
+          $productSelect.on("change", function () {
+            var value = $(this).val();
+
+            matrix.products[rowIdx].enumId = value ? Number(value) : null;
+            renderReadinessMatrixTable();
+          });
+
+          var $deleteRow = $(
+            '<span style="cursor:pointer;color:#c0392b;margin-left:4px;" title="Удалить строку">🗑</span>'
+          ).on("click", function () {
+            if (window.confirm("Удалить эту строку из «Плановая готовность»?")) {
+              matrix.products.splice(rowIdx, 1);
+              renderReadinessMatrixTable();
+            }
+          });
+
+          $labelTd.append($productSelect).append($deleteRow);
+          $tr.append($labelTd);
+
+          matrix.statusIds.forEach(function (statusId) {
+            var cellKey = product.enumId + ":" + statusId;
+            var value = Object.prototype.hasOwnProperty.call(matrix.cells, cellKey)
+              ? matrix.cells[cellKey]
+              : 0;
 
             var $td = $('<td style="padding:6px;"></td>');
-            var $input = $('<input type="number" min="0" step="0.01" />').val(value);
+            var $input = $('<input type="number" min="0" step="0.01" />')
+              .val(value)
+              .prop("disabled", !product.enumId || !statusId);
 
             $input.on("change", function () {
               var num = parseFloat($(this).val());
-              cells[cellKey] = isNaN(num) || num < 0 ? 0 : Math.round(num * 100) / 100;
-              $(this).val(cells[cellKey]);
+
+              matrix.cells[cellKey] = isNaN(num) || num < 0 ? 0 : Math.round(num * 100) / 100;
+              $(this).val(matrix.cells[cellKey]);
             });
 
             $td.append($input);
@@ -754,6 +896,9 @@ define(["jquery"], function ($) {
       }
 
       renderReadinessMatrixTable();
+
+      $tab.append($addProductBtn);
+      $tab.append($addStatusBtn);
 
       return $tab;
     }
@@ -777,6 +922,15 @@ define(["jquery"], function ($) {
     function renderShell() {
       $root.empty();
 
+      // "sticky" — чтобы переключатель ботов и вкладки оставались на
+      // месте и были кликабельны независимо от того, насколько длинным/
+      // широким окажется содержимое конкретной вкладки (защита от бага,
+      // когда вкладки визуально "пропадали" при переходе на разделы с
+      // большими таблицами).
+      var $header = $(
+        '<div style="position:sticky;top:0;background:#fff;z-index:10;padding-top:4px;"></div>'
+      );
+
       var $botsRow = $(
         '<div style="display:flex;gap:20px;margin-bottom:16px;font-size:14px;"></div>'
       );
@@ -789,7 +943,7 @@ define(["jquery"], function ($) {
         '<span style="color:#bbb;cursor:not-allowed;" title="Появится позже">Монтажники</span>'
       );
 
-      $root.append($botsRow);
+      $header.append($botsRow);
 
       var $tabsBar = $(
         '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
@@ -812,7 +966,9 @@ define(["jquery"], function ($) {
         $tabsBar.append($tabBtn);
       });
 
-      $root.append($tabsBar).append($tabBody);
+      $header.append($tabsBar);
+
+      $root.append($header).append($tabBody);
 
       var currentTab = TABS.filter(function (t) {
         return t.key === activeTab;
@@ -917,7 +1073,10 @@ define(["jquery"], function ($) {
               settingsState.roles = settingsState.roles || {};
               settingsState.statusFieldMap = settingsState.statusFieldMap || [];
               settingsState.readinessMatrix =
-                settingsState.readinessMatrix || { productFieldId: null, cells: {} };
+                settingsState.readinessMatrix || { productFieldId: null, products: [], statusIds: [], cells: {} };
+              settingsState.readinessMatrix.products = settingsState.readinessMatrix.products || [];
+              settingsState.readinessMatrix.statusIds = settingsState.readinessMatrix.statusIds || [];
+              settingsState.readinessMatrix.cells = settingsState.readinessMatrix.cells || {};
               settingsState.scenarios = settingsState.scenarios || {};
 
               renderShell();

@@ -348,6 +348,50 @@ function validateProductionWidgetSettings(settings) {
       };
     }
 
+    const products = readinessMatrix.products;
+
+    if (products !== undefined) {
+      if (!Array.isArray(products)) {
+        return {
+          valid: false,
+          error: "Список продуктов плановой готовности заполнен некорректно.",
+          field: "readinessMatrix.products"
+        };
+      }
+
+      for (const product of products) {
+        if (!product || !isPositiveInteger(product.enumId)) {
+          return {
+            valid: false,
+            error: "В плановой готовности есть строка без выбранного продукта.",
+            field: "readinessMatrix.products"
+          };
+        }
+      }
+    }
+
+    const statusIds = readinessMatrix.statusIds;
+
+    if (statusIds !== undefined) {
+      if (!Array.isArray(statusIds)) {
+        return {
+          valid: false,
+          error: "Список статусов плановой готовности заполнен некорректно.",
+          field: "readinessMatrix.statusIds"
+        };
+      }
+
+      for (const statusId of statusIds) {
+        if (!isPositiveInteger(statusId)) {
+          return {
+            valid: false,
+            error: "В плановой готовности есть столбец без выбранного статуса.",
+            field: "readinessMatrix.statusIds"
+          };
+        }
+      }
+    }
+
     const cells = readinessMatrix.cells || {};
 
     if (typeof cells !== "object") {
