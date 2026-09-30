@@ -766,12 +766,12 @@ define(["jquery"], function ($) {
     function renderShell() {
       $root.empty();
 
-      var $layout = $('<div style="display:flex;padding:16px 0;"></div>');
+      var $layout = $('<div style="display:flex;flex-wrap:wrap;padding:16px 0;"></div>');
 
       // Левый список ботов — сейчас работает только "Производство".
       // "Монтажники" — задел на будущий бот (см. план Фазы 1), пункт
       // неактивен до тех пор, пока для него не появится своя реализация.
-      var $sidebar = $('<div style="width:160px;flex-shrink:0;padding-right:16px;"></div>');
+      var $sidebar = $('<div style="width:140px;flex-shrink:0;padding-right:16px;"></div>');
 
       $sidebar.append(
         '<div style="padding:8px;font-weight:600;color:#2d7ff9;border-left:3px solid #2d7ff9;">Производство</div>'
@@ -783,17 +783,17 @@ define(["jquery"], function ($) {
 
       $layout.append($sidebar);
 
-      var $content = $('<div style="flex:1;min-width:0;"></div>');
+      var $content = $('<div style="flex:1;min-width:480px;"></div>');
 
       var $tabsBar = $(
-        '<div style="display:flex;gap:24px;border-bottom:2px solid #ddd;' +
-          'margin-bottom:20px;padding-bottom:0;font-size:15px;"></div>'
+        '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
+          'border-bottom:2px solid #ddd;margin-bottom:20px;padding-bottom:4px;font-size:15px;"></div>'
       );
       var $tabBody = $('<div class="production-widget__tab-body"></div>');
 
       TABS.forEach(function (tab) {
         var $tabBtn = $(
-          '<div style="padding:8px 4px;cursor:pointer;' +
+          '<div style="padding:8px 4px;cursor:pointer;white-space:nowrap;' +
             (tab.key === activeTab ? "border-bottom:2px solid #2d7ff9;font-weight:600;" : "color:#666;") +
             '">' +
             tab.label +
@@ -900,7 +900,7 @@ define(["jquery"], function ($) {
           }
 
           $root = $('<div class="production-widget"></div>').css({
-            "margin-top": "32px",
+            "margin-top": "48px",
             "padding-top": "8px"
           });
 
