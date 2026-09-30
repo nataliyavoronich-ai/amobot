@@ -25,10 +25,9 @@
 // отдельного токена.
 //
 // ВАЖНО ПЕРЕД ЗАГРУЗКОЙ АРХИВА В AMOCRM:
-// - BACKEND_BASE ниже — заглушка, замените на реальный публичный домен
-//   backend'а на Selectel.
-// - WIDGET_SECRET ниже должен буквально совпадать со значением
-//   PRODUCTION_WIDGET_SECRET, заданным в переменных окружения backend'а.
+// - WIDGET_SECRET ниже должен буквально совпадать со значением переменной
+//   окружения PRODUCTION_WIDGET_SECRET на Selectel — иначе backend будет
+//   отвечать 403 на сохранение/чтение настроек.
 // - Колбэки/структура манифеста собраны по документации amoCRM/Kommo для
 //   классических виджетов; при первой реальной загрузке архива в amoCRM
 //   возможны мелкие несовпадения с фактическим рантаймом — тогда
@@ -42,8 +41,10 @@ define(["jquery"], function ($) {
     // КОНФИГ
     // ------------------------------------------------------------
 
-    var BACKEND_BASE = "https://REPLACE-WITH-REAL-DOMAIN.example"; // TODO: реальный домен backend'а на Selectel
-    var WIDGET_SECRET = "REPLACE-WITH-PRODUCTION_WIDGET_SECRET"; // TODO: то же значение, что в env PRODUCTION_WIDGET_SECRET
+    var BACKEND_BASE = "https://manufacture.zavod-lestnic-na-metalle.ru";
+    // Это же значение должно быть задано в переменной окружения
+    // PRODUCTION_WIDGET_SECRET на Selectel — иначе backend будет отвечать 403.
+    var WIDGET_SECRET = "kVfqiFTx4sDt3ZG02SlEdTdO0jn2Hy1WCt5mcv2YGEk";
 
     var ROLE_DEFS = [
       { key: "productionDirector", label: "Директор производства" },
