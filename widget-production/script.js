@@ -889,6 +889,27 @@ define(["jquery"], function ($) {
             ).first();
           }
 
+          // Запасной вариант №2: amoCRM точно выводит заголовок страницы
+          // (manifest.json → advanced.title), поэтому ищем элемент с ЭТИМ
+          // ТОЧНЫМ текстом и используем его родителя как контейнер — это
+          // работает независимо от того, как называется CSS-класс/ID у
+          // amoCRM в конкретной версии интерфейса.
+          if (!$target || !$target.length) {
+            var titleCandidates = $("*").filter(function () {
+              return (
+                this.children.length === 0 &&
+                $.trim($(this).text()) === $.trim(
+                  (window.I18n && window.I18n.t && window.I18n.t("advanced.title")) ||
+                    "Боты для отчетов ЗЛМК"
+                )
+              );
+            });
+
+            if (titleCandidates.length) {
+              $target = titleCandidates.last().parent();
+            }
+          }
+
           if (!$target || !$target.length) {
             console.error(
               "[Виджет Производство] Не удалось найти контейнер расширенных настроек " +
