@@ -1765,6 +1765,21 @@ async function processDesignerMessage(ctx, { text, userKey, userName, directId, 
     state.designerName = designerName;
   }
 
+  // ВРЕМЕННАЯ ДИАГНОСТИКА (2026-10-01): расследуем случай, когда реально
+  // загруженный файл (filesCount:1 в логе входящего сообщения) всё равно
+  // приводит к "Неизвестная команда" — нужно увидеть, в каком состоянии
+  // диалога бот находится в момент прихода файла.
+  console.log(
+    "ДИАГНОСТИКА состояния:",
+    JSON.stringify({
+      step: state.step,
+      uploadKey: state.upload ? state.upload.key : null,
+      uploadMode: state.upload ? state.upload.mode : null,
+      imageUrlsCount: (imageUrls || []).length,
+      trimmedText
+    })
+  );
+
   // Защита от неожиданного ввода (ТЗ п.20): если бот ждал нажатия кнопки,
   // а пришёл посторонний текст — не выполнять случайное действие, а
   // повторить последнее актуальное сообщение с кнопками.
