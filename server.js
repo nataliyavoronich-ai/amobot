@@ -1647,9 +1647,13 @@ async function ydUploadFromUrl(path, fileUrl) {
 // получить публичную ссылку на файл (для отбивки о загрузке), запрос
 // может завершиться ошибкой, потому что файла ещё физически нет по
 // целевому пути. Поэтому дожидаемся статуса "success" у операции.
+// 2026-10-01: увеличено с 25×1200мс (30 сек) до 90×2000мс (3 минуты) —
+// при нестабильности Яндекс.Диска прежнего времени не хватало, и загрузка
+// ошибочно считалась неудачной, хотя файл в итоге обычно всё же
+// докопировался бы чуть позже.
 async function ydWaitForUploadOperation(
   operationHref,
-  { maxAttempts = 25, delayMs = 1200 } = {}
+  { maxAttempts = 90, delayMs = 2000 } = {}
 ) {
   if (!operationHref) {
     return true;
@@ -7260,21 +7264,7 @@ function extractImageUrlsFromMessage(message) {
 
   walk(message);
 
-  const result = [...new Set(urls)];
-
-  // ВРЕМЕННАЯ ДИАГНОСТИКА (2026-10-01): расследуем повторяющиеся случаи,
-  // когда реально отправленный файл (фото, PDF и т.д.) не распознаётся —
-  // ни текста, ни ссылок на файлы не находится, и пользователь получает
-  // "Неизвестная команда". Логируем сырое сообщение целиком, когда это
-  // происходит, в обоих ботах (функция общая через ctx).
-  if (result.length === 0 && !(message && String(message.text || "").trim())) {
-    console.log(
-      "ДИАГНОСТИКА: файл не распознан, сырое сообщение:",
-      JSON.stringify(message)
-    );
-  }
-
-  return result;
+  return [...new Set(urls)];
 }
 
 
@@ -7449,8 +7439,6 @@ if (!userName && userKey) {
 
         const imageUrls = extractImageUrlsFromMessage(message);
 
-        // ВРЕМЕННАЯ ДИАГНОСТИКА (2026-10-01): если нет ни текста, ни
-        // распознанных картинок — это именно тот случай, когда бот
 await processUserMessage({
   text,
   userKey,
