@@ -1191,6 +1191,11 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
     // В "sequential"-режиме уведомление не откладывается (шаги идут по
     // одному), поэтому ссылки на файлы этой самой пачки шлём сразу же —
     // по аналогии с ботом инженеров ("Ссылки на загруженные файлы: ...").
+    // Короткое "получено" — отдельным сообщением до формирования ссылок
+    // (может занять время при нестабильности Яндекс.Диска, до 3 минут),
+    // чтобы пользователь не ждал молча.
+    await send("⏳ Файл(ы) получены, формирую ссылки на Яндекс.Диске...");
+
     const linksText = await ctx.buildUploadedFilesLinksText(task.noticeUploadedPaths);
 
     task.noticeUploadedPaths = [];
@@ -1247,6 +1252,13 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
     const paths = latestState.task.noticeUploadedPaths || [];
 
     latestState.task.noticeUploadedPaths = [];
+
+    // Разбито на два сообщения, как у бота инженеров (sendUploadNotice в
+    // server.js): сначала короткое "получено" сразу, затем — отдельным
+    // сообщением ссылки, когда они действительно готовы. Раньше это было
+    // одним сообщением, и пользователь молча ждал, пока в т.ч. при
+    // нестабильности Яндекс.Диска (до 3 минут) готовились ссылки.
+    await send("⏳ Файл(ы) получены, формирую ссылки на Яндекс.Диске...");
 
     const linksText = await ctx.buildUploadedFilesLinksText(paths);
 
