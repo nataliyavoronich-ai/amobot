@@ -1584,6 +1584,11 @@ async function buildUploadedFilesLinksText(filePaths) {
 // Первое сообщение: подтверждение получения (без кнопок).
 // Второе сообщение: подтверждение загрузки + ссылки на файлы (без кнопок).
 // Третье сообщение: что делать дальше (текст + кнопки следующего шага).
+// "⏳ Файл(ы) получены, загружаю..." отправляется ОТДЕЛЬНО, сразу после
+// вебхука с файлами, до начала самой загрузки на Яндекс.Диск (см. вызовы
+// ydUploadFromUrlAndWait перед каждым scheduleXxxUploadNotice ниже) — не
+// отсюда, т.к. эта функция вызывается уже из отложенного ("схлопнутого")
+// колбэка, после того как файлы уже загружены.
 async function sendUploadNotice(send, {
   contractNumber,
   fallbackId,
@@ -1592,8 +1597,6 @@ async function sendUploadNotice(send, {
   nextActionText,
   buttons
 }) {
-  await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
-
   let uploadedText =
     `Файлы загружены` +
     dealTagSuffix(contractNumber, fallbackId) +
@@ -4824,6 +4827,8 @@ async function processUserMessage({
         // пользователю пришло бы несколько сообщений вместо одного.
         cancelScheduledUploadNotice(userKey);
 
+        await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
+
         let uploaded = 0;
 
         for (
@@ -5091,6 +5096,8 @@ async function processUserMessage({
           // пакетов файлов не породили несколько отдельных сообщений.
           cancelScheduledUploadNotice(userKey);
 
+          await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
+
           let uploaded = 0;
 
           for (const file of validFiles) {
@@ -5340,6 +5347,8 @@ return;
           // пакетов файлов не породили несколько отдельных сообщений.
           cancelScheduledUploadNotice(userKey);
 
+          await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
+
           let uploaded = 0;
 
           for (const file of validFiles) {
@@ -5552,6 +5561,8 @@ return;
           // запланированную отбивку, чтобы несколько подряд идущих
           // пакетов файлов не породили несколько отдельных сообщений.
           cancelScheduledUploadNotice(userKey);
+
+          await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
 
           let uploaded = 0;
 
@@ -5878,6 +5889,8 @@ return;
           // запланированную отбивку, чтобы несколько подряд идущих
           // пакетов файлов не породили несколько отдельных сообщений.
           cancelScheduledUploadNotice(userKey);
+
+          await send("⏳ Файл(ы) получены, загружаю на Яндекс диск");
 
           let uploaded = 0;
 
