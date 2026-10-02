@@ -1419,7 +1419,54 @@ const FILE_KIND_LABELS = {
   unknown: "файл"
 };
 
+// amoMessenger (api.amo.io) иногда отдаёт ссылку на файл с одним и тем же
+// общим техническим расширением в самом пути (например, ".txt") —
+// независимо от реального типа файла (замечено на .sat). Настоящее имя
+// файла закодировано в параметре ссылки "s" (JWT), в поле "display_name".
+// Если его удаётся прочитать — берём расширение оттуда, это надёжнее пути
+// самой ссылки. Подпись токена не проверяем — он используется только как
+// источник метаданных (имени файла), а не для авторизации.
+function getRealExtensionFromAmoMessengerToken(url) {
+  try {
+    const parsed = new URL(url);
+    const token = parsed.searchParams.get("s");
+
+    if (!token) {
+      return "";
+    }
+
+    const parts = token.split(".");
+
+    if (parts.length < 2) {
+      return "";
+    }
+
+    const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payloadJson = Buffer.from(payloadBase64, "base64").toString("utf8");
+    const payload = JSON.parse(payloadJson);
+    const displayName = String(payload.display_name || "");
+    const lastDot = displayName.lastIndexOf(".");
+
+    if (lastDot === -1) {
+      return "";
+    }
+
+    return displayName
+      .slice(lastDot + 1)
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+  } catch (error) {
+    return "";
+  }
+}
+
 function getUrlExtension(url) {
+  const tokenExtension = getRealExtensionFromAmoMessengerToken(url);
+
+  if (tokenExtension) {
+    return tokenExtension;
+  }
+
   try {
     const withoutQuery = String(url || "").split("?")[0];
     const lastDot = withoutQuery.lastIndexOf(".");
