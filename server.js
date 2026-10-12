@@ -1122,6 +1122,37 @@ function yandexDiskHeaders() {
   };
 }
 
+// Повторяем запрос при сетевом сбое (таймаут, обрыв соединения и т.п.) —
+// validateStatus всегда возвращает true, поэтому axios бросает исключение
+// только при сетевой проблеме, а не из-за HTTP-кода ошибки. Без повтора
+// одна временная проблема связи с Яндекс.Диском роняла всю загрузку файла
+// и заставляла пользователя загружать его заново (см. doRequestWithRetry
+// выше — тот же приём для amoCRM).
+async function ydRequestWithRetry(doRequest, label, maxAttempts = 3) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await doRequest();
+    } catch (error) {
+      lastError = error;
+
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+
+      console.log(
+        `Яндекс.Диск (${label}): сетевая ошибка (${error.message}), ` +
+        `попытка ${attempt} из ${maxAttempts}. Повторяю...`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, attempt * 700));
+    }
+  }
+
+  throw lastError;
+}
+
 async function ydEnsureFolder(path) {
   if (!YANDEX_DISK_TOKEN) {
     throw new Error(
@@ -1129,15 +1160,19 @@ async function ydEnsureFolder(path) {
     );
   }
 
-  const response = await axios.put(
-    "https://cloud-api.yandex.net/v1/disk/resources",
-    null,
-    {
-      params: { path },
-      headers: yandexDiskHeaders(),
-      timeout: 30000,
-      validateStatus: () => true
-    }
+  const response = await ydRequestWithRetry(
+    () =>
+      axios.put(
+        "https://cloud-api.yandex.net/v1/disk/resources",
+        null,
+        {
+          params: { path },
+          headers: yandexDiskHeaders(),
+          timeout: 30000,
+          validateStatus: () => true
+        }
+      ),
+    `создание папки "${path}"`
   );
 
   // 201 — папка создана, 409 — уже существует. Оба варианта — успех.
@@ -1664,18 +1699,22 @@ async function ydUploadFromUrl(path, fileUrl) {
     );
   }
 
-  const response = await axios.post(
-    "https://cloud-api.yandex.net/v1/disk/resources/upload",
-    null,
-    {
-      params: {
-        path,
-        url: fileUrl
-      },
-      headers: yandexDiskHeaders(),
-      timeout: 30000,
-      validateStatus: () => true
-    }
+  const response = await ydRequestWithRetry(
+    () =>
+      axios.post(
+        "https://cloud-api.yandex.net/v1/disk/resources/upload",
+        null,
+        {
+          params: {
+            path,
+            url: fileUrl
+          },
+          headers: yandexDiskHeaders(),
+          timeout: 30000,
+          validateStatus: () => true
+        }
+      ),
+    `загрузка файла "${path}"`
   );
 
   if (response.status !== 202 && response.status !== 201) {
