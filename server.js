@@ -3629,28 +3629,8 @@ async function buildReportNoteText(folders, flags) {
     lines.push(`Видео: ${url}`);
   }
 
-  const selLines = ["Файлы на Selectel:"];
-
-  if (flags && flags.photo) {
-    selLines.push(
-      `Фотоотчет: ${selGetPublicUrl(`${folders.photoPath}/`)}`
-    );
-  }
-
-  if (flags && flags.measureSheet) {
-    selLines.push(
-      `Замерный лист: ${selGetPublicUrl(`${folders.measureSheetPath}/`)}`
-    );
-  }
-
-  if (flags && flags.video) {
-    selLines.push(
-      `Видео: ${selGetPublicUrl(`${folders.videoPath}/`)}`
-    );
-  }
-
-  if (selLines.length > 1) {
-    lines.push("", ...selLines);
+  if (flags && (flags.photo || flags.measureSheet || flags.video)) {
+    lines.push("", "Файлы продублированы в Selectel");
   }
 
   return lines.join("\n");
