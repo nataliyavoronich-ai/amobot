@@ -970,6 +970,7 @@ function classifyByExtension(ctx, urls, allowedExtensions) {
 
 async function buildUploadNoteText(ctx, designerName, keys, uploadedKeys, uploadedLastPath) {
   const entries = [];
+  const selEntries = [];
 
   for (const key of keys) {
     if (!uploadedKeys[key]) {
@@ -993,16 +994,30 @@ async function buildUploadNoteText(ctx, designerName, keys, uploadedKeys, upload
         error.message
       );
     }
+
+    selEntries.push(
+      `${FILE_TYPE_CONFIGS[key].noteLabel}: ${ctx.selGetPublicUrl(path)}`
+    );
   }
 
   if (entries.length === 0) {
     return "";
   }
 
-  return (
-    `${designerName || "Пользователь"} загрузил проектную документацию:\n` +
-    entries.map((line, i) => `${i + 1}) ${line}`).join("\n")
-  );
+  const lines = [
+    `${designerName || "Пользователь"} загрузил проектную документацию:`,
+    ...entries.map((line, i) => `${i + 1}) ${line}`)
+  ];
+
+  if (selEntries.length > 0) {
+    lines.push(
+      "",
+      "Файлы на Selectel:",
+      ...selEntries.map((line, i) => `${i + 1}) ${line}`)
+    );
+  }
+
+  return lines.join("\n");
 }
 
 // ============================================================
@@ -1148,7 +1163,10 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
       const fileName = buildDesignerFileName(baseName, nextNumber, extension);
       const uploadedPath = `${targetPath}/${fileName}`;
 
-      await ctx.ydUploadFromUrlAndWait(uploadedPath, file.url);
+      await Promise.all([
+        ctx.ydUploadFromUrlAndWait(uploadedPath, file.url),
+        ctx.selDuplicateFileBestEffort(uploadedPath, file.url)
+      ]);
 
       uploaded++;
       lastPath = uploadedPath;

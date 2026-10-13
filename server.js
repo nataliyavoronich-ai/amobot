@@ -1,5 +1,6 @@
 const express = require("express");
 const axios = require("axios");
+const crypto = require("crypto");
 const designerBot = require("./designerBot");
 const productionBot = require("./productionBot");
 
@@ -94,6 +95,26 @@ const CONTRACT_LINK_FIELD_ID = 543254; // "Договор (Подписан)"
 const YANDEX_DISK_TOKEN = process.env.YANDEX_DISK_TOKEN || "";
 
 const YANDEX_DISK_ROOT_FOLDER = "amoCRM";
+
+// ============================================================
+// SELECTEL OBJECT STORAGE (S3-совместимое) — ДУБЛИРОВАНИЕ ФАЙЛОВ
+// ============================================================
+// Эндпоинт и имя бакета — не секрет, поэтому прямо в коде (как и
+// YANDEX_DISK_ROOT_FOLDER выше). Ключи доступа — в Environment Variables.
+// Бакет публичный: прямая ссылка на объект открывается без авторизации,
+// как и ссылки с Яндекс.Диска.
+
+const SELECTEL_S3_ENDPOINT = "s3.ru-6.storage.selcloud.ru";
+const SELECTEL_S3_BUCKET = "amomessenger";
+const SELECTEL_S3_REGION = "ru-6";
+
+// Публичные ссылки на файлы открываются НЕ через адрес S3 API выше, а
+// через отдельный публичный домен контейнера (вкладка "Домены" в панели
+// Selectel) — особенность Selectel Object Storage, не общий стандарт S3.
+const SELECTEL_S3_PUBLIC_DOMAIN = "ee9f5ea1-3f56-46cc-af74-b8b35e5438d4.selstorage.ru";
+
+const SELECTEL_S3_ACCESS_KEY = process.env.SELECTEL_S3_ACCESS_KEY || "";
+const SELECTEL_S3_SECRET_KEY = process.env.SELECTEL_S3_SECRET_KEY || "";
 
 const MOSCOW_OFFSET_MS = 3 * 60 * 60 * 1000;
 
@@ -1893,6 +1914,208 @@ async function ensureSingleLeadFolder(reportsPath, targetFolderPath) {
   await ydEnsureFolderPath(reportsPath);
   await ydEnsureFolder(targetFolderPath);
 }
+
+// ============================================================
+// SELECTEL OBJECT STORAGE — ЗАГРУЗКА ФАЙЛОВ (дублирование с Яндекс.Диска)
+// ============================================================
+// Классический S3 API, подпись запроса — AWS Signature Version 4, вручную
+// через встроенный в Node модуль crypto (без сторонних библиотек вроде
+// aws-sdk). Бакет публичный, поэтому "получить публичную ссылку" — просто
+// построить URL, без отдельного шага "опубликовать" как у Яндекс.Диска.
+
+// encodeURIComponent не кодирует !'()* — а AWS Signature V4 требует,
+// чтобы путь в каноническом запросе был закодирован строго по RFC 3986
+// (в т.ч. эти символы), иначе подпись не совпадёт с тем, что проверяет
+// сервер.
+function selAwsUriEncode(value) {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+
+function selCanonicalPath(key) {
+  const encodedKey = String(key)
+    .split("/")
+    .map(selAwsUriEncode)
+    .join("/");
+
+  return `/${SELECTEL_S3_BUCKET}/${encodedKey}`;
+}
+
+function selSha256Hex(data) {
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+function selHmac(key, data) {
+  return crypto.createHmac("sha256", key).update(data).digest();
+}
+
+function selSignRequest({ method, key, payload, contentType }) {
+  const now = new Date();
+  const amzDate = now
+    .toISOString()
+    .replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+
+  const canonicalPath = selCanonicalPath(key);
+  const payloadHash = selSha256Hex(payload);
+
+  const canonicalHeaders =
+    `content-type:${contentType}\n` +
+    `host:${SELECTEL_S3_ENDPOINT}\n` +
+    `x-amz-acl:public-read\n` +
+    `x-amz-content-sha256:${payloadHash}\n` +
+    `x-amz-date:${amzDate}\n`;
+  const signedHeaders = "content-type;host;x-amz-acl;x-amz-content-sha256;x-amz-date";
+
+  const canonicalRequest = [
+    method,
+    canonicalPath,
+    "",
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash
+  ].join("\n");
+
+  const credentialScope = `${dateStamp}/${SELECTEL_S3_REGION}/s3/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    selSha256Hex(canonicalRequest)
+  ].join("\n");
+
+  const kDate = selHmac("AWS4" + SELECTEL_S3_SECRET_KEY, dateStamp);
+  const kRegion = selHmac(kDate, SELECTEL_S3_REGION);
+  const kService = selHmac(kRegion, "s3");
+  const kSigning = selHmac(kService, "aws4_request");
+  const signature = selHmac(kSigning, stringToSign).toString("hex");
+
+  const authorization =
+    `AWS4-HMAC-SHA256 Credential=${SELECTEL_S3_ACCESS_KEY}/${credentialScope}, ` +
+    `SignedHeaders=${signedHeaders}, Signature=${signature}`;
+
+  return {
+    url: `https://${SELECTEL_S3_ENDPOINT}${canonicalPath}`,
+    headers: {
+      "Content-Type": contentType,
+      "x-amz-acl": "public-read",
+      "x-amz-content-sha256": payloadHash,
+      "x-amz-date": amzDate,
+      Authorization: authorization
+    }
+  };
+}
+
+// Прямая публичная ссылка на объект — бакет публичный, поэтому не нужен
+// отдельный запрос "опубликовать", в отличие от Яндекс.Диска. Публичный
+// доступ у Selectel работает через отдельный домен контейнера
+// (<uuid>.selstorage.ru), а не через домен S3 API endpoint-а.
+function selGetPublicUrl(key) {
+  const encodedKey = String(key)
+    .split("/")
+    .map(selAwsUriEncode)
+    .join("/");
+
+  return `https://${SELECTEL_S3_PUBLIC_DOMAIN}/${encodedKey}`;
+}
+
+async function selUploadBuffer(key, buffer, contentType) {
+  if (!SELECTEL_S3_ACCESS_KEY || !SELECTEL_S3_SECRET_KEY) {
+    throw new Error(
+      "SELECTEL_S3_ACCESS_KEY/SELECTEL_S3_SECRET_KEY не заданы в Environment Variables"
+    );
+  }
+
+  const { url, headers } = selSignRequest({
+    method: "PUT",
+    key,
+    payload: buffer,
+    contentType: contentType || "application/octet-stream"
+  });
+
+  const doRequest = () =>
+    axios.put(url, buffer, {
+      headers,
+      timeout: 60000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      validateStatus: () => true
+    });
+
+  // Тот же паттерн повтора при сетевом сбое, что и для amoCRM/Яндекс.Диска.
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await doRequest();
+
+      if (response.status !== 200) {
+        throw new Error(
+          `Selectel S3: не удалось загрузить "${key}". ` +
+            `HTTP ${response.status}: ${JSON.stringify(response.data)}`
+        );
+      }
+
+      return true;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt >= 3) {
+        break;
+      }
+
+      console.log(
+        `Selectel S3: ошибка загрузки (${error.message}), попытка ${attempt} из 3. Повторяю...`
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, attempt * 700));
+    }
+  }
+
+  throw lastError;
+}
+
+// Скачивает файл по ссылке amoMessenger и загружает его в Selectel под
+// тем же относительным путём/именем, что и на Яндекс.Диске — используется
+// ПАРАЛЛЕЛЬНО с ydUploadFromUrlAndWait, не вместо него.
+async function selUploadFromUrlAndWait(key, fileUrl) {
+  const fileResponse = await axios.get(fileUrl, {
+    responseType: "arraybuffer",
+    timeout: 60000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    validateStatus: () => true
+  });
+
+  if (fileResponse.status !== 200) {
+    throw new Error(
+      `Selectel S3: не удалось скачать файл по ссылке для загрузки. ` +
+        `HTTP ${fileResponse.status}`
+    );
+  }
+
+  const contentType =
+    fileResponse.headers["content-type"] || "application/octet-stream";
+
+  await selUploadBuffer(key, Buffer.from(fileResponse.data), contentType);
+}
+
+// Дублирование на Selectel не должно ломать основной сценарий (Яндекс.Диск
+// остаётся источником истины) — ошибка только логируется.
+async function selDuplicateFileBestEffort(key, fileUrl) {
+  try {
+    await selUploadFromUrlAndWait(key, fileUrl);
+  } catch (error) {
+    console.error(
+      "Selectel S3: не удалось продублировать файл:",
+      key,
+      error.message
+    );
+  }
+}
+
 // ============================================================
 // ОБНОВЛЕНИЕ ТОКЕНА AMOMESSENGER
 // ============================================================
@@ -3406,6 +3629,30 @@ async function buildReportNoteText(folders, flags) {
     lines.push(`Видео: ${url}`);
   }
 
+  const selLines = ["Файлы на Selectel:"];
+
+  if (flags && flags.photo) {
+    selLines.push(
+      `Фотоотчет: ${selGetPublicUrl(`${folders.photoPath}/`)}`
+    );
+  }
+
+  if (flags && flags.measureSheet) {
+    selLines.push(
+      `Замерный лист: ${selGetPublicUrl(`${folders.measureSheetPath}/`)}`
+    );
+  }
+
+  if (flags && flags.video) {
+    selLines.push(
+      `Видео: ${selGetPublicUrl(`${folders.videoPath}/`)}`
+    );
+  }
+
+  if (selLines.length > 1) {
+    lines.push("", ...selLines);
+  }
+
   return lines.join("\n");
 }
 
@@ -4901,10 +5148,10 @@ async function processUserMessage({
             const uploadedPath =
               `${currentPendingPhoto.contract_path}/${fileName}`;
 
-            await ydUploadFromUrlAndWait(
-              uploadedPath,
-              file.url
-            );
+            await Promise.all([
+              ydUploadFromUrlAndWait(uploadedPath, file.url),
+              selDuplicateFileBestEffort(uploadedPath, file.url)
+            ]);
 
             // Номер увеличиваем только после успешного запуска загрузки на Яндекс.Диск.
             currentPendingPhoto
@@ -5160,10 +5407,10 @@ async function processUserMessage({
               const uploadedPath =
                 `${currentHub.folders.photoPath}/${fileName}`;
 
-              await ydUploadFromUrlAndWait(
-                uploadedPath,
-                file.url
-              );
+              await Promise.all([
+                ydUploadFromUrlAndWait(uploadedPath, file.url),
+                selDuplicateFileBestEffort(uploadedPath, file.url)
+              ]);
 
               currentHub.photo_next_number = currentNumber + 1;
 
@@ -5411,10 +5658,10 @@ return;
               const uploadedPath =
                 `${currentPending.measure_sheet_path}/${fileName}`;
 
-              await ydUploadFromUrlAndWait(
-                uploadedPath,
-                file.url
-              );
+              await Promise.all([
+                ydUploadFromUrlAndWait(uploadedPath, file.url),
+                selDuplicateFileBestEffort(uploadedPath, file.url)
+              ]);
 
               currentPending.next_file_number = currentNumber + 1;
 
@@ -5625,10 +5872,10 @@ return;
               const uploadedPath =
                 `${currentPending.video_path}/${fileName}`;
 
-              await ydUploadFromUrlAndWait(
-                uploadedPath,
-                file.url
-              );
+              await Promise.all([
+                ydUploadFromUrlAndWait(uploadedPath, file.url),
+                selDuplicateFileBestEffort(uploadedPath, file.url)
+              ]);
 
               currentPending.next_file_number = currentNumber + 1;
 
@@ -5955,10 +6202,10 @@ return;
               const uploadedPath =
                 `${currentPending.folder_path}/${fileName}`;
 
-              await ydUploadFromUrlAndWait(
-                uploadedPath,
-                file.url
-              );
+              await Promise.all([
+                ydUploadFromUrlAndWait(uploadedPath, file.url),
+                selDuplicateFileBestEffort(uploadedPath, file.url)
+              ]);
 
               currentPending.next_file_number = currentNumber + 1;
 
@@ -7601,6 +7848,8 @@ const designerBotContext = {
   ydUploadFromUrlAndWait,
   ydGetFolderPublicUrl,
   yandexDiskHeaders,
+  selDuplicateFileBestEffort,
+  selGetPublicUrl,
   getUrlExtension,
   escapeRegExp,
   mono,
