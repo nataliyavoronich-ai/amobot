@@ -649,15 +649,21 @@ async function handleUnknownCommand(ctx, directId, roleKey) {
 // 7. СЦЕНАРИЙ «РАСПРЕДЕЛЕНИЕ» (ТЗ п.9-16)
 // ============================================================
 
-// Поля/справочники этого сценария, названные пользователем напрямую по id
-// (не вынесены в виджет — в отличие от Исполнителя/Плана/Факта/Цены из
-// «Связи этапов и полей», это технические поля одного конкретного процесса,
-// а не то, что имеет смысл делать настраиваемым для разных пайплайнов).
-const DISTRIBUTION_FLAG_FIELD_ID = 555072; // "[Бот] Распределение Мастера", тип "флаг"
-const PROJECT_PDF_FIELD_ID = 543268; // "Проект в производство pdf", тип "ссылка"
-const CONTRACT_NUMBER_FIELD_ID = 412776; // "№ договора" — то же поле, что у бота инженеров
+// Поля справочника "Таблица 2. Поля, используемые в боте" из исходного ТЗ
+// v2.0 — технические поля конкретно этого сценария, не вынесенные в виджет
+// (в отличие от Исполнителя/Плана/Факта/Цены из "Связи этапов и полей").
+const DISTRIBUTION_FLAG_FIELD_ID = 555072; // "[Бот] Распределение Мастера", флаг
+const EXECUTOR_PENDING_FIELD_ID = 555074; // "[Бот] Согласование исполнителя", текст
+const NOT_ACCEPTED_OTK_FLAG_FIELD_ID = 555166; // "[Бот] Не приняты работы: ОТК", флаг
+const NOT_ACCEPTED_MASTER_FLAG_FIELD_ID = 555168; // "[Бот] Не приняты работы: Мастер", флаг
+const PRODUCT_FIELD_ID = 172572; // "Продукт", список
+const PROJECT_PDF_FIELD_ID = 543268; // "Проект в производство pdf", ссылка
+const CONTRACT_NUMBER_FIELD_ID = 412776; // "№ Дог/Зам. листа", текст
 
 const OTK_REJECTED_TAG_NAME = "Не принято ОТК";
+
+// ТЗ п.T-2, группа 3: сделки, чей № договора содержит один из префиксов.
+const PRIORITY_CONTRACT_PREFIXES = ["ПД/", "ПМ/", "ПС/"];
 
 const PIPELINE_NAME_METAL = "Производство";
 const PIPELINE_NAME_WOOD = "Дерево производства";
@@ -757,12 +763,6 @@ function leadHasTag(lead, tagName) {
   return tags.some((tag) => tag.name === tagName);
 }
 
-function isPendingManagerApproval(ctx, lead) {
-  const values = ctx.getFieldValues(lead, DISTRIBUTION_FLAG_FIELD_ID);
-
-  return values.some((v) => v === true || v === "true" || v === "1");
-}
-
 // ТЗ п.12.2 / п.19 — "значение поля «Исполнитель», соответствующее
 // пользователю" определяем по совпадению имени (без явной таблицы
 // соответствия amoMessenger-пользователь ↔ amoCRM-пользователь, которой в
@@ -797,27 +797,85 @@ async function patchLead(ctx, leadId, body) {
   return response.data;
 }
 
+// ТЗ T-4.2/T-5: "Статус бота" в "Связи этапов и полей" принимает одно из
+// двух значений — "Распределение" (сделка ждёт назначения исполнителя) и
+// "Исполнение" (уже назначена, в работе). Оба набора строк нужны отдельно
+// в разных местах сценария — не взаимозаменяемы.
+function findDistributionRows(settings) {
+  return ((settings && settings.statusFieldMap) || []).filter((row) => row.botStatus === "distribution");
+}
+
 function findExecutionRows(settings) {
   return ((settings && settings.statusFieldMap) || []).filter((row) => row.botStatus === "execution");
 }
 
-// Строит текст с данными сделки для сообщений ТЗ п.12/13/14/15/16:
-// "[номер договора], [цена] рублей, [ссылка на PDF проекта]".
-function buildDealDescriptionText(ctx, lead) {
-  const contractNumber = ctx.getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID) || `Сделка ${lead.id}`;
-  const price = ctx.getFieldValueJoined(lead, lead.__priceFieldId) || lead.price || "—";
-  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) || "(ссылка не найдена)";
+function fieldIsTruthy(ctx, lead, fieldId) {
+  return ctx.getFieldValues(lead, fieldId).some((v) => v === true || v === "true" || v === "1");
+}
 
-  return { contractNumber, text: `${contractNumber}, ${price} рублей, ${pdfLink}` };
+function getContractNumberText(ctx, lead) {
+  return ctx.getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID) || `Сделка ${lead.id}`;
+}
+
+function getProductText(ctx, lead) {
+  return ctx.getFieldValueJoined(lead, PRODUCT_FIELD_ID) || "—";
+}
+
+function getPriceText(ctx, lead, priceFieldId) {
+  return ctx.getFieldValueJoined(lead, priceFieldId) || (lead.price != null ? String(lead.price) : "—");
+}
+
+// ТЗ, раздел "Ограничения и допущения" к T-2: во ВСЕХ сообщениях с номером
+// договора, КРОМЕ сценария T-4 (Распределение у Исполнителей), номер
+// договора должен быть гиперссылкой на "Проект в производство pdf".
+function getContractNumberDisplay(ctx, lead, { hyperlink = false } = {}) {
+  const contractNumber = getContractNumberText(ctx, lead);
+
+  if (!hyperlink) {
+    return contractNumber;
+  }
+
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+
+  return pdfLink ? `[${contractNumber}](${pdfLink})` : contractNumber;
+}
+
+// ТЗ T-2 — сортировка кнопок сделок в любом списке:
+// 1) есть непринятые работы (ОТК или Мастер);
+// 2) сделки к исправлению (тег "Не принято ОТК");
+// 3) № договора содержит "ПД/"/"ПМ/"/"ПС/";
+// 4) остальные.
+function dealSortGroup(ctx, lead) {
+  if (fieldIsTruthy(ctx, lead, NOT_ACCEPTED_OTK_FLAG_FIELD_ID) || fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)) {
+    return 1;
+  }
+
+  if (leadHasTag(lead, OTK_REJECTED_TAG_NAME)) {
+    return 2;
+  }
+
+  const contractNumber = getContractNumberText(ctx, lead);
+
+  if (PRIORITY_CONTRACT_PREFIXES.some((prefix) => contractNumber.includes(prefix))) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function sortDealsForButtons(ctx, leads) {
+  return [...leads].sort((a, b) => dealSortGroup(ctx, a) - dealSortGroup(ctx, b));
 }
 
 // ------------------------------------------------------------
-// 7.2 Redis: куда слать push-уведомления + кто запросил согласование
+// 7.2 Redis: куда слать push-уведомления
 // ------------------------------------------------------------
 // Храним id диалога (direct_id) последнего обращения каждого пользователя —
-// нужно, чтобы проактивно написать мастеру/руководителю, который сам сейчас
-// ничего не нажимал (ТЗ п.14). Без этого амоMessenger никак не отдаёт
-// "адрес" пользователя, который раньше не писал боту.
+// нужно, чтобы проактивно написать мастеру, который сам сейчас ничего не
+// нажимал (ТЗ T-5, случай "Исполнитель берёт в работу сделку"). Без этого
+// amoMessenger никак не отдаёт "адрес" пользователя, который раньше не
+// писал боту. "Кто запросил распределение" в Redis не хранится — для этого
+// есть amoCRM-поле "[Бот] Согласование исполнителя" (ТЗ T-4.5.2.2).
 function directIdRedisKey(userName) {
   return `production_direct_id:${normalizeHandleName(userName)}`;
 }
@@ -842,33 +900,11 @@ async function loadUserDirectId(ctx, userName) {
   }
 }
 
-// "Кто запросил распределение" — единственное, что не восстановить из
-// amoCRM (поле «Исполнитель» ещё не записано на этапе ожидания
-// согласования, см. ТЗ п.13), поэтому держим отдельно, по id сделки.
-// Переживает перезапуск процесса (в отличие от productionUserState).
-function pendingApprovalRedisKey(leadId) {
-  return `production_pending_approval:${leadId}`;
-}
-
-async function savePendingApproval(ctx, leadId, data) {
-  await ctx.redisRequest(["SET", pendingApprovalRedisKey(leadId), JSON.stringify(data)]);
-}
-
-async function loadPendingApproval(ctx, leadId) {
-  const response = await ctx.redisRequest(["GET", pendingApprovalRedisKey(leadId)]);
-
-  return response.result ? JSON.parse(response.result) : null;
-}
-
-async function clearPendingApproval(ctx, leadId) {
-  await ctx.redisRequest(["DEL", pendingApprovalRedisKey(leadId)]);
-}
-
 // Рассылка сообщения всем активным пользователям роли, у кого есть
 // известный direct_id (то есть кто хотя бы раз писал боту "старт" или любое
 // сообщение). Для тех, у кого direct_id не известен, сообщение не
 // отправляется — amoMessenger не даёт написать пользователю "в холодную".
-async function notifyRoleUsers(ctx, settings, roleKey, text, buttons) {
+async function notifyRoleUsers(ctx, settings, roleKey, text, buttons, options) {
   const entries = (settings && settings.roles && settings.roles[roleKey]) || [];
   let notified = 0;
 
@@ -888,7 +924,7 @@ async function notifyRoleUsers(ctx, settings, roleKey, text, buttons) {
     }
 
     try {
-      await sendProductionDirectMessage(ctx, directId, text, buttons);
+      await sendProductionDirectMessage(ctx, directId, text, buttons, options);
       notified++;
     } catch (error) {
       console.error(
@@ -936,24 +972,14 @@ async function handleDistributionButton(ctx, directId, userKey, userName, roleKe
   }
 }
 
-// ТЗ п.10: у исполнителя — проверка "Не принято ОТК" по ВСЕМ воронкам, где
-// у него может быть роль исполнителя, затем список доступных сделок.
-async function showDistributionListForPerformer(ctx, directId, userName, settings) {
-  const rows = findExecutionRows(settings);
+// ТЗ T-4.1: проверка "Не принято ОТК" среди собственных сделок исполнителя
+// со статусом бота "Исполнение" (не "Распределение" — это две разные группы
+// строк настроек, см. findExecutionRows/findDistributionRows).
+async function performerHasOtkRejectedDeals(ctx, userName, settings) {
+  const executionRows = findExecutionRows(settings);
 
-  if (rows.length === 0) {
-    await sendProductionDirectMessage(
-      ctx,
-      directId,
-      "❌ В настройках не указан статус «Исполнение». Обратитесь к администратору."
-    );
-    return;
-  }
-
-  let hasOtkRejected = false;
-
-  for (const row of rows) {
-    if (!row.amoPipelineId || !row.executorFieldId) {
+  for (const row of executionRows) {
+    if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
       continue;
     }
 
@@ -963,90 +989,120 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
       continue;
     }
 
-    const pipelineLeads = await getLeadsByPipeline(ctx, row.amoPipelineId, { withTags: true });
+    const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId, withTags: true });
 
-    const rejected = pipelineLeads.some(
+    const rejected = leads.some(
       (lead) =>
         leadHasTag(lead, OTK_REJECTED_TAG_NAME) &&
         ctx.getFieldValues(lead, row.executorFieldId).includes(enumOption.value)
     );
 
     if (rejected) {
-      hasOtkRejected = true;
-      break;
+      return true;
     }
   }
 
-  if (hasOtkRejected) {
+  return false;
+}
+
+// ТЗ T-4.1-4.3: у исполнителя — предупреждение про "Не принято ОТК" (если
+// есть), затем список сделок, доступных для распределения.
+async function showDistributionListForPerformer(ctx, directId, userName, settings) {
+  if (await performerHasOtkRejectedDeals(ctx, userName, settings)) {
     await sendProductionDirectMessage(
       ctx,
       directId,
-      "У вас есть операции не принятые ОТК, принятие новых операций доступно только " +
-        "после согласования с руководителем"
+      "У вас есть операции, не принятые ОТК. Принятие новых операций доступно только " +
+        "после согласования с мастером"
     );
   }
 
-  const available = [];
+  // T-4.2: статус бота "Распределение", поле "Исполнитель" этой строки у
+  // сделки не заполнено, пользователь — допустимый вариант для этого поля.
+  const distributionRows = findDistributionRows(settings);
 
-  for (const row of rows) {
-    if (!row.amoPipelineId || !row.amoStatusId) {
+  if (distributionRows.length === 0) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ В настройках не указан статус «Распределение». Обратитесь к администратору."
+    );
+    return;
+  }
+
+  let available = [];
+
+  for (const row of distributionRows) {
+    if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
+      continue;
+    }
+
+    const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, userName);
+
+    if (!enumOption) {
       continue;
     }
 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
 
     for (const lead of leads) {
-      // Сделки, уже ожидающие согласования руководителя (кто-то другой уже
-      // нажал "Да"), не должны предлагаться к повторному распределению —
-      // иначе два исполнителя могут "принять" одну и ту же сделку.
-      if (isPendingManagerApproval(ctx, lead)) {
-        continue;
+      if (ctx.getFieldValues(lead, row.executorFieldId).length > 0) {
+        continue; // уже назначено кому-то
       }
 
-      lead.__priceFieldId = row.priceFieldId;
       available.push(lead);
     }
   }
 
   if (available.length === 0) {
-    await sendProductionDirectMessage(ctx, directId, "Сделки доступные для распределения:\nНет доступных сделок.");
+    await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:\nНет доступных сделок.");
     return;
   }
 
-  const buttons = available.map(
-    (lead) => ctx.getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID) || `Сделка ${lead.id}`
-  );
+  available = sortDealsForButtons(ctx, available);
 
-  await sendProductionDirectMessage(ctx, directId, "Сделки доступные для распределения:", buttons);
+  const buttons = available.map((lead) => getContractNumberText(ctx, lead));
+
+  await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:", buttons);
 }
 
-// ТЗ п.11: нажатие на кнопку с номером договора из списка выше. Список не
-// храним между шагами (ТЗ п.18 — всегда живые данные) — ищем сделку заново
+// ТЗ T-4.3-4.5: нажатие на кнопку с номером договора из списка выше. Список
+// не храним между шагами (ТЗ — всегда живые данные) — ищем сделку заново
 // среди текущих доступных.
 async function tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText) {
-  const rows = findExecutionRows(settings);
+  const distributionRows = findDistributionRows(settings);
 
-  for (const row of rows) {
+  for (const row of distributionRows) {
     if (!row.amoPipelineId || !row.amoStatusId) {
       continue;
     }
 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
 
-    const lead = leads.find(
-      (item) =>
-        ctx.getFieldValueJoined(item, CONTRACT_NUMBER_FIELD_ID) === trimmedText &&
-        !isPendingManagerApproval(ctx, item)
-    );
+    const lead = leads.find((item) => getContractNumberText(ctx, item) === trimmedText);
 
-    if (lead) {
-      await sendProductionDirectMessage(ctx, directId, `Принять сделку ${trimmedText}?`, [
-        buildTaggedButtonCompat(ctx, "Да", lead.id),
-        buildTaggedButtonCompat(ctx, "Нет", lead.id)
-      ]);
+    if (!lead) {
+      continue;
+    }
 
+    const contractNumber = getContractNumberText(ctx, lead);
+
+    // T-4.4: сделка уже на согласовании у мастера — показать без кнопок.
+    if (fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID)) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        `Сделка № договора ${contractNumber} находится на распределении у мастера`
+      );
       return true;
     }
+
+    await sendProductionDirectMessage(ctx, directId, `Принять сделку № договора ${contractNumber}?`, [
+      buildTaggedButtonCompat(ctx, "Да", lead.id),
+      buildTaggedButtonCompat(ctx, "Нет", lead.id)
+    ]);
+
+    return true;
   }
 
   return false;
@@ -1068,6 +1124,7 @@ function parseTaggedButtonCompat(ctx, text, label) {
 
 // ТЗ п.11.1/12/13: ответ "Да"/"Нет" на "Принять сделку [X]?" у исполнителя.
 async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName, leadId, decision, settings) {
+  // T-4.5.1
   if (decision === "no") {
     await showDistributionListForPerformer(ctx, directId, userName, settings);
     return;
@@ -1080,8 +1137,10 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
     return;
   }
 
-  const rows = findExecutionRows(settings);
-  const row = rows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
+  // Сделка сейчас в статусе "Распределение" — именно там, в "Связи этапов и
+  // полей", указаны нужные для назначения поля (T-4.5.2).
+  const distributionRows = findDistributionRows(settings);
+  const row = distributionRows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
 
   if (!row || !row.executorFieldId) {
     await sendProductionDirectMessage(
@@ -1103,20 +1162,14 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
     return;
   }
 
-  const pipelineLeads = await getLeadsByPipeline(ctx, row.amoPipelineId, { withTags: true });
+  // T-4.5.2: та же проверка "Не принято ОТК", что в T-4.1 — заново, т.к.
+  // ситуация могла измениться между показом списка и нажатием "Да".
+  const hasOtkRejected = await performerHasOtkRejectedDeals(ctx, userName, settings);
 
-  const hasOtkRejected = pipelineLeads.some(
-    (otherLead) =>
-      leadHasTag(otherLead, OTK_REJECTED_TAG_NAME) &&
-      ctx.getFieldValues(otherLead, row.executorFieldId).includes(enumOption.value)
-  );
-
-  lead.__priceFieldId = row.priceFieldId;
-
-  const { contractNumber, text: dealText } = buildDealDescriptionText(ctx, lead);
+  const contractNumber = getContractNumberText(ctx, lead);
 
   if (!hasOtkRejected) {
-    // ТЗ п.12 — прямое назначение.
+    // T-4.5.2.1
     if (!row.nextAmoStatusId) {
       await sendProductionDirectMessage(
         ctx,
@@ -1128,35 +1181,49 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
 
     await patchLead(ctx, leadId, {
       custom_fields_values: [
-        { field_id: row.executorFieldId, values: [{ value: enumOption.value, enum_id: enumOption.id }] }
+        { field_id: row.executorFieldId, values: [{ value: enumOption.value, enum_id: enumOption.id }] },
+        { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
+        { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
       ],
       status_id: Number(row.nextAmoStatusId)
     });
 
-    await sendProductionDirectMessage(ctx, directId, `Сделка ${dealText} назначена вам в исполнение.`);
+    const product = getProductText(ctx, lead);
+    const price = getPriceText(ctx, lead, row.priceFieldId);
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `№ договора: ${contractNumber} Продукт: ${product} Цена: ${price} руб назначена вам в исполнение`
+    );
     return;
   }
 
-  // ТЗ п.13-14 — нужно согласование руководителя.
+  // T-4.5.2.2 — нужно согласование мастера.
   await patchLead(ctx, leadId, {
-    custom_fields_values: [{ field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: true }] }]
+    custom_fields_values: [
+      { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: true }] },
+      { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: userName }] }
+    ]
   });
 
-  const pipeline = (await getPipelineNameById(ctx, row.amoPipelineId)) || PIPELINE_NAME_METAL;
-  const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipeline] || "metalShopForeman";
+  const pipelineName = (await getPipelineNameById(ctx, row.amoPipelineId)) || PIPELINE_NAME_METAL;
+  const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
+  const price = getPriceText(ctx, lead, row.priceFieldId);
+  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
 
-  await savePendingApproval(ctx, leadId, {
-    requesterUserKey: String(userKey),
-    requesterDirectId: directId,
-    requesterUserName: userName
-  });
-
+  // T-5, случай "Исполнитель берёт в работу новую сделку" — мастеру сразу
+  // приходит сообщение 45 (т.к. сделка уже известна, промежуточный список не
+  // нужен); то же сообщение мастер увидит, открыв "Распределение" сам
+  // (tryHandleForemanDealSelection), если push не дошёл ни до кого.
   const notified = await notifyRoleUsers(
     ctx,
     settings,
     managerRoleKey,
-    `У исполнителя есть операции не принятые ОТК, согласовать распределение новой сделки:\n${dealText}`,
-    [buildTaggedButtonCompat(ctx, "Да", leadId), buildTaggedButtonCompat(ctx, "Нет", leadId)]
+    `У ${userName} есть операции, непринятые ОТК. Согласовать распределение новой сделки:\n` +
+      `№ ${contractNumberLinked}, Цена ${price}, руб.?`,
+    [buildTaggedButtonCompat(ctx, "Да", leadId), buildTaggedButtonCompat(ctx, "Нет", leadId)],
+    { markdown: true }
   );
 
   if (notified === 0) {
@@ -1170,8 +1237,8 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `Сделка ${contractNumber} отправлена на согласование руководителю, так как у вас есть ` +
-      "операции не принятые ОТК."
+    `Сделка № договора ${contractNumber} отправлена на согласование мастеру, так как у вас есть ` +
+      "операции, не принятые ОТК."
   );
 }
 
@@ -1191,7 +1258,10 @@ async function getPipelineNameById(ctx, pipelineId) {
   return pipelineNamesById[pipelineId] || null;
 }
 
-// ТЗ п.15/16: у мастера "Распределение" показывает очередь согласования.
+// ТЗ T-5.1: у мастера "Распределение" показывает очередь согласования —
+// критерий отбора: статус бота "Распределение" + заполнено поле
+// "[Бот] Распределение Мастера" (НЕ статус "Исполнение" — это другая группа
+// строк настроек).
 async function showApprovalQueueForForeman(ctx, directId, settings, pipelineName) {
   const pipelineId = await getPipelineIdByName(ctx, pipelineName);
 
@@ -1204,41 +1274,43 @@ async function showApprovalQueueForForeman(ctx, directId, settings, pipelineName
     return;
   }
 
-  const rows = findExecutionRows(settings);
-  const row = rows.find((r) => Number(r.amoPipelineId) === Number(pipelineId));
+  const distributionRows = findDistributionRows(settings);
+  const row = distributionRows.find((r) => Number(r.amoPipelineId) === Number(pipelineId));
 
   if (!row || !row.amoStatusId) {
     await sendProductionDirectMessage(
       ctx,
       directId,
-      `❌ Не настроен статус «Исполнение» для воронки «${pipelineName}». Обратитесь к администратору.`
+      `❌ Не настроен статус «Распределение» для воронки «${pipelineName}». Обратитесь к администратору.`
     );
     return;
   }
 
   const leads = await getLeadsByPipeline(ctx, pipelineId, { statusId: row.amoStatusId });
 
-  const pending = leads.filter((lead) => isPendingManagerApproval(ctx, lead));
+  let pending = leads.filter((lead) => fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID));
+
+  const header =
+    pipelineName === PIPELINE_NAME_WOOD
+      ? "Согласовать распределение новой сделки в Производстве Дерево:"
+      : "Согласовать распределение новой сделки в Производстве Металл:";
 
   if (pending.length === 0) {
-    await sendProductionDirectMessage(ctx, directId, "Согласовать распределение новой сделки:\nНет сделок, ожидающих согласования.");
+    await sendProductionDirectMessage(ctx, directId, `${header}\nНет сделок, ожидающих согласования.`);
     return;
   }
 
-  for (const lead of pending) {
-    lead.__priceFieldId = row.priceFieldId;
-  }
+  pending = sortDealsForButtons(ctx, pending);
 
-  const buttons = pending.map(
-    (lead) => ctx.getFieldValueJoined(lead, CONTRACT_NUMBER_FIELD_ID) || `Сделка ${lead.id}`
-  );
+  const buttons = pending.map((lead) => getContractNumberText(ctx, lead));
 
-  await sendProductionDirectMessage(ctx, directId, "Согласовать распределение новой сделки:", buttons);
+  await sendProductionDirectMessage(ctx, directId, header, buttons);
 }
 
 // Нажатие на кнопку с номером договора из очереди согласования мастера —
-// повторно показываем то же "Да/Нет", что ТЗ п.14 присылает проактивно, так
-// что дальнейшая обработка (handleApprovalReply) у обоих путей общая.
+// повторно показываем сообщение 45 (ТЗ T-5.3), которое также приходит
+// проактивно (push) из handlePerformerDealConfirmReply — дальнейшая
+// обработка (handleApprovalReply) у обоих путей общая.
 async function tryHandleForemanDealSelection(ctx, directId, settings, pipelineName, trimmedText) {
   const pipelineId = await getPipelineIdByName(ctx, pipelineName);
 
@@ -1246,8 +1318,8 @@ async function tryHandleForemanDealSelection(ctx, directId, settings, pipelineNa
     return false;
   }
 
-  const rows = findExecutionRows(settings);
-  const row = rows.find((r) => Number(r.amoPipelineId) === Number(pipelineId));
+  const distributionRows = findDistributionRows(settings);
+  const row = distributionRows.find((r) => Number(r.amoPipelineId) === Number(pipelineId));
 
   if (!row || !row.amoStatusId) {
     return false;
@@ -1255,37 +1327,46 @@ async function tryHandleForemanDealSelection(ctx, directId, settings, pipelineNa
 
   const leads = await getLeadsByPipeline(ctx, pipelineId, { statusId: row.amoStatusId });
 
-  const lead = leads.find((item) => ctx.getFieldValueJoined(item, CONTRACT_NUMBER_FIELD_ID) === trimmedText);
+  const lead = leads.find((item) => getContractNumberText(ctx, item) === trimmedText);
 
-  if (!lead) {
+  if (!lead || !fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID)) {
     return false;
   }
 
-  if (!isPendingManagerApproval(ctx, lead)) {
-    return false;
-  }
-
-  lead.__priceFieldId = row.priceFieldId;
-
-  const { text: dealText } = buildDealDescriptionText(ctx, lead);
+  const requesterUserName = ctx.getFieldValueJoined(lead, EXECUTOR_PENDING_FIELD_ID);
+  const price = getPriceText(ctx, lead, row.priceFieldId);
+  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
 
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `Согласовать распределение новой сделки:\n${dealText}`,
-    [buildTaggedButtonCompat(ctx, "Да", lead.id), buildTaggedButtonCompat(ctx, "Нет", lead.id)]
+    `У ${requesterUserName || "исполнителя"} есть операции, непринятые ОТК. Согласовать распределение новой сделки:\n` +
+      `№ ${contractNumberLinked}, Цена ${price}, руб.?`,
+    [buildTaggedButtonCompat(ctx, "Да", lead.id), buildTaggedButtonCompat(ctx, "Нет", lead.id)],
+    { markdown: true }
   );
 
   return true;
 }
 
-// ТЗ п.14.1/14.2 — общий обработчик ответа руководителя "Да"/"Нет",
-// независимо от того, пришёл ли он в ответ на push (п.14) или на выбор из
-// очереди "Распределение" (п.15/16).
+// ТЗ T-5.3.1/T-5.3.2 — общий обработчик ответа мастера "Да"/"Нет",
+// независимо от того, пришёл ли он в ответ на push (из
+// handlePerformerDealConfirmReply) или на выбор сделки из очереди
+// "Распределение" (tryHandleForemanDealSelection). Кто запросил
+// распределение, читаем из самой сделки (поле "[Бот] Согласование
+// исполнителя", id 555074) — отдельное хранилище для этого не нужно.
 async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
-  const pending = await loadPendingApproval(ctx, leadId);
+  const lead = await ctx.getLead(leadId);
 
-  if (!pending) {
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
+    return;
+  }
+
+  const requesterUserName = ctx.getFieldValueJoined(lead, EXECUTOR_PENDING_FIELD_ID);
+  const requesterDirectId = requesterUserName ? await loadUserDirectId(ctx, requesterUserName) : null;
+
+  if (!fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID) || !requesterUserName) {
     await sendProductionDirectMessage(
       ctx,
       directId,
@@ -1294,38 +1375,33 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
     return;
   }
 
-  const lead = await ctx.getLead(leadId);
+  const distributionRows = findDistributionRows(settings);
+  const row = distributionRows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
 
-  if (!lead) {
-    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
-    await clearPendingApproval(ctx, leadId);
-    return;
-  }
+  const contractNumber = getContractNumberText(ctx, lead);
 
-  const rows = findExecutionRows(settings);
-  const row = rows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
-
-  lead.__priceFieldId = row && row.priceFieldId;
-
-  const { contractNumber } = buildDealDescriptionText(ctx, lead);
-
+  // T-5.3.2
   if (decision === "no") {
     await patchLead(ctx, leadId, {
-      custom_fields_values: [{ field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] }]
+      custom_fields_values: [
+        { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
+        { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
+      ]
     });
 
-    await clearPendingApproval(ctx, leadId);
+    if (requesterDirectId) {
+      await sendProductionDirectMessage(
+        ctx,
+        requesterDirectId,
+        `Распределение сделки: № ${contractNumber} НЕ согласовано с Мастером.`
+      );
+    }
 
-    await sendProductionDirectMessage(
-      ctx,
-      pending.requesterDirectId,
-      `Распределение сделки ${contractNumber} не согласовано с руководителем`
-    );
-
-    await sendProductionDirectMessage(ctx, directId, "Отклонено.");
+    await sendProductionDirectMessage(ctx, directId, "Сделка не распределена");
     return;
   }
 
+  // T-5.3.1
   if (!row || !row.executorFieldId || !row.nextAmoStatusId) {
     await sendProductionDirectMessage(
       ctx,
@@ -1336,13 +1412,13 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
     return;
   }
 
-  const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, pending.requesterUserName);
+  const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, requesterUserName);
 
   if (!enumOption) {
     await sendProductionDirectMessage(
       ctx,
       directId,
-      `❌ Не удалось определить значение «Исполнитель» для «${pending.requesterUserName}». ` +
+      `❌ Не удалось определить значение «Исполнитель» для «${requesterUserName}». ` +
         "Обратитесь к администратору."
     );
     return;
@@ -1351,18 +1427,23 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
   await patchLead(ctx, leadId, {
     custom_fields_values: [
       { field_id: row.executorFieldId, values: [{ value: enumOption.value, enum_id: enumOption.id }] },
-      { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] }
+      { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
+      { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
     ],
     status_id: Number(row.nextAmoStatusId)
   });
 
-  await clearPendingApproval(ctx, leadId);
+  const price = getPriceText(ctx, lead, row.priceFieldId);
 
-  const { text: dealText } = buildDealDescriptionText(ctx, lead);
+  if (requesterDirectId) {
+    await sendProductionDirectMessage(
+      ctx,
+      requesterDirectId,
+      `Сделка №${contractNumber}, Цена: ${price}, руб. назначена вам в исполнение`
+    );
+  }
 
-  await sendProductionDirectMessage(ctx, pending.requesterDirectId, `Сделка ${dealText} назначена вам в исполнение.`);
-
-  await sendProductionDirectMessage(ctx, directId, "Согласовано.");
+  await sendProductionDirectMessage(ctx, directId, "Сделка распределена");
 }
 
 // ============================================================
