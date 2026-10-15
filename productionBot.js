@@ -26,9 +26,11 @@
 // 2) в Upstash Redis через этот модуль (POST/GET /widget/production/settings)
 //    — это единственный источник, который читает серверный код бота.
 //
-// ФАЗА 1: реализованы только приватная интеграция/виджет и минимальный
-// каркас бота (обработка "старт" заглушкой). Ролевая логика, сценарий
-// "Распределение" и остальные сценарии ТЗ — предмет следующих фаз.
+// ФАЗА 1: приватная интеграция/виджет настроек.
+// ФАЗА 2 (в работе): авторизация по "старт" (ТЗ п.7), ролевое главное меню
+// (ТЗ п.8). Сценарий "Распределение" (ТЗ п.9-16) и остальные пункты меню
+// (Исполнение/ОТК/Отчёт/Контроль сроков/...) — заглушки, реализация
+// в следующих обновлениях.
 
 const axios = require("axios");
 
@@ -501,7 +503,148 @@ function isValidWidgetSecret(req) {
 }
 
 // ============================================================
-// 6. ПЛАНИРОВЩИКИ
+// 6. РОЛИ И ГЛАВНОЕ МЕНЮ (ТЗ п.7-8)
+// ============================================================
+// Роль пользователя — не привязана к сессии/логину, а определяется заново
+// при каждом "старт" путём сравнения имени пользователя amoMessenger со
+// списками в настройках виджета (роль "Исполнитель" не настраивается явно —
+// это fallback для всех, кто не найден ни в одной активной роли).
+
+const PERFORMER_ROLE_KEY = "performer";
+
+const ROLE_LABELS = {
+  productionDirector: "Директор производства",
+  metalShopForeman: "Мастер металлического цеха",
+  woodShopForeman: "Мастер столярного цеха",
+  otk: "ОТК",
+  [PERFORMER_ROLE_KEY]: "Исполнитель"
+};
+
+// ТЗ п.8: набор кнопок главного меню зависит от роли. Единственная кнопка
+// с реализованной логикой на Фазе 2 — "Распределение" (роли из §9); у
+// остальных пока плейсхолдер "в разработке" (ТЗ п.20 — поведение остальных
+// пунктов не описано, выдумывать его нельзя).
+const MAIN_MENU_BUTTONS = {
+  [PERFORMER_ROLE_KEY]: ["Распределение", "Исполнение", "ОТК", "Отчет", "Контроль сроков"],
+  otk: ["Промежуточный ОТК", "Финальный ОТК", "Не приняты работы"],
+  metalShopForeman: [
+    "Распределение",
+    "Пересмотреть стоимость",
+    "Не приняты работы",
+    "Отчет",
+    "Контроль сроков",
+    "Вопрос от продаж",
+    "Не принято ОТК"
+  ],
+  woodShopForeman: [
+    "Распределение",
+    "Пересмотреть стоимость",
+    "Не приняты работы",
+    "Отчет",
+    "Контроль сроков",
+    "Вопрос от продаж",
+    "Не принято ОТК"
+  ],
+  productionDirector: ["Контроль сроков", "Вопросы от продаж", "Отчет"]
+};
+
+// Роли, которым по ТЗ п.9 доступна "Распределение".
+const DISTRIBUTION_ROLE_KEYS = [PERFORMER_ROLE_KEY, "metalShopForeman", "woodShopForeman"];
+
+// Состояние пользователей бота производства — в памяти процесса, как и у
+// двух других ботов (designerState/userPending* в server.js). Переживает
+// только до следующего перезапуска процесса — после "старт" роль всегда
+// переопределяется заново, так что потеря состояния при деплое не критична
+// (пользователь просто заново жмёт "старт").
+const productionUserState = {};
+
+function normalizeHandleName(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+// ТЗ п.7: ищем пользователя среди АКТИВНЫХ записей всех ролей по совпадению
+// имени (не id — список пользователей amoMessenger недоступен виджету, см.
+// комментарий в widget-production/script.js). Первое совпадение побеждает;
+// валидация настроек (validateProductionWidgetSettings) уже не даёт одному
+// имени быть активным в двух ролях одновременно, так что порядок проверки
+// ролей не важен.
+function resolveUserRole(settings, userName) {
+  const normalizedUserName = normalizeHandleName(userName);
+
+  if (!settings || !settings.roles || !normalizedUserName) {
+    return PERFORMER_ROLE_KEY;
+  }
+
+  for (const roleKey of KNOWN_ROLE_KEYS) {
+    const entries = settings.roles[roleKey];
+
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+
+    const match = entries.some(
+      (entry) => entry.active && normalizeHandleName(entry.handle) === normalizedUserName
+    );
+
+    if (match) {
+      return roleKey;
+    }
+  }
+
+  return PERFORMER_ROLE_KEY;
+}
+
+async function sendMainMenu(ctx, directId, roleKey) {
+  const buttons = MAIN_MENU_BUTTONS[roleKey] || [];
+
+  await sendProductionDirectMessage(ctx, directId, "Выберите тип задач", buttons);
+}
+
+// ТЗ п.7: полный поток авторизации по команде "старт".
+async function handleStartCommand(ctx, directId, userKey, userName) {
+  await sendProductionDirectMessage(ctx, directId, "Минуту, ищем вас в базе.");
+
+  const roleKey = resolveUserRole(productionWidgetSettingsCache, userName);
+
+  productionUserState[userKey] = { roleKey, userName };
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Вам присвоена роль: ${ROLE_LABELS[roleKey]}`
+  );
+
+  await sendMainMenu(ctx, directId, roleKey);
+}
+
+// Заглушка для пунктов меню, для которых ТЗ ещё не описывает поведение
+// (ТЗ п.20 — такое поведение выдумывать нельзя, ждём продолжения ТЗ).
+async function handleMenuPlaceholder(ctx, directId, buttonLabel) {
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Раздел «${buttonLabel}» пока в разработке.`
+  );
+}
+
+async function handleUnknownCommand(ctx, directId, roleKey) {
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "⚠️ Неизвестная команда. Пожалуйста, пользуйтесь кнопками бота или начните " +
+      "заново командой «старт»."
+  );
+
+  if (roleKey) {
+    await sendMainMenu(ctx, directId, roleKey);
+  }
+}
+
+// ============================================================
+// 7. ПЛАНИРОВЩИКИ
 // ============================================================
 // Фаза 1 сценариев не содержит — фоновых задач пока нет. Функция оставлена
 // пустой ради симметрии вызова с designerBot.startSchedulers(ctx) в
@@ -512,7 +655,7 @@ function startSchedulers(ctx) {
 }
 
 // ============================================================
-// 7. WEBHOOK И МАРШРУТЫ
+// 8. WEBHOOK И МАРШРУТЫ
 // ============================================================
 
 function init(app, ctx) {
@@ -691,10 +834,8 @@ function init(app, ctx) {
 
   // Отдельный webhook-маршрут для отдельного amoMessenger-приложения — по
   // тому же принципу, что и /webhook/project у бота проектировщиков.
-  // ФАЗА 1: только заглушка на "старт", подтверждающая, что маршрут и
-  // исходящая отправка сообщений реально работают. Полноценная ролевая
-  // логика (авторизация пользователя, главное меню, сценарии ТЗ) —
-  // предмет следующих фаз.
+  // "старт" запускает авторизацию/главное меню (ТЗ п.7-8); остальные
+  // пункты меню, включая "Распределение", — пока заглушки.
   app.post("/webhook/production", async (req, res) => {
     const body = req.body || {};
 
@@ -727,14 +868,38 @@ function init(app, ctx) {
         JSON.stringify({ userKey: String(userKey), userName, text })
       );
 
-      if (ctx.isStartCommand(text)) {
+      const trimmedText = String(text || "").trim();
+
+      if (ctx.isStartCommand(trimmedText)) {
+        await handleStartCommand(ctx, directId, userKey, userName);
+        return;
+      }
+
+      const state = productionUserState[userKey];
+
+      if (!state) {
         await sendProductionDirectMessage(
           ctx,
           directId,
-          "Бот «Производство» в разработке. Минуту, ищем вас в базе.\n\n" +
-            "(Заглушка Фазы 1 — полноценная логика появится в следующих обновлениях.)"
+          "Чтобы начать работу с ботом, напишите «старт»."
         );
+        return;
       }
+
+      const roleButtons = MAIN_MENU_BUTTONS[state.roleKey] || [];
+
+      if (!roleButtons.includes(trimmedText)) {
+        await handleUnknownCommand(ctx, directId, state.roleKey);
+        return;
+      }
+
+      if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
+        // ТЗ п.9-16 — реализация в следующем обновлении.
+        await handleMenuPlaceholder(ctx, directId, trimmedText);
+        return;
+      }
+
+      await handleMenuPlaceholder(ctx, directId, trimmedText);
     } catch (error) {
       console.error("[Бот производства] WEBHOOK ERROR:", error.stack || error.message);
     }
