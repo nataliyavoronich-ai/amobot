@@ -7868,7 +7868,19 @@ const productionBotContext = {
   extractImageUrlsFromMessage,
   getMoscowDate,
   todayMoscowDateText,
-  getUserName
+  getUserName,
+  // Общие amoCRM HTTP-обёртки (авторизация/повтор при 401 уже внутри) —
+  // сценарий "Распределение" сам строит запросы к /api/v4/leads,
+  // /api/v4/leads/pipelines, /api/v4/leads/custom_fields/{id}, которых нет
+  // готовыми функциями ни у одного из двух других ботов.
+  amoCrmGet,
+  amoCrmPost,
+  amoCrmPatch,
+  getFieldValues,
+  getFieldValueJoined,
+  getLead,
+  buildTaggedButton,
+  parseTaggedButton
 };
 
 productionBot.init(app, productionBotContext);
