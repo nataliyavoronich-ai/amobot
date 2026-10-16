@@ -1447,18 +1447,1008 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
 }
 
 // ============================================================
-// 8. ПЛАНИРОВЩИКИ
+// 8. СЦЕНАРИЙ «ИСПОЛНЕНИЕ» У ИСПОЛНИТЕЛЕЙ (ТЗ T-6/T-7, частично T-8/T-9/T-11/T-20)
 // ============================================================
-// Фаза 1 сценариев не содержит — фоновых задач пока нет. Функция оставлена
-// пустой ради симметрии вызова с designerBot.startSchedulers(ctx) в
-// server.js, чтобы при появлении сценариев не пришлось снова менять
-// server.js.
+// T-9 (решение ОТК по непринятой работе), T-11 (решение Мастера по
+// непринятой работе), T-12 (Промежуточный ОТК) и T-20 (Ожидание решения) —
+// отдельные сценарии, которые ссылаются сюда, но сами ещё не реализованы.
+// Везде, где T-6 должен передать работу одному из них, ниже — заглушка:
+// нужные поля/теги в сделке выставляются по ТЗ, пользователю показывается
+// понятное сообщение, но собственного списка/UI у этих сценариев пока нет.
+
+// --- Поля (см. "Таблица 2. Поля, используемые в боте" в ТЗ v2.0) ---
+const DEFECT_PHOTO_LINK_FIELD_ID = 555164; // "[Бот] Ссылка на фото", ссылка — фото дефекта (T-6.5.4/T-6.5.6); у фото готового изделия (T-6.5.1) своего поля-ссылки в ТЗ нет
+const NOT_ACCEPTED_TEXT_FIELD_ID = 555162; // "[Бот] Не принято", текстовая область
+const INTERMEDIATE_OTK_FLAG_FIELD_ID = 555172; // "[Бот] Промежуточный ОТК", флаг
+const COST_REVISION_FIELD_ID = 557156; // "[Бот] Согласование стоимости 1", текстовая область — JSON-массив {status_id, new_price, username}
+const DXF_LINK_FIELD_ID = 543270; // "Проект в производство dxf", ссылка
+const PLASMA_EXECUTION_STATUS_ID = 33139332; // статус "Плазма исполнение"
+const DOZAKUPKA_TAG_NAME = "Дозакупка";
+
+const PRODUCTION_UPLOAD_FOLDER_NAME = "Производство";
+const FINISH_UPLOAD_BUTTON = "Завершить загрузку";
+
+// ------------------------------------------------------------
+// 8.1 amoCRM: название статуса по id (для карточек/сообщений с {{Название
+// статуса сделки}}) — кэшируем по pipelineId, т.к. список статусов воронки
+// меняется так же редко, как сам список воронок.
+// ------------------------------------------------------------
+
+const statusNamesByPipelineId = {};
+
+async function getStatusNameById(ctx, pipelineId, statusId) {
+  if (!statusNamesByPipelineId[pipelineId]) {
+    const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines/${pipelineId}/statuses`;
+    const response = await ctx.amoCrmGet(url, {});
+
+    if (response.status !== 200) {
+      throw new Error(`amoCRM GET /leads/pipelines/${pipelineId}/statuses HTTP ${response.status}`);
+    }
+
+    const statuses = (response.data && response.data._embedded && response.data._embedded.statuses) || [];
+    const map = {};
+
+    for (const status of statuses) {
+      map[status.id] = status.name;
+    }
+
+    statusNamesByPipelineId[pipelineId] = map;
+  }
+
+  return statusNamesByPipelineId[pipelineId][statusId] || "—";
+}
+
+// ------------------------------------------------------------
+// 8.2 Яндекс.Диск — папка "Производство" внутри папки сделки (ТЗ T-7)
+// ------------------------------------------------------------
+
+function buildProductionFolderPaths(ctx, leadId) {
+  const leadFolderPath = `${ctx.YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
+  const reportsPath = `${leadFolderPath}/Отчеты и проекты`;
+
+  return { reportsPath, productionPath: `${reportsPath}/${PRODUCTION_UPLOAD_FOLDER_NAME}` };
+}
+
+async function ensureProductionFolder(ctx, reportsPath, productionPath) {
+  await ctx.ydEnsureFolderPath(reportsPath);
+  await ctx.ydEnsureFolder(productionPath);
+}
+
+// ТЗ T-7.3: имя файла = название текущего статуса сделки, при совпадении —
+// "(1)", "(2)"... Как и у бота проектировщиков — отдельно по каждому
+// расширению (иначе фото .jpg и .png с одного статуса конфликтовали бы
+// номерами без причины).
+function buildProductionFileName(baseName, number, extension) {
+  const suffix = Number(number) > 0 ? ` (${Number(number)})` : "";
+  const ext = (extension && String(extension).trim()) || "jpg";
+
+  return `${baseName}${suffix}.${ext}`;
+}
+
+async function getNextProductionFileNumber(ctx, folderPath, baseName, extension) {
+  const response = await axios.get("https://cloud-api.yandex.net/v1/disk/resources", {
+    params: { path: folderPath, limit: 1000, fields: "_embedded.items.name" },
+    headers: ctx.yandexDiskHeaders(),
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`Яндекс.Диск: не удалось получить список файлов "${folderPath}". HTTP ${response.status}`);
+  }
+
+  const items =
+    response.data && response.data._embedded && Array.isArray(response.data._embedded.items)
+      ? response.data._embedded.items
+      : [];
+
+  const escapedBase = ctx.escapeRegExp(baseName);
+  const escapedExt = ctx.escapeRegExp(extension || "jpg");
+  const pattern = new RegExp(`^${escapedBase}(?: \\((\\d+)\\))?\\.${escapedExt}$`, "i");
+
+  let maxNumber = -1;
+
+  for (const item of items) {
+    const name = item && item.name ? String(item.name) : "";
+    const match = name.match(pattern);
+
+    if (!match) {
+      continue;
+    }
+
+    const number = match[1] === undefined ? 0 : Number(match[1]);
+
+    if (!Number.isNaN(number)) {
+      maxNumber = Math.max(maxNumber, number);
+    }
+  }
+
+  return maxNumber + 1;
+}
+
+// Общий цикл загрузки файлов в папку "Производство" — используется и для
+// фото готового изделия (T-6.5.1), и для фото дефекта (T-6.5.4/T-6.5.6).
+// baseName — то, что ТЗ называет "[Название этапа] [дата]" или "Дефект
+// изделия [дата]" и т.п.; extension берём из ссылки amoMessenger, со
+// стандартным запасным вариантом "jpg" (фото).
+async function uploadProductionFile(ctx, leadId, baseName, fileUrl) {
+  const { reportsPath, productionPath } = buildProductionFolderPaths(ctx, leadId);
+
+  await ensureProductionFolder(ctx, reportsPath, productionPath);
+
+  const extension = ctx.getUrlExtension(fileUrl) || "jpg";
+  const number = await getNextProductionFileNumber(ctx, productionPath, baseName, extension);
+  const fileName = buildProductionFileName(baseName, number, extension);
+  const uploadedPath = `${productionPath}/${fileName}`;
+
+  await ctx.ydUploadFromUrlAndWait(uploadedPath, fileUrl);
+
+  return uploadedPath;
+}
+
+// ------------------------------------------------------------
+// 8.3 Список "Сделки к исполнению" (ТЗ T-6.2, сортировка — по актуализации
+// п.3.1/п.10: сначала непринятые ОТК, затем ПД/ПМ, затем остальные; внутри
+// группы — по плановой готовности, раньше срок — выше).
+// ------------------------------------------------------------
+
+function sortExecutionDeals(leads) {
+  function group(lead) {
+    if (leadHasTag(lead, OTK_REJECTED_TAG_NAME)) {
+      return 1;
+    }
+
+    const contractNumber = lead.__contractNumber || "";
+
+    if (contractNumber.startsWith("ПД") || contractNumber.startsWith("ПМ")) {
+      return 2;
+    }
+
+    return 3;
+  }
+
+  return [...leads].sort((a, b) => {
+    const diff = group(a) - group(b);
+
+    return diff !== 0 ? diff : (a.__planDateUnix ?? Infinity) - (b.__planDateUnix ?? Infinity);
+  });
+}
+
+// Актуализация п.1.1/п.3.1: сделка попадает в список, если текущий
+// пользователь доступен как ВАРИАНТ в поле "Исполнитель" — поле сделки не
+// обязано уже содержать его имя (в отличие от "Распределения", где поле
+// проверяется строго).
+async function showExecutionListForPerformer(ctx, directId, userName, settings) {
+  const executionRows = findExecutionRows(settings);
+
+  if (executionRows.length === 0) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ В настройках не указан статус «Исполнение». Обратитесь к администратору."
+    );
+    return;
+  }
+
+  let deals = [];
+
+  for (const row of executionRows) {
+    if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
+      continue;
+    }
+
+    const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, userName);
+
+    if (!enumOption) {
+      continue;
+    }
+
+    const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId, withTags: true });
+
+    for (const lead of leads) {
+      // Актуализация п.2.1/§4.1: сделки, уже переданные на промежуточный
+      // ОТК, показываются в отдельном пункте меню "В ОТК" (пока не
+      // реализован) — здесь их пропускаем, чтобы не путать с активной
+      // работой.
+      if (fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID)) {
+        continue;
+      }
+
+      const planValues = ctx.getFieldValues(lead, row.planDateFieldId);
+      const planUnix = Number(planValues[0]);
+
+      lead.__planDateUnix = Number.isFinite(planUnix) ? planUnix : Infinity;
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+      lead.__row = row;
+
+      deals.push(lead);
+    }
+  }
+
+  if (deals.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Сделки к исполнению:\nНет сделок.");
+    return;
+  }
+
+  deals = sortExecutionDeals(deals);
+
+  const lines = ["Сделки к исполнению:"];
+
+  deals.forEach((lead, i) => {
+    const row = lead.__row;
+    const price = getPriceText(ctx, lead, row.priceFieldId);
+    const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
+
+    lines.push(`${i + 1}. № ${lead.__contractNumber}, Цена ${price}, руб. Срок изготовления ${planDate}`);
+  });
+
+  const buttons = deals.map((lead) => lead.__contractNumber);
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), buttons);
+}
+
+// ------------------------------------------------------------
+// 8.4 Карточка сделки (ТЗ T-6.3/T-6.4)
+// ------------------------------------------------------------
+
+const EXECUTION_CARD_BUTTONS = [
+  "Да",
+  "Нет",
+  "Вернуть на доработку",
+  "Обсудить стоимость с Мастером",
+  "Не хватает материалов",
+  "Вернуть в проектный отдел"
+];
+
+async function showExecutionDealCard(ctx, directId, userKey, lead, row) {
+  const contractNumber = getContractNumberText(ctx, lead);
+  const price = getPriceText(ctx, lead, row.priceFieldId);
+  const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
+
+  // T-6.4.1/6.4.2: ссылка на dxf-проект — только на статусе "Плазма исполнение".
+  let dxfLine = "";
+
+  if (Number(lead.status_id) === PLASMA_EXECUTION_STATUS_ID) {
+    const dxfLink = ctx.getFieldValueJoined(lead, DXF_LINK_FIELD_ID);
+
+    if (dxfLink) {
+      dxfLine = ` Проект dxf:\n${dxfLink}`;
+    }
+  }
+
+  productionUserState[userKey].pendingCard = { leadId: lead.id, row };
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `№ договора: ${contractNumber}, Цена ${price}, руб. Срок изготовления ${planDate}.${dxfLine} готова?`,
+    EXECUTION_CARD_BUTTONS
+  );
+}
+
+// ТЗ T-6.3: нажатие на кнопку с номером договора из списка T-6.2. Как и в
+// "Распределении" — список не храним, ищем сделку заново среди текущих
+// подходящих.
+async function tryHandleExecutionDealSelection(ctx, directId, userKey, userName, settings, trimmedText) {
+  const executionRows = findExecutionRows(settings);
+
+  for (const row of executionRows) {
+    if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
+      continue;
+    }
+
+    const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, userName);
+
+    if (!enumOption) {
+      continue;
+    }
+
+    const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
+
+    const lead = leads.find(
+      (item) =>
+        getContractNumberText(ctx, item) === trimmedText && !fieldIsTruthy(ctx, item, INTERMEDIATE_OTK_FLAG_FIELD_ID)
+    );
+
+    if (!lead) {
+      continue;
+    }
+
+    await showExecutionDealCard(ctx, directId, userKey, lead, row);
+    return true;
+  }
+
+  return false;
+}
+
+// ------------------------------------------------------------
+// 8.5 Карточка: "Да" (ТЗ T-6.5.1) — факт готовности, загрузка фото, передача
+// на промежуточный ОТК (T-12, заглушка) или следующий статус.
+// ------------------------------------------------------------
+
+async function handleExecutionDealYes(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+  const pendingCard = state && state.pendingCard;
+
+  if (!pendingCard) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  const lead = await ctx.getLead(pendingCard.leadId);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена. Возможно, она уже была изменена.");
+    delete state.pendingCard;
+    return;
+  }
+
+  const row = pendingCard.row;
+
+  if (!row.factDateFieldId) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ Не настроено поле «Факт готовности» для текущего этапа. Обратитесь к администратору."
+    );
+    return;
+  }
+
+  await patchLead(ctx, lead.id, {
+    custom_fields_values: [{ field_id: row.factDateFieldId, values: [{ value: ctx.todayMoscowStartUnix() }] }]
+  });
+
+  const statusName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+  const baseName = `${statusName} ${ctx.todayMoscowDateText()}`;
+
+  state.pendingUpload = { leadId: lead.id, row, kind: "done", baseName, uploadedPaths: [] };
+  delete state.pendingCard;
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото готового изделия");
+}
+
+async function handleExecutionDealNo(ctx, directId, userKey, userName, settings) {
+  const state = productionUserState[userKey];
+
+  if (state) {
+    delete state.pendingCard;
+  }
+
+  await showExecutionListForPerformer(ctx, directId, userName, settings);
+}
+
+// ------------------------------------------------------------
+// 8.6 Загрузка файлов — общий цикл для "Да" (фото готового изделия),
+// "Вернуть на доработку" и "Вернуть в проектный отдел" (фото дефекта).
+// ------------------------------------------------------------
+
+async function handleProductionUploadMessage(ctx, directId, userKey, imageUrls) {
+  const state = productionUserState[userKey];
+  const pending = state && state.pendingUpload;
+
+  if (!pending || !imageUrls || imageUrls.length === 0) {
+    return false;
+  }
+
+  for (const fileUrl of imageUrls) {
+    try {
+      const uploadedPath = await uploadProductionFile(ctx, pending.leadId, pending.baseName, fileUrl);
+
+      pending.uploadedPaths.push(uploadedPath);
+
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "Файл сохранен на Яндекс.Диске.\nДополните или завершите загрузку.",
+        [FINISH_UPLOAD_BUTTON]
+      );
+    } catch (error) {
+      console.error("[Бот производства] Ошибка загрузки файла на Яндекс.Диск:", error.message);
+
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не удалось загрузить файл на Яндекс.Диск. Попробуйте отправить его ещё раз."
+      );
+    }
+  }
+
+  return true;
+}
+
+async function handleFinishUpload(ctx, directId, userKey, userName, settings) {
+  const state = productionUserState[userKey];
+  const pending = state && state.pendingUpload;
+
+  if (!pending) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  if (pending.uploadedPaths.length === 0) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "Вы ещё не прикрепили ни одного файла. Прикрепите файл или начните заново."
+    );
+    return;
+  }
+
+  if (pending.kind === "done") {
+    await finishDoneUpload(ctx, directId, settings, pending);
+  } else if (pending.kind === "defect") {
+    await finishDefectUpload(ctx, directId, settings, pending);
+  } else if (pending.kind === "project_return_defect") {
+    await finishProjectReturnUpload(ctx, directId, pending);
+  }
+
+  delete state.pendingUpload;
+}
+
+// T-6.5.1.4.1.2 → T-6.5.1.5: завершение загрузки фото готового изделия,
+// передача на промежуточный ОТК (T-12 — заглушка) либо смена статуса.
+async function finishDoneUpload(ctx, directId, settings, pending) {
+  const lead = await ctx.getLead(pending.leadId);
+  const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
+
+  await sendProductionDirectMessage(ctx, directId, `Работа по сделке № ${contractNumber} завершена.`);
+
+  const otkEntries = (settings.roles && settings.roles.otk) || [];
+  const hasActiveOtk = otkEntries.some((entry) => entry.active && entry.handle);
+
+  if (hasActiveOtk) {
+    await patchLead(ctx, pending.leadId, {
+      custom_fields_values: [{ field_id: INTERMEDIATE_OTK_FLAG_FIELD_ID, values: [{ value: true }] }]
+    });
+
+    // T-12 (Промежуточный ОТК) пока не реализован — заглушка: только
+    // уведомляем ОТК, собственного списка/UI сценария нет.
+    await notifyRoleUsers(
+      ctx,
+      settings,
+      "otk",
+      `Сделка № ${contractNumber} готова, ожидает промежуточного ОТК.`
+    );
+  } else {
+    const row = pending.row;
+
+    if (row.nextAmoStatusId) {
+      await patchLead(ctx, pending.leadId, { status_id: Number(row.nextAmoStatusId) });
+    }
+  }
+}
+
+// ------------------------------------------------------------
+// 8.7 Карточка: "Обсудить стоимость с Мастером" (ТЗ T-6.5.3, актуализация
+// п.3.5) — предложение новой стоимости и решение мастера.
+// ------------------------------------------------------------
+
+// Актуализация п.8.3: целое или дробное число, запятая или точка как
+// разделитель, никаких пробелов/валюты/текста.
+function parseRublePrice(text) {
+  const trimmed = String(text || "").trim();
+
+  if (!/^\d+([.,]\d{1,2})?$/.test(trimmed)) {
+    return null;
+  }
+
+  return Number(trimmed.replace(",", "."));
+}
+
+async function getCostRevisionEntries(ctx, lead) {
+  const raw = ctx.getFieldValueJoined(lead, COST_REVISION_FIELD_ID);
+
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function getCostRevisionEntry(entries, statusId) {
+  return entries.find((entry) => Number(entry.status_id) === Number(statusId)) || null;
+}
+
+// ТЗ T-6.5.3.2 "Ограничения и допущения" — хранит отдельную запись на
+// каждый статус; при повторном запросе на том же статусе перезаписывает её.
+async function upsertCostRevisionEntry(ctx, lead, statusId, newPrice, userName) {
+  const entries = await getCostRevisionEntries(ctx, lead);
+  const idx = entries.findIndex((entry) => Number(entry.status_id) === Number(statusId));
+  const entry = { status_id: Number(statusId), new_price: newPrice, username: userName };
+
+  if (idx >= 0) {
+    entries[idx] = entry;
+  } else {
+    entries.push(entry);
+  }
+
+  await patchLead(ctx, lead.id, {
+    custom_fields_values: [{ field_id: COST_REVISION_FIELD_ID, values: [{ value: JSON.stringify(entries) }] }]
+  });
+}
+
+async function removeCostRevisionEntry(ctx, lead, statusId) {
+  const entries = (await getCostRevisionEntries(ctx, lead)).filter(
+    (entry) => Number(entry.status_id) !== Number(statusId)
+  );
+
+  await patchLead(ctx, lead.id, {
+    custom_fields_values: [{ field_id: COST_REVISION_FIELD_ID, values: [{ value: JSON.stringify(entries) }] }]
+  });
+}
+
+async function handleExecutionDiscussCost(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+  const pendingCard = state && state.pendingCard;
+
+  if (!pendingCard) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  state.pendingTextInput = { kind: "cost_propose", leadId: pendingCard.leadId, row: pendingCard.row };
+  delete state.pendingCard;
+
+  await sendProductionDirectMessage(ctx, directId, "Укажите стоимость работ");
+}
+
+async function handleCostProposeInput(ctx, directId, userKey, userName, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  const price = parseRublePrice(trimmedText);
+
+  if (price === null) {
+    await sendProductionDirectMessage(ctx, directId, "Ожидается только числовое значение без комментария");
+    return;
+  }
+
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
+    delete state.pendingTextInput;
+    return;
+  }
+
+  await upsertCostRevisionEntry(ctx, lead, Number(lead.status_id), price, userName);
+
+  delete state.pendingTextInput;
+
+  const pipelineName = (await getPipelineNameById(ctx, pending.row.amoPipelineId)) || PIPELINE_NAME_METAL;
+  const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
+  const activeManager = ((settings.roles && settings.roles[managerRoleKey]) || []).find(
+    (entry) => entry.active && entry.handle
+  );
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Работа по сделке передана Мастеру (${activeManager ? activeManager.handle : "не назначен"}).`
+  );
+
+  const contractNumber = getContractNumberText(ctx, lead);
+  const currentPrice = getPriceText(ctx, lead, pending.row.priceFieldId);
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) || "(ссылка не найдена)";
+
+  const notified = await notifyRoleUsers(
+    ctx,
+    settings,
+    managerRoleKey,
+    `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
+      `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.`,
+    [
+      buildTaggedButtonCompat(ctx, "Подтвердить", lead.id),
+      buildTaggedButtonCompat(ctx, "Отклонить", lead.id),
+      buildTaggedButtonCompat(ctx, "Изменить", lead.id)
+    ]
+  );
+
+  if (notified === 0) {
+    console.log(
+      `[Бот производства] Запрос пересмотра стоимости по сделке ${lead.id} создан, но мастер ` +
+        "сейчас не достижим для push."
+    );
+  }
+}
+
+// ТЗ T-6.5.3.5 → T-8 (Согласование стоимости мастером) — реализован только
+// прямой ответ мастера на push выше (Подтвердить/Отклонить/Изменить);
+// собственный пункт меню мастера "Пересмотреть стоимость" (T-8.1, список
+// всех ожидающих сделок) пока не реализован.
+async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, settings) {
+  const lead = await ctx.getLead(leadId);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
+    return;
+  }
+
+  const statusId = Number(lead.status_id);
+  const entries = await getCostRevisionEntries(ctx, lead);
+  const entry = getCostRevisionEntry(entries, statusId);
+
+  if (!entry) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ Запрос на пересмотр стоимости по этой сделке не найден — возможно, он уже обработан."
+    );
+    return;
+  }
+
+  const executionRows = findExecutionRows(settings);
+  const row = executionRows.find((r) => Number(r.amoStatusId) === statusId);
+  const contractNumber = getContractNumberText(ctx, lead);
+  const requesterDirectId = await loadUserDirectId(ctx, entry.username);
+
+  if (action === "confirm") {
+    if (!row || !row.priceFieldId) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроено поле «Цена» для текущего этапа. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    await patchLead(ctx, leadId, {
+      custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: entry.new_price }] }]
+    });
+    await removeCostRevisionEntry(ctx, lead, statusId);
+
+    if (requesterDirectId) {
+      await sendProductionDirectMessage(
+        ctx,
+        requesterDirectId,
+        `Согласована новая стоимость работ по сделке № ${contractNumber}, цена ${entry.new_price} рублей`
+      );
+    }
+
+    await sendProductionDirectMessage(ctx, directId, "Согласовано.");
+    return;
+  }
+
+  if (action === "reject") {
+    await removeCostRevisionEntry(ctx, lead, statusId);
+
+    if (requesterDirectId) {
+      await sendProductionDirectMessage(
+        ctx,
+        requesterDirectId,
+        `Изменение стоимости работ по сделке № ${contractNumber} не согласовано руководителем`
+      );
+    }
+
+    await sendProductionDirectMessage(ctx, directId, "Отклонено.");
+    return;
+  }
+
+  if (action === "change") {
+    productionUserState[userKey].pendingTextInput = {
+      kind: "cost_master_change",
+      leadId,
+      statusId,
+      row
+    };
+
+    await sendProductionDirectMessage(ctx, directId, "Укажите стоимость работ");
+  }
+}
+
+async function handleCostMasterChangeInput(ctx, directId, userKey, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  const price = parseRublePrice(trimmedText);
+
+  if (price === null) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите только число");
+    return;
+  }
+
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
+    delete state.pendingTextInput;
+    return;
+  }
+
+  const row =
+    pending.row || findExecutionRows(settings).find((r) => Number(r.amoStatusId) === pending.statusId);
+
+  if (!row || !row.priceFieldId) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ Не настроено поле «Цена» для текущего этапа. Обратитесь к администратору."
+    );
+    delete state.pendingTextInput;
+    return;
+  }
+
+  const entries = await getCostRevisionEntries(ctx, lead);
+  const entry = getCostRevisionEntry(entries, pending.statusId);
+
+  await patchLead(ctx, lead.id, {
+    custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: price }] }]
+  });
+  await removeCostRevisionEntry(ctx, lead, pending.statusId);
+
+  const contractNumber = getContractNumberText(ctx, lead);
+  const requesterDirectId = entry ? await loadUserDirectId(ctx, entry.username) : null;
+
+  if (requesterDirectId) {
+    await sendProductionDirectMessage(
+      ctx,
+      requesterDirectId,
+      `Согласована новая стоимость работ по сделке № ${contractNumber}, цена ${price} рублей`
+    );
+  }
+
+  await sendProductionDirectMessage(ctx, directId, "Сохранено.");
+  delete state.pendingTextInput;
+}
+
+// ------------------------------------------------------------
+// 8.8 Карточка: "Вернуть на доработку" (ТЗ T-6.5.4) → T-9/T-11 (заглушка)
+// ------------------------------------------------------------
+
+async function handleExecutionReturnForRework(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+  const pendingCard = state && state.pendingCard;
+
+  if (!pendingCard) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  state.pendingTextInput = { kind: "rework_comment", leadId: pendingCard.leadId, row: pendingCard.row };
+  delete state.pendingCard;
+
+  await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+}
+
+async function handleReworkCommentInput(ctx, directId, userKey, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  await patchLead(ctx, pending.leadId, {
+    custom_fields_values: [{ field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }]
+  });
+
+  state.pendingUpload = {
+    leadId: pending.leadId,
+    row: pending.row,
+    kind: "defect",
+    baseName: "Дефект изделия",
+    uploadedPaths: []
+  };
+  delete state.pendingTextInput;
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
+}
+
+async function finishDefectUpload(ctx, directId, settings, pending) {
+  const lead = await ctx.getLead(pending.leadId);
+
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const links = [];
+
+  for (const path of pending.uploadedPaths) {
+    try {
+      links.push(await ctx.ydGetFolderPublicUrl(path));
+    } catch (error) {
+      console.error("[Бот производства] Не удалось получить ссылку на фото дефекта:", error.message);
+    }
+  }
+
+  if (links.length > 0) {
+    await patchLead(ctx, pending.leadId, {
+      custom_fields_values: [{ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] }]
+    });
+  }
+
+  const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
+  const otkEntries = (settings.roles && settings.roles.otk) || [];
+  const hasActiveOtk = otkEntries.some((entry) => entry.active && entry.handle);
+
+  if (hasActiveOtk) {
+    await patchLead(ctx, pending.leadId, {
+      custom_fields_values: [{ field_id: NOT_ACCEPTED_OTK_FLAG_FIELD_ID, values: [{ value: true }] }]
+    });
+
+    // T-9 (решение ОТК по непринятой работе) пока не реализован — заглушка.
+    await notifyRoleUsers(
+      ctx,
+      settings,
+      "otk",
+      `Производство № ${contractNumber} не принято к исправлению. Примите решение о дальнейших работах.`
+    );
+  } else {
+    await patchLead(ctx, pending.leadId, {
+      custom_fields_values: [{ field_id: NOT_ACCEPTED_MASTER_FLAG_FIELD_ID, values: [{ value: true }] }]
+    });
+
+    const pipelineName = (await getPipelineNameById(ctx, pending.row.amoPipelineId)) || PIPELINE_NAME_METAL;
+    const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
+
+    // T-11 (решение Мастера по непринятой работе) пока не реализован —
+    // заглушка.
+    await notifyRoleUsers(
+      ctx,
+      settings,
+      managerRoleKey,
+      `Производство № ${contractNumber} не принято к исправлению. Примите решение о дальнейших работах.`
+    );
+  }
+}
+
+// ------------------------------------------------------------
+// 8.9 Карточка: "Не хватает материалов" (ТЗ T-6.5.5) → T-20 (заглушка)
+// ------------------------------------------------------------
+
+async function addTagToLead(ctx, leadId, tagName) {
+  const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
+  const response = await ctx.amoCrmGet(url, { with: "tags" });
+
+  if (response.status !== 200) {
+    throw new Error(`amoCRM GET /leads/${leadId}?with=tags HTTP ${response.status}`);
+  }
+
+  const existingTags = (response.data._embedded && response.data._embedded.tags) || [];
+
+  if (existingTags.some((tag) => tag.name === tagName)) {
+    return;
+  }
+
+  const tags = [...existingTags.map((tag) => ({ name: tag.name })), { name: tagName }];
+
+  await patchLead(ctx, leadId, { _embedded: { tags } });
+}
+
+async function handleExecutionMaterialsShortage(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+  const pendingCard = state && state.pendingCard;
+
+  if (!pendingCard) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  state.pendingTextInput = { kind: "materials_comment", leadId: pendingCard.leadId, row: pendingCard.row };
+  delete state.pendingCard;
+
+  await sendProductionDirectMessage(ctx, directId, "Укажите комментарий");
+}
+
+async function handleMaterialsCommentInput(ctx, directId, userKey, userName, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  await patchLead(ctx, pending.leadId, {
+    custom_fields_values: [{ field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }]
+  });
+
+  await addTagToLead(ctx, pending.leadId, DOZAKUPKA_TAG_NAME);
+
+  delete state.pendingTextInput;
+
+  const lead = await ctx.getLead(pending.leadId);
+  const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
+
+  const pipelineName = (await getPipelineNameById(ctx, pending.row.amoPipelineId)) || PIPELINE_NAME_METAL;
+  const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
+
+  // T-20 (Ожидание решения) пока не реализован — заглушка: только
+  // уведомляем мастера.
+  await notifyRoleUsers(
+    ctx,
+    settings,
+    managerRoleKey,
+    `${userName} указал, что в № ${contractNumber} не хватает материалов.`
+  );
+
+  await sendProductionDirectMessage(ctx, directId, "Комментарий сохранён, мастер уведомлён.");
+}
+
+// ------------------------------------------------------------
+// 8.10 Карточка: "Вернуть в проектный отдел" (ТЗ T-6.5.6)
+// ------------------------------------------------------------
+// Последний шаг (флаг "[Бот] Передано в проектный отдел") заблокирован: в
+// ТЗ у этого поля указан тот же id (555172), что и у "Промежуточный ОТК"
+// (см. открытый вопрос №5 актуализации — "нужно сверить фактические id и
+// типы полей в amoCRM"). Угадывать id нельзя, поэтому комментарий и фото
+// сохраняются, а дальше сценарий останавливается с явным сообщением.
+
+async function handleExecutionReturnToDesign(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+  const pendingCard = state && state.pendingCard;
+
+  if (!pendingCard) {
+    await handleUnknownCommand(ctx, directId, state && state.roleKey);
+    return;
+  }
+
+  state.pendingTextInput = { kind: "project_return_comment", leadId: pendingCard.leadId, row: pendingCard.row };
+  delete state.pendingCard;
+
+  await sendProductionDirectMessage(ctx, directId, "Укажите, что не принято");
+}
+
+async function handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  await patchLead(ctx, pending.leadId, {
+    custom_fields_values: [{ field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }]
+  });
+
+  state.pendingUpload = {
+    leadId: pending.leadId,
+    row: pending.row,
+    kind: "project_return_defect",
+    baseName: "Дефект изделия",
+    uploadedPaths: []
+  };
+  delete state.pendingTextInput;
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
+}
+
+async function finishProjectReturnUpload(ctx, directId, pending) {
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const links = [];
+
+  for (const path of pending.uploadedPaths) {
+    try {
+      links.push(await ctx.ydGetFolderPublicUrl(path));
+    } catch (error) {
+      console.error("[Бот производства] Не удалось получить ссылку на фото дефекта:", error.message);
+    }
+  }
+
+  if (links.length > 0) {
+    await patchLead(ctx, pending.leadId, {
+      custom_fields_values: [{ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] }]
+    });
+  }
+
+  console.error(
+    `[Бот производства] "Вернуть в проектный отдел": сделка ${pending.leadId} — остановлено перед записью ` +
+      "флага «Передано в проектный отдел» (конфликт id полей, см. открытый вопрос №5 в актуализации ТЗ)."
+  );
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Замечания и фото сохранены. Передача в проектный отдел требует уточнения у администратора " +
+      "(в ТЗ конфликт id технических полей) — сообщите, пожалуйста, об этом администратору."
+  );
+}
+
+// ============================================================
+// 9. ПЛАНИРОВЩИКИ
+// ============================================================
+// Фоновых задач пока нет (у этого бота нет сценариев с таймерами/опросом —
+// T-16 "Контроль сроков" выводится только по запросу пользователя).
+// Функция оставлена пустой ради симметрии вызова с
+// designerBot.startSchedulers(ctx) в server.js.
 function startSchedulers(ctx) {
   console.log("[Бот производства] Планировщики: сценариев пока нет, ничего не запущено.");
 }
 
 // ============================================================
-// 9. WEBHOOK И МАРШРУТЫ
+// 10. WEBHOOK И МАРШРУТЫ
 // ============================================================
 
 function init(app, ctx) {
@@ -1660,6 +2650,7 @@ function init(app, ctx) {
       const text = message.text || "";
       const userKey = context.user_id || (message.author && message.author.user_id);
       const userName = ctx.extractAmoMessengerUserName(message.author, context, message);
+      const imageUrls = ctx.extractImageUrlsFromMessage(message);
 
       if (!directId || !userKey) {
         console.error("[Бот производства] Не удалось определить direct_id или user_id из вебхука.");
@@ -1693,8 +2684,67 @@ function init(app, ctx) {
 
       const settings = productionWidgetSettingsCache;
 
-      // "Да (id)" / "Нет (id)" — ответ на подтверждение (ТЗ п.11/14), кем бы
-      // оно ни было инициировано (сам нажал в списке или пришло по push).
+      // Ждём файл(ы) или "Завершить загрузку" (ТЗ T-6.5.1.3-4/6.5.4.5-6) —
+      // проверяем раньше кнопок меню, иначе присланный файл не с чем
+      // сопоставить.
+      if (state.pendingUpload) {
+        try {
+          if (imageUrls.length > 0) {
+            await handleProductionUploadMessage(ctx, directId, userKey, imageUrls);
+          } else if (trimmedText === FINISH_UPLOAD_BUTTON) {
+            await handleFinishUpload(ctx, directId, userKey, userName, settings);
+          } else {
+            await sendProductionDirectMessage(
+              ctx,
+              directId,
+              `Прикрепите файл или нажмите «${FINISH_UPLOAD_BUTTON}».`
+            );
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка загрузки файла:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать загрузку. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // Ждём текстовый ввод (комментарий/стоимость) — ТЗ T-6.5.3-6.5.6.
+      if (state.pendingTextInput) {
+        try {
+          const kind = state.pendingTextInput.kind;
+
+          if (kind === "cost_propose") {
+            await handleCostProposeInput(ctx, directId, userKey, userName, settings, trimmedText);
+          } else if (kind === "cost_master_change") {
+            await handleCostMasterChangeInput(ctx, directId, userKey, settings, trimmedText);
+          } else if (kind === "rework_comment") {
+            await handleReworkCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "materials_comment") {
+            await handleMaterialsCommentInput(ctx, directId, userKey, userName, settings, trimmedText);
+          } else if (kind === "project_return_comment") {
+            await handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка обработки ввода:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось сохранить данные. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // "Да (id)" / "Нет (id)" — ответ на подтверждение распределения (ТЗ
+      // п.11/14), кем бы оно ни было инициировано (сам нажал в списке или
+      // пришло по push).
       const yesLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Да");
       const noLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Нет");
 
@@ -1723,27 +2773,97 @@ function init(app, ctx) {
         return;
       }
 
+      // "Подтвердить (id)" / "Отклонить (id)" / "Изменить (id)" — ответ
+      // мастера на пересмотр стоимости (ТЗ T-6.5.3/T-8, актуализация 3.5).
+      const confirmCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить");
+      const rejectCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+      const changeCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Изменить");
+
+      if ((confirmCostLeadId || rejectCostLeadId || changeCostLeadId) && settings) {
+        const leadId = confirmCostLeadId || rejectCostLeadId || changeCostLeadId;
+        const action = confirmCostLeadId ? "confirm" : rejectCostLeadId ? "reject" : "change";
+
+        try {
+          await handleCostRevisionReply(ctx, directId, userKey, leadId, action, settings);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка согласования стоимости:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать ответ. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // Кнопки карточки сделки T-6.4 ("Да"/"Нет"/... без тэгов — карточка
+      // открыта ровно одна за раз на пользователя, см. state.pendingCard).
+      if (state.pendingCard && EXECUTION_CARD_BUTTONS.includes(trimmedText) && settings) {
+        try {
+          if (trimmedText === "Да") {
+            await handleExecutionDealYes(ctx, directId, userKey);
+          } else if (trimmedText === "Нет") {
+            await handleExecutionDealNo(ctx, directId, userKey, userName, settings);
+          } else if (trimmedText === "Вернуть на доработку") {
+            await handleExecutionReturnForRework(ctx, directId, userKey);
+          } else if (trimmedText === "Обсудить стоимость с Мастером") {
+            await handleExecutionDiscussCost(ctx, directId, userKey);
+          } else if (trimmedText === "Не хватает материалов") {
+            await handleExecutionMaterialsShortage(ctx, directId, userKey);
+          } else if (trimmedText === "Вернуть в проектный отдел") {
+            await handleExecutionReturnToDesign(ctx, directId, userKey);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка обработки карточки сделки:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать действие. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
       const roleButtons = MAIN_MENU_BUTTONS[state.roleKey] || [];
 
       if (roleButtons.includes(trimmedText)) {
-        if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
-          await handleDistributionButton(ctx, directId, userKey, userName, state.roleKey);
-        } else {
-          await handleMenuPlaceholder(ctx, directId, trimmedText);
+        try {
+          if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
+            await handleDistributionButton(ctx, directId, userKey, userName, state.roleKey);
+          } else if (trimmedText === "Исполнение" && state.roleKey === PERFORMER_ROLE_KEY && settings) {
+            await showExecutionListForPerformer(ctx, directId, userName, settings);
+          } else {
+            await handleMenuPlaceholder(ctx, directId, trimmedText);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка пункта меню:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось получить список сделок. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
         }
 
         return;
       }
 
       // Не пункт меню — проверяем, не нажатие ли это на номер договора из
-      // списка "Распределение" (ТЗ п.11/15/16). Список кнопок с номерами
-      // договоров не хранится между шагами, поэтому ищем сделку заново.
-      if (settings && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
+      // списка "Распределение" (ТЗ п.11/15/16) или "Исполнение" (ТЗ T-6.3).
+      // Списки кнопок с номерами договоров не хранятся между шагами,
+      // поэтому ищем сделку заново.
+      if (settings && (DISTRIBUTION_ROLE_KEYS.includes(state.roleKey) || state.roleKey === PERFORMER_ROLE_KEY)) {
         let handled = false;
 
         try {
           if (state.roleKey === PERFORMER_ROLE_KEY) {
-            handled = await tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText);
+            handled =
+              (await tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText)) ||
+              (await tryHandleExecutionDealSelection(ctx, directId, userKey, userName, settings, trimmedText));
           } else if (state.roleKey === "metalShopForeman") {
             handled = await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_METAL, trimmedText);
           } else if (state.roleKey === "woodShopForeman") {
@@ -1780,7 +2900,7 @@ function init(app, ctx) {
 }
 
 // ============================================================
-// 10. ЭКСПОРТ
+// 11. ЭКСПОРТ
 // ============================================================
 
 module.exports = {

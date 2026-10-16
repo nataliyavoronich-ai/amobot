@@ -7868,6 +7868,7 @@ const productionBotContext = {
   extractImageUrlsFromMessage,
   getMoscowDate,
   todayMoscowDateText,
+  todayMoscowStartUnix,
   getUserName,
   // Общие amoCRM HTTP-обёртки (авторизация/повтор при 401 уже внутри) —
   // сценарий "Распределение" сам строит запросы к /api/v4/leads,
@@ -7878,9 +7879,20 @@ const productionBotContext = {
   amoCrmPatch,
   getFieldValues,
   getFieldValueJoined,
+  formatDateFieldValue,
   getLead,
   buildTaggedButton,
-  parseTaggedButton
+  parseTaggedButton,
+  // Загрузка файлов на Яндекс.Диск (сценарий "Исполнение", ТЗ T-6/T-7) — те
+  // же примитивы, которыми уже пользуется designerBotContext.
+  ydEnsureFolderPath,
+  ydEnsureFolder,
+  ydUploadFromUrlAndWait,
+  ydGetFolderPublicUrl,
+  yandexDiskHeaders,
+  escapeRegExp,
+  getUrlExtension,
+  YANDEX_DISK_ROOT_FOLDER
 };
 
 productionBot.init(app, productionBotContext);
