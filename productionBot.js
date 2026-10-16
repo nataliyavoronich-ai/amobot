@@ -2296,7 +2296,7 @@ async function finishDefectUpload(ctx, directId, settings, pending) {
 // 8.9 Карточка: "Не хватает материалов" (ТЗ T-6.5.5) → T-20 (заглушка)
 // ------------------------------------------------------------
 
-async function addTagToLead(ctx, leadId, tagName) {
+async function getLeadTags(ctx, leadId) {
   const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}`;
   const response = await ctx.amoCrmGet(url, { with: "tags" });
 
@@ -2304,7 +2304,11 @@ async function addTagToLead(ctx, leadId, tagName) {
     throw new Error(`amoCRM GET /leads/${leadId}?with=tags HTTP ${response.status}`);
   }
 
-  const existingTags = (response.data._embedded && response.data._embedded.tags) || [];
+  return (response.data._embedded && response.data._embedded.tags) || [];
+}
+
+async function addTagToLead(ctx, leadId, tagName) {
+  const existingTags = await getLeadTags(ctx, leadId);
 
   if (existingTags.some((tag) => tag.name === tagName)) {
     return;
@@ -2313,6 +2317,113 @@ async function addTagToLead(ctx, leadId, tagName) {
   const tags = [...existingTags.map((tag) => ({ name: tag.name })), { name: tagName }];
 
   await patchLead(ctx, leadId, { _embedded: { tags } });
+}
+
+async function removeTagFromLead(ctx, leadId, tagName) {
+  const existingTags = await getLeadTags(ctx, leadId);
+  const remaining = existingTags.filter((tag) => tag.name !== tagName).map((tag) => ({ name: tag.name }));
+
+  if (remaining.length === existingTags.length) {
+    return;
+  }
+
+  await patchLead(ctx, leadId, { _embedded: { tags: remaining } });
+}
+
+// "Кто сообщил о нехватке материалов" — как и у "Распределения" с полем
+// "Согласование исполнителя", но для этого случая в ТЗ не предусмотрено
+// отдельное amoCRM-поле, поэтому храним в Redis, по id сделки.
+function materialsReporterRedisKey(leadId) {
+  return `production_materials_reporter:${leadId}`;
+}
+
+async function saveMaterialsReporter(ctx, leadId, userName) {
+  await ctx.redisRequest(["SET", materialsReporterRedisKey(leadId), userName]);
+}
+
+async function loadMaterialsReporter(ctx, leadId) {
+  const response = await ctx.redisRequest(["GET", materialsReporterRedisKey(leadId)]);
+
+  return response.result || null;
+}
+
+async function clearMaterialsReporter(ctx, leadId) {
+  await ctx.redisRequest(["DEL", materialsReporterRedisKey(leadId)]);
+}
+
+// Дополнение к ТЗ (пользователь, 2026-10-16): статус сценария "Дозакупка"
+// теперь настраивается в виджете (раздел "Сценарии", F-5 — уже реализован
+// на Фазе 1), вместо захардкоженных id статусов "Закупка материалов" из
+// исходного T-20.2.5.
+async function handleMaterialsDecision(ctx, directId, leadId, decision, settings) {
+  const reporterUserName = await loadMaterialsReporter(ctx, leadId);
+
+  if (!reporterUserName) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "❌ Запрос на закупку материалов по этой сделке не найден — возможно, он уже обработан."
+    );
+    return;
+  }
+
+  const lead = await ctx.getLead(leadId);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена.");
+    await clearMaterialsReporter(ctx, leadId);
+    return;
+  }
+
+  const contractNumber = getContractNumberText(ctx, lead);
+  const reporterDirectId = await loadUserDirectId(ctx, reporterUserName);
+
+  if (decision === "send") {
+    const pipelineName = (await getPipelineNameById(ctx, Number(lead.pipeline_id))) || PIPELINE_NAME_METAL;
+    const scenarioKey = pipelineName === PIPELINE_NAME_WOOD ? "woodRestock" : "metalRestock";
+    const scenario = settings.scenarios && settings.scenarios[scenarioKey];
+
+    if (!scenario || !scenario.amoStatusId) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        `❌ В настройках не указан статус для сценария «Дозакупка ${
+          pipelineName === PIPELINE_NAME_WOOD ? "Дерево" : "Металл"
+        }». Обратитесь к администратору.`
+      );
+      return;
+    }
+
+    await patchLead(ctx, leadId, { status_id: Number(scenario.amoStatusId) });
+    await clearMaterialsReporter(ctx, leadId);
+
+    const text = `Сделка № ${contractNumber} отправлена на закупку материалов`;
+
+    await sendProductionDirectMessage(ctx, directId, text);
+
+    if (reporterDirectId) {
+      await sendProductionDirectMessage(ctx, reporterDirectId, text);
+    }
+
+    return;
+  }
+
+  // "Отклонить" (ТЗ T-20.2.5 "Отклонить"): очистить комментарий и тег.
+  await patchLead(ctx, leadId, {
+    custom_fields_values: [{ field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: "" }] }]
+  });
+  await removeTagFromLead(ctx, leadId, DOZAKUPKA_TAG_NAME);
+  await clearMaterialsReporter(ctx, leadId);
+
+  await sendProductionDirectMessage(ctx, directId, "Отклонено.");
+
+  if (reporterDirectId) {
+    await sendProductionDirectMessage(
+      ctx,
+      reporterDirectId,
+      `Запрос на закупку материалов по сделке № ${contractNumber} отклонён.`
+    );
+  }
 }
 
 async function handleExecutionMaterialsShortage(ctx, directId, userKey) {
@@ -2339,23 +2450,36 @@ async function handleMaterialsCommentInput(ctx, directId, userKey, userName, set
   });
 
   await addTagToLead(ctx, pending.leadId, DOZAKUPKA_TAG_NAME);
+  await saveMaterialsReporter(ctx, pending.leadId, userName);
 
   delete state.pendingTextInput;
 
   const lead = await ctx.getLead(pending.leadId);
   const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
+  const pdfLink = lead ? ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) : "";
 
   const pipelineName = (await getPipelineNameById(ctx, pending.row.amoPipelineId)) || PIPELINE_NAME_METAL;
   const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
 
-  // T-20 (Ожидание решения) пока не реализован — заглушка: только
-  // уведомляем мастера.
-  await notifyRoleUsers(
+  // ТЗ T-20.2.5: мастер решает, отправлять ли сделку на закупку (целевой
+  // статус — из настроек виджета, раздел "Сценарии", см.
+  // handleMaterialsDecision) или отклонить запрос.
+  const notified = await notifyRoleUsers(
     ctx,
     settings,
     managerRoleKey,
-    `${userName} указал, что в № ${contractNumber} не хватает материалов.`
+    `№ договора: ${contractNumber}${pdfLink ? ` (${pdfLink})` : ""}. ${userName} не хватает деталей: ${trimmedText}`,
+    [
+      buildTaggedButtonCompat(ctx, "Отправить на закупку", pending.leadId),
+      buildTaggedButtonCompat(ctx, "Отклонить", pending.leadId)
+    ]
   );
+
+  if (notified === 0) {
+    console.log(
+      `[Бот производства] Сделка ${pending.leadId}: мастер сейчас не достижим для push о нехватке материалов.`
+    );
+  }
 
   await sendProductionDirectMessage(ctx, directId, "Комментарий сохранён, мастер уведомлён.");
 }
@@ -2775,18 +2899,62 @@ function init(app, ctx) {
 
       // "Подтвердить (id)" / "Отклонить (id)" / "Изменить (id)" — ответ
       // мастера на пересмотр стоимости (ТЗ T-6.5.3/T-8, актуализация 3.5).
+      // "Отклонить" также используется в решении по закупке материалов
+      // (ниже) — при совпадении текста сначала проверяем, относится ли
+      // кнопка к пересмотру стоимости, и только если нет — к закупке.
       const confirmCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить");
-      const rejectCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
       const changeCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Изменить");
+      const declineLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+      const sendToProcurementLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отправить на закупку");
 
-      if ((confirmCostLeadId || rejectCostLeadId || changeCostLeadId) && settings) {
-        const leadId = confirmCostLeadId || rejectCostLeadId || changeCostLeadId;
-        const action = confirmCostLeadId ? "confirm" : rejectCostLeadId ? "reject" : "change";
+      if ((confirmCostLeadId || changeCostLeadId) && settings) {
+        const leadId = confirmCostLeadId || changeCostLeadId;
+        const action = confirmCostLeadId ? "confirm" : "change";
 
         try {
           await handleCostRevisionReply(ctx, directId, userKey, leadId, action, settings);
         } catch (error) {
           console.error("[Бот производства] Ошибка согласования стоимости:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать ответ. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      if (declineLeadId && settings) {
+        try {
+          const lead = await ctx.getLead(declineLeadId);
+          const hasCostEntry =
+            lead && getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), Number(lead.status_id));
+
+          if (hasCostEntry) {
+            await handleCostRevisionReply(ctx, directId, userKey, declineLeadId, "reject", settings);
+          } else {
+            await handleMaterialsDecision(ctx, directId, declineLeadId, "decline", settings);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка обработки «Отклонить»:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать ответ. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      if (sendToProcurementLeadId && settings) {
+        try {
+          await handleMaterialsDecision(ctx, directId, sendToProcurementLeadId, "send", settings);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка отправки на закупку:", error.stack || error.message);
 
           await sendProductionDirectMessage(
             ctx,
