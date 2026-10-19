@@ -2,7 +2,8 @@ const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
 const designerBot = require("./designerBot");
-const productionBot = require("./productionBot");
+// Бот производства больше не require'ится здесь — он отдельный процесс,
+// см. productionBotServer.js.
 
 const UPSTASH_REDIS_REST_URL =
   process.env.UPSTASH_REDIS_REST_URL || "";
@@ -7851,51 +7852,11 @@ const designerBotContext = {
 
 designerBot.init(app, designerBotContext);
 
-// ============================================================
-// БОТ ПРОИЗВОДСТВО (amoMessenger + виджет настроек amoCRM, Фаза 1)
-// ============================================================
-// Как и бот проектировщиков — отдельное amoMessenger-приложение, отдельный
-// webhook, своё состояние. Для чтения/записи сделок собственного токена
-// amoCRM не заводит — использует общий токен "Внешней интеграции" через ctx
-// (см. комментарий в начале productionBot.js). Регистрируется ДО catch-all
-// 404-обработчика, иначе Express не дойдёт до новых маршрутов.
-
-const productionBotContext = {
-  AMOCRM_SUBDOMAIN,
-  redisRequest,
-  isStartCommand,
-  extractAmoMessengerUserName,
-  extractImageUrlsFromMessage,
-  getMoscowDate,
-  todayMoscowDateText,
-  todayMoscowStartUnix,
-  getUserName,
-  // Общие amoCRM HTTP-обёртки (авторизация/повтор при 401 уже внутри) —
-  // сценарий "Распределение" сам строит запросы к /api/v4/leads,
-  // /api/v4/leads/pipelines, /api/v4/leads/custom_fields/{id}, которых нет
-  // готовыми функциями ни у одного из двух других ботов.
-  amoCrmGet,
-  amoCrmPost,
-  amoCrmPatch,
-  getFieldValues,
-  getFieldValueJoined,
-  formatDateFieldValue,
-  getLead,
-  buildTaggedButton,
-  parseTaggedButton,
-  // Загрузка файлов на Яндекс.Диск (сценарий "Исполнение", ТЗ T-6/T-7) — те
-  // же примитивы, которыми уже пользуется designerBotContext.
-  ydEnsureFolderPath,
-  ydEnsureFolder,
-  ydUploadFromUrlAndWait,
-  ydGetFolderPublicUrl,
-  yandexDiskHeaders,
-  escapeRegExp,
-  getUrlExtension,
-  YANDEX_DISK_ROOT_FOLDER
-};
-
-productionBot.init(app, productionBotContext);
+// Бот производства теперь отдельный процесс (productionBotServer.js,
+// своё PM2-приложение, свой порт) — см. комментарий в начале этого файла
+// в разделе require() и productionBotServer.js/amoSharedUtils.js. Здесь
+// он больше не регистрируется: деплой/ошибка в нём не должны требовать
+// перезапуска этого процесса (ботов инженеров и проектировщиков).
 
 // ============================================================
 // GET /
@@ -7946,8 +7907,7 @@ async function startServer() {
 await loadAmoMessengerTokensFromRedis();
   await designerBot.loadTokens(designerBotContext);
   designerBot.startSchedulers(designerBotContext);
-  await productionBot.loadTokens(productionBotContext);
-  productionBot.startSchedulers(productionBotContext);
+
   app.listen(
     PORT,
     () => {
