@@ -63,6 +63,11 @@ const PRODUCTION_WIDGET_SECRET = process.env.PRODUCTION_WIDGET_SECRET || "";
 // Условный идентификатор бота — используется только в логах/отладке.
 const BOT_ID = "production";
 
+// Время запуска процесса — удобно для /status/production: по этому можно
+// на глаз проверить, что деплой реально перезапустил именно этот процесс
+// (а не просто подхватился "как будто").
+const PROCESS_STARTED_AT = new Date().toISOString();
+
 // ============================================================
 // 2. ТОКЕНЫ amoMessenger (бот производства) + Redis
 // ============================================================
@@ -2743,6 +2748,8 @@ function init(app, ctx) {
       status: "OK",
       service: "amoMessenger production bot",
       bot_id: BOT_ID,
+      pid: process.pid,
+      process_started_at: PROCESS_STARTED_AT,
       amomessenger_token: productionAccessToken ? "ДА" : "НЕТ",
       widget_settings_saved: productionWidgetSettingsCache ? "ДА" : "НЕТ",
       widget_settings_updated_at: productionWidgetSettingsUpdatedAt
