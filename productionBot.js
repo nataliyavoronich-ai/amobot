@@ -2137,9 +2137,9 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
       `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.`,
     [
-      buildTaggedButtonCompat(ctx, "Подтвердить", lead.id),
-      buildTaggedButtonCompat(ctx, "Отклонить", lead.id),
-      buildTaggedButtonCompat(ctx, "Изменить", lead.id)
+      buildTaggedButtonCompat(ctx, "Подтвердить", `${lead.id}:${lead.status_id}`),
+      buildTaggedButtonCompat(ctx, "Отклонить", `${lead.id}:${lead.status_id}`),
+      buildTaggedButtonCompat(ctx, "Изменить", `${lead.id}:${lead.status_id}`)
     ]
   );
 
@@ -2155,7 +2155,18 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
 // прямой ответ мастера на push выше (Подтвердить/Отклонить/Изменить);
 // собственный пункт меню мастера "Пересмотреть стоимость" (T-8.1, список
 // всех ожидающих сделок) пока не реализован.
-async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, settings) {
+// Идентификатор в кнопках — «idСделки:idСтатуса» (в сделке может быть
+// несколько ожидающих решений, актуализация п.3.8.4). Старые сообщения с
+// одним id сделки обрабатываются по текущему статусу.
+function parseCostIdentifier(identifier) {
+  const [leadId, statusId] = String(identifier).split(":");
+
+  return { leadId, statusId: statusId ? Number(statusId) : null };
+}
+
+async function handleCostRevisionReply(ctx, directId, userKey, identifier, action, settings) {
+  const parsed = parseCostIdentifier(identifier);
+  const leadId = parsed.leadId;
   const lead = await ctx.getLead(leadId);
 
   if (!lead) {
@@ -2163,7 +2174,7 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
     return;
   }
 
-  const statusId = Number(lead.status_id);
+  const statusId = parsed.statusId || Number(lead.status_id);
   const entries = await getCostRevisionEntries(ctx, lead);
   const entry = getCostRevisionEntry(entries, statusId);
 
@@ -2191,20 +2202,16 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
       return;
     }
 
-    await patchLead(ctx, leadId, {
-      custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: entry.new_price }] }]
-    });
-    await removeCostRevisionEntry(ctx, lead, statusId);
+    // Актуализация п.3.8.1: сначала подтверждение «Да»/«Нет».
+    const stageName = await getStatusNameById(ctx, lead.pipeline_id, statusId);
+    const confirmId = `cost:${leadId}:${statusId}`;
 
-    if (requesterDirectId) {
-      await sendProductionDirectMessage(
-        ctx,
-        requesterDirectId,
-        `Согласована новая стоимость работ по сделке № ${contractNumber}, цена ${entry.new_price} рублей`
-      );
-    }
-
-    await sendProductionDirectMessage(ctx, directId, "Согласовано.");
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `Установить этапу ${stageName} стоимость работ ${entry.new_price}?`,
+      [buildTaggedButtonCompat(ctx, "Да", confirmId), buildTaggedButtonCompat(ctx, "Нет", confirmId)]
+    );
     return;
   }
 
@@ -2233,6 +2240,157 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
 
     await sendProductionDirectMessage(ctx, directId, "Укажите стоимость работ");
   }
+}
+
+// Ответ «Да»/«Нет» на «Установить этапу … стоимость работ …?» (п.3.8.1).
+async function handleCostSetConfirm(ctx, directId, userKey, identifier, decision, settings) {
+  const { leadId, statusId } = parseCostIdentifier(identifier);
+
+  if (decision === "no") {
+    // «Нет» — возврат к предыдущему сообщению мастера.
+    await showCostEntryCard(ctx, directId, leadId, statusId, settings);
+    return;
+  }
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const entry = lead ? getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), statusId) : null;
+    const row = findExecutionRows(settings).find((r) => Number(r.amoStatusId) === Number(statusId));
+
+    if (!entry) {
+      await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+      return;
+    }
+
+    if (!row || !row.priceFieldId) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроено поле «Цена» для этого этапа. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    await patchLead(ctx, lead.id, {
+      custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: entry.new_price }] }]
+    });
+    await removeCostRevisionEntry(ctx, lead, statusId);
+
+    await sendProductionDirectMessage(ctx, directId, "Новая стоимость установлена.");
+    await notifyUserByName(
+      ctx,
+      entry.username,
+      `Согласована новая стоимость работ по сделке № ${getContractNumberText(ctx, lead)}, цена ${entry.new_price} рублей`
+    );
+  });
+}
+
+// Карточка одного запроса (T-8.5 / п.3.8): текущая цена, проект, исполнитель и
+// предложенная им стоимость, кнопки решения.
+async function showCostEntryCard(ctx, directId, leadId, statusId, settings) {
+  const lead = await ctx.getLead(leadId);
+  const entry = lead ? getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), statusId) : null;
+
+  if (!entry) {
+    await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+    return;
+  }
+
+  const row = findExecutionRows(settings).find((r) => Number(r.amoStatusId) === Number(statusId));
+  const currentPrice = row ? getPriceText(ctx, lead, row.priceFieldId) : "—";
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) || "(ссылка не найдена)";
+  const identifier = `${leadId}:${statusId}`;
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `№ договора: ${getContractNumberText(ctx, lead)}\nЦена: ${currentPrice} рублей\nПроект: ${pdfLink}\n` +
+      `Исполнитель: ${entry.username} предлагает следующую стоимость: ${entry.new_price}.`,
+    [
+      buildTaggedButtonCompat(ctx, "Подтвердить", identifier),
+      buildTaggedButtonCompat(ctx, "Отклонить", identifier),
+      buildTaggedButtonCompat(ctx, "Изменить", identifier)
+    ]
+  );
+}
+
+// «Пересмотреть стоимость» в меню мастера (T-8.1-8.3): список сделок его
+// воронки с ожидающими решениями, затем выбор этапа.
+async function showCostRevisionListForForeman(ctx, directId, userKey, roleKey, settings) {
+  const state = productionUserState[userKey];
+  const pipelineId = PIPELINE_ID_BY_FOREMAN_ROLE[roleKey];
+  const leads = [];
+  const seen = new Set();
+
+  for (const row of settings.statusFieldMap || []) {
+    if (!row.amoStatusId || Number(row.amoPipelineId) !== pipelineId) {
+      continue;
+    }
+
+    for (const lead of await getLeadsByPipeline(ctx, pipelineId, { statusId: row.amoStatusId, withTags: true })) {
+      if (seen.has(lead.id) || leadHasTag(lead, PM_DEAL_TAG_NAME)) {
+        continue;
+      }
+
+      seen.add(lead.id);
+
+      if ((await getCostRevisionEntries(ctx, lead)).length > 0) {
+        lead.__contractNumber = getContractNumberText(ctx, lead);
+        leads.push(lead);
+      }
+    }
+  }
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Пересмотреть стоимость работ:\nНет запросов.");
+    return;
+  }
+
+  const sorted = sortDealsForButtons(ctx, leads);
+  const lines = ["Пересмотреть стоимость работ:"];
+
+  sorted.forEach((lead, i) => lines.push(`${i + 1}. № договора ${lead.__contractNumber}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "cost_lead", sorted));
+}
+
+// Выбрана сделка со списка: перечень этапов с запросами (в порядке строк
+// настроек), кнопки «1», «2»…
+async function showCostStageChoice(ctx, directId, userKey, lead, settings) {
+  const state = productionUserState[userKey];
+  const entries = await getCostRevisionEntries(ctx, lead);
+
+  const rows = (settings.statusFieldMap || []).filter((row) =>
+    entries.some((entry) => Number(entry.status_id) === Number(row.amoStatusId))
+  );
+
+  if (entries.length === 0 || rows.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+    return;
+  }
+
+  const lines = [`Пересмотреть стоимость работ в сделке № договора ${getContractNumberText(ctx, lead)}:`];
+  const items = {};
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const entry = getCostRevisionEntry(entries, row.amoStatusId);
+    const stageName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+
+    lines.push(`\nСтатус сделки ${stageName}`);
+    lines.push(`${i + 1}. Исполнитель ${entry.username}, Цена ${getPriceText(ctx, lead, row.priceFieldId)}, руб.`);
+    items[String(i + 1)] = `${lead.id}:${row.amoStatusId}`;
+  }
+
+  if (rows.length === 1) {
+    delete state.listContext;
+    await showCostEntryCard(ctx, directId, lead.id, rows[0].amoStatusId, settings);
+    return;
+  }
+
+  state.listContext = { kind: "cost_stage", items };
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), Object.keys(items));
 }
 
 async function handleCostMasterChangeInput(ctx, directId, userKey, settings, trimmedText) {
@@ -3089,6 +3247,14 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
     return false;
   }
 
+  // Пересмотр стоимости: выбор этапа внутри сделки хранит «idСделки:idСтатуса».
+  if (listContext.kind === "cost_stage") {
+    const { leadId, statusId } = parseCostIdentifier(listContext.items[text]);
+
+    await showCostEntryCard(ctx, directId, leadId, statusId, settings);
+    return true;
+  }
+
   const lead = await ctx.getLead(listContext.items[text]);
 
   if (!lead) {
@@ -3100,6 +3266,11 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
   const row = findExecutionRowForLead(settings, lead);
   const stale = () =>
     sendProductionDirectMessage(ctx, directId, `По сделке № ${contractNumber} решение уже принято или не требуется.`);
+
+  if (listContext.kind === "cost_lead") {
+    await showCostStageChoice(ctx, directId, userKey, lead, settings);
+    return true;
+  }
 
   if (listContext.kind === "otk_intermediate") {
     if (!row || !fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID)) {
@@ -3483,14 +3654,225 @@ async function handleForemanReturnToStage(ctx, directId, userKey, leadId, status
 }
 
 // ============================================================
+// 8c. КОНТРОЛЬ СРОКОВ (ТЗ T-16; актуализация 2.1 п.4.2)
+// ============================================================
+
+const PRODUCT_PLAN_DATE_FIELD_ID = 550764; // "Плановая готовность изделия", дата
+const CLOSED_STATUS_IDS = [142, 143]; // «Успешно реализовано» / «Закрыто и не реализовано»
+
+const PIPELINE_TITLE_BY_ID = {
+  [PIPELINE_ID_METAL]: "Производство Металл",
+  [PIPELINE_ID_WOOD]: "Производство Дерево"
+};
+
+// Просрочка — плановая дата СТРОГО раньше сегодняшнего дня по Москве; дней
+// просрочки = сегодня минус плановая дата.
+function getOverdueDays(todayStart, rawValue) {
+  const unix = Number(rawValue);
+
+  if (!Number.isFinite(unix) || unix <= 0 || unix >= todayStart) {
+    return 0;
+  }
+
+  return Math.max(1, Math.round((todayStart - unix) / 86400));
+}
+
+// Этапы (строки «Связи этапов и полей» со статусом бота «Исполнение»),
+// у которых плановая дата этапа просрочена. userName — только его сделки
+// (исполнитель); без него — все (мастер/директор).
+async function collectOverdueStages(ctx, settings, { pipelineId = null, userName = null } = {}) {
+  const todayStart = ctx.todayMoscowStartUnix();
+  const result = [];
+
+  for (const lead of await loadExecutionLeads(ctx, settings, { pipelineId })) {
+    const row = lead.__row;
+
+    if (!row.planDateFieldId || (userName && !leadExecutorIs(ctx, lead, row, userName))) {
+      continue;
+    }
+
+    const days = getOverdueDays(todayStart, ctx.getFieldValues(lead, row.planDateFieldId)[0]);
+
+    if (days > 0) {
+      result.push({
+        lead,
+        days,
+        stageName: await getStatusNameById(ctx, lead.pipeline_id, lead.status_id),
+        maker: getLeadExecutorName(ctx, lead, row) || "—"
+      });
+    }
+  }
+
+  return result.sort((a, b) => b.days - a.days);
+}
+
+// Сделки воронки целиком: просрочена «Плановая готовность изделия».
+async function collectOverdueDeals(ctx, settings, pipelineId) {
+  const todayStart = ctx.todayMoscowStartUnix();
+  const result = [];
+
+  for (const lead of await getLeadsByPipeline(ctx, pipelineId, { withTags: true })) {
+    if (CLOSED_STATUS_IDS.includes(Number(lead.status_id)) || leadHasTag(lead, PM_DEAL_TAG_NAME)) {
+      continue;
+    }
+
+    const days = getOverdueDays(todayStart, ctx.getFieldValues(lead, PRODUCT_PLAN_DATE_FIELD_ID)[0]);
+
+    if (days > 0) {
+      const row = findExecutionRowForLead(settings, lead);
+
+      result.push({
+        lead,
+        days,
+        stageName: await getStatusNameById(ctx, lead.pipeline_id, lead.status_id),
+        maker: (row && getLeadExecutorName(ctx, lead, row)) || "—"
+      });
+    }
+  }
+
+  return result.sort((a, b) => b.days - a.days);
+}
+
+function formatOverdueLine(ctx, item, index) {
+  return (
+    `${index + 1}. № ${getContractNumberText(ctx, item.lead)}. Статус сделки amoCRM: ${item.stageName}. ` +
+    `Изготовитель: ${item.maker}. Кол-во дней просрочки: ${item.days}`
+  );
+}
+
+// Тексты сообщений для пользователя по его роли; пустой массив — нарушений
+// нет (сделки без просрочки не выводим).
+async function buildDeadlineMessages(ctx, settings, roleKey, userName) {
+  const messages = [];
+
+  if (roleKey === PERFORMER_ROLE_KEY) {
+    const stages = await collectOverdueStages(ctx, settings, { userName });
+
+    if (stages.length > 0) {
+      messages.push(
+        ["Добрый день! Зафиксированы нарушения сроков у сделок:", ...stages.map((s, i) => formatOverdueLine(ctx, s, i))].join(
+          "\n"
+        )
+      );
+    }
+
+    return messages;
+  }
+
+  const pipelineIds =
+    roleKey === "productionDirector"
+      ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD]
+      : PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]
+        ? [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]]
+        : [];
+
+  for (const pipelineId of pipelineIds) {
+    const deals = await collectOverdueDeals(ctx, settings, pipelineId);
+    const stages = await collectOverdueStages(ctx, settings, { pipelineId });
+
+    if (deals.length === 0 && stages.length === 0) {
+      continue;
+    }
+
+    const lines = [`Воронка “${PIPELINE_TITLE_BY_ID[pipelineId]}”`];
+
+    if (deals.length > 0) {
+      lines.push("Нарушение сроков у сделок:", ...deals.map((d, i) => formatOverdueLine(ctx, d, i)));
+    }
+
+    if (stages.length > 0) {
+      lines.push("Нарушение сроков у этапов:", ...stages.map((s, i) => formatOverdueLine(ctx, s, i)));
+    }
+
+    messages.push(lines.join("\n"));
+  }
+
+  return messages;
+}
+
+// Кнопка «Контроль сроков» — информационный список без кнопок действий.
+async function showDeadlineControl(ctx, directId, userName, roleKey, settings) {
+  const messages = await buildDeadlineMessages(ctx, settings, roleKey, userName);
+
+  if (messages.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Нарушений сроков нет.");
+    return;
+  }
+
+  for (const text of messages) {
+    await sendProductionDirectMessage(ctx, directId, text);
+  }
+}
+
+// Ежедневная рассылка в 10:30 по Москве (T-16). Дедупликация по дате в Redis
+// — перезапуск процесса или два запуска не дублируют рассылку; окно 10:30-10:34,
+// чтобы деплой днём не вызвал внеплановую отправку.
+const DEADLINE_BROADCAST_KEY_PREFIX = "production_deadline_broadcast:";
+
+async function runDailyDeadlineBroadcast(ctx) {
+  const settings = productionWidgetSettingsCache;
+
+  if (!settings) {
+    return;
+  }
+
+  const marker = await ctx.redisRequest([
+    "SET",
+    `${DEADLINE_BROADCAST_KEY_PREFIX}${ctx.todayMoscowDateText()}`,
+    "1",
+    "NX",
+    "EX",
+    172800
+  ]);
+
+  if (!marker || marker.result !== "OK") {
+    return;
+  }
+
+  const keysResponse = await ctx.redisRequest(["KEYS", "production_direct_id:*"]);
+  const keys = (keysResponse && keysResponse.result) || [];
+  const prefix = "production_direct_id:";
+
+  console.log(`[Бот производства] Рассылка «Контроль сроков»: получателей ${keys.length}.`);
+
+  for (const key of keys) {
+    try {
+      const userName = String(key).slice(prefix.length);
+      const directId = (await ctx.redisRequest(["GET", key])).result;
+
+      if (!directId) {
+        continue;
+      }
+
+      const roleKey = resolveUserRole(settings, userName);
+
+      for (const text of await buildDeadlineMessages(ctx, settings, roleKey, userName)) {
+        await sendProductionDirectMessage(ctx, directId, text);
+      }
+    } catch (error) {
+      console.error(`[Бот производства] Рассылка «Контроль сроков» ${key}:`, error.message);
+    }
+  }
+}
+
+// ============================================================
 // 9. ПЛАНИРОВЩИКИ
 // ============================================================
-// Фоновых задач пока нет (у этого бота нет сценариев с таймерами/опросом —
-// T-16 "Контроль сроков" выводится только по запросу пользователя).
-// Функция оставлена пустой ради симметрии вызова с
-// designerBot.startSchedulers(ctx) в server.js.
+// Ежедневная рассылка «Контроль сроков» (T-16) в 10:30 по Москве.
 function startSchedulers(ctx) {
-  console.log("[Бот производства] Планировщики: сценариев пока нет, ничего не запущено.");
+  setInterval(async () => {
+    try {
+      const moscow = ctx.getMoscowDate();
+
+      if (moscow.getUTCHours() === 10 && moscow.getUTCMinutes() >= 30 && moscow.getUTCMinutes() < 35) {
+        await runDailyDeadlineBroadcast(ctx);
+      }
+    } catch (error) {
+      console.error("[Бот производства] Ошибка планировщика «Контроль сроков»:", error.message);
+    }
+  }, 60 * 1000);
+
+  console.log("[Бот производства] Планировщик «Контроль сроков»: ежедневно в 10:30 (Москва).");
 }
 
 // ============================================================
@@ -3821,7 +4203,10 @@ function init(app, ctx) {
         const decision = yesLeadId ? "yes" : "no";
 
         try {
-          if (state.roleKey === PERFORMER_ROLE_KEY) {
+          if (String(leadId).startsWith("cost:")) {
+            // «Установить этапу … стоимость работ …?» (мастер, п.3.8.1)
+            await handleCostSetConfirm(ctx, directId, userKey, String(leadId).slice(5), decision, settings);
+          } else if (state.roleKey === PERFORMER_ROLE_KEY) {
             await handlePerformerDealConfirmReply(ctx, directId, userKey, userName, leadId, decision, settings);
           } else if (state.roleKey === "metalShopForeman" || state.roleKey === "woodShopForeman") {
             await handleApprovalReply(ctx, directId, leadId, decision, settings);
@@ -3910,9 +4295,13 @@ function init(app, ctx) {
 
       if (declineLeadId && settings) {
         try {
-          const lead = await ctx.getLead(declineLeadId);
+          const lead = await ctx.getLead(parseCostIdentifier(declineLeadId).leadId);
           const hasCostEntry =
-            lead && getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), Number(lead.status_id));
+            lead &&
+            getCostRevisionEntry(
+              await getCostRevisionEntries(ctx, lead),
+              parseCostIdentifier(declineLeadId).statusId || Number(lead.status_id)
+            );
 
           if (hasCostEntry) {
             await handleCostRevisionReply(ctx, directId, userKey, declineLeadId, "reject", settings);
@@ -4003,6 +4392,10 @@ function init(app, ctx) {
             } else {
               await handleMenuPlaceholder(ctx, directId, trimmedText);
             }
+          } else if (trimmedText === "Пересмотреть стоимость" && FOREMAN_ROLE_KEYS.includes(state.roleKey) && settings) {
+            await showCostRevisionListForForeman(ctx, directId, userKey, state.roleKey, settings);
+          } else if (trimmedText === "Контроль сроков" && settings) {
+            await showDeadlineControl(ctx, directId, userName, state.roleKey, settings);
           } else if (trimmedText === "Не принято ОТК" && FOREMAN_ROLE_KEYS.includes(state.roleKey) && settings) {
             await showOtkRejectedInfoForForeman(ctx, directId, userKey, state.roleKey, settings);
           } else {
