@@ -662,10 +662,27 @@ function resolveUserRole(settings, userName) {
   return PERFORMER_ROLE_KEY;
 }
 
-async function sendMainMenu(ctx, directId, roleKey) {
+// ТЗ T-3.2.3.1: если активного ОТК нет, мастеру доступен «Финальный ОТК»
+// (после «Пересмотреть стоимость»). Проверяется на момент запроса меню.
+function getMenuButtons(roleKey, settings) {
   const buttons = MAIN_MENU_BUTTONS[roleKey] || [];
 
-  await sendProductionDirectMessage(ctx, directId, "Выберите тип задач", buttons);
+  if (!FOREMAN_ROLE_KEYS.includes(roleKey) || hasActiveOtk(settings)) {
+    return buttons;
+  }
+
+  const index = buttons.indexOf("Пересмотреть стоимость");
+
+  return [...buttons.slice(0, index + 1), "Финальный ОТК", ...buttons.slice(index + 1)];
+}
+
+async function sendMainMenu(ctx, directId, roleKey) {
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Выберите тип задач",
+    getMenuButtons(roleKey, productionWidgetSettingsCache)
+  );
 }
 
 // ТЗ п.7: полный поток авторизации по команде "старт".
@@ -1958,6 +1975,8 @@ async function handleFinishUpload(ctx, directId, userKey, userName, settings) {
       await finishDefectUpload(ctx, directId, settings, pending);
     } else if (pending.kind === "otk_defect") {
       await finishOtkRejectUpload(ctx, directId, settings, pending);
+    } else if (pending.kind === "final_otk_defect") {
+      await finishFinalOtkRejectUpload(ctx, directId, settings, pending);
     } else if (pending.kind === "project_return_defect") {
       await finishProjectReturnUpload(ctx, directId, pending);
     }
@@ -3042,19 +3061,32 @@ function getCompletedStageRows(ctx, settings, lead) {
 
 async function buildMasterDecisionRequest(ctx, settings, lead) {
   const { comment, photos } = getRejectDetails(ctx, lead);
-  const text =
-    `Производство № ${getContractNumberText(ctx, lead)} не принято к исправлению.\n` +
-    `Комментарий: ${comment}\nФото дефекта: ${photos}\nПримите решение о дальнейших работах.`;
-
-  const buttons = [buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id)];
+  const contractNumber = getContractNumberText(ctx, lead);
+  const stageButtons = [];
 
   for (const row of getCompletedStageRows(ctx, settings, lead)) {
     const stageName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
 
-    buttons.push(buildTaggedButtonCompat(ctx, `Вернуть на ${stageName}`, `${lead.id}:${row.amoStatusId}`));
+    stageButtons.push(buildTaggedButtonCompat(ctx, `Вернуть на ${stageName}`, `${lead.id}:${row.amoStatusId}`));
   }
 
-  return { text, buttons };
+  // Финальный ОТК (T-13.4.2.7.2.1 / T-20.2.1): «Продолжить работу» нет —
+  // только выбор этапа возврата.
+  if (isAtFinalOtkStatus(lead) || isAtFinalOtkFailedStatus(lead)) {
+    return {
+      text:
+        `Производство № ${contractNumber} НЕ принято.\nК исправлению: ${comment}. Фото дефекта: ${photos}\n` +
+        "Выберите этап, на который нужно вернуть сделку в работу:",
+      buttons: stageButtons
+    };
+  }
+
+  return {
+    text:
+      `Производство № ${contractNumber} не принято к исправлению.\n` +
+      `Комментарий: ${comment}\nФото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+    buttons: [buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id), ...stageButtons]
+  };
 }
 
 async function notifyMasterAboutDecision(ctx, settings, lead) {
@@ -3206,6 +3238,11 @@ async function showUnacceptedListForForeman(ctx, directId, userKey, roleKey, set
     (lead) => fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)
   );
 
+  // Сделки, не принятые на финальном ОТК (статус «ОТК не пройдено», T-20.2.1),
+  // тоже ждут решения мастера. Объединение со списком T-11 — вопрос №4
+  // раздела 10 актуализации (точные фильтры «Непринятые работы»).
+  leads.push(...(await loadFinalFailedLeads(ctx, roleKey)));
+
   await showUnacceptedList(ctx, directId, userKey, "Работы не приняты исполнителем:", "foreman_unaccepted", leads);
 }
 
@@ -3323,8 +3360,13 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
     return true;
   }
 
+  if (listContext.kind === "final_otk") {
+    await showFinalOtkCard(ctx, directId, lead, settings, state.roleKey);
+    return true;
+  }
+
   if (listContext.kind === "foreman_unaccepted") {
-    if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)) {
+    if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID) && !isAtFinalOtkFailedStatus(lead)) {
       await stale();
       return true;
     }
@@ -3605,11 +3647,17 @@ async function handleForemanReturnToStage(ctx, directId, userKey, leadId, status
     const lead = await ctx.getLead(leadId);
     const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
 
+    // Решение мастера: либо флаг «Не приняты работы: Мастер», либо финальный
+    // ОТК (сделка на «ОТК не пройдено» или — без активного ОТК — на самом
+    // этапе ОТК).
+    const isFinalCase =
+      lead && (isAtFinalOtkFailedStatus(lead) || (isAtFinalOtkStatus(lead) && !hasActiveOtk(settings)));
+
     if (
       !lead ||
       !FOREMAN_ROLE_KEYS.includes(roleKey) ||
       Number(lead.pipeline_id) !== PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] ||
-      !fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)
+      !(isFinalCase || fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID))
     ) {
       await stale();
       return;
@@ -3633,6 +3681,15 @@ async function handleForemanReturnToStage(ctx, directId, userKey, leadId, status
 
     await patchLead(ctx, lead.id, { status_id: Number(targetRow.amoStatusId) });
 
+    // Финальный ОТК: сделка возвращается «к исправлению» (T-13.4.2.7.2.2.1.2).
+    if (isFinalCase) {
+      try {
+        await addTagToLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+      } catch (error) {
+        console.error(`[Бот производства] Сделка ${lead.id}: не удалось поставить тег:`, error.message);
+      }
+    }
+
     const decisionText = `Решение Мастера по № ${contractNumber}: вернуть на этап ${stageName}`;
 
     await sendProductionDirectMessage(ctx, directId, decisionText);
@@ -3651,6 +3708,277 @@ async function handleForemanReturnToStage(ctx, directId, userKey, leadId, status
     // Только после переходов и сообщений — п.5.6.
     await patchLead(ctx, lead.id, { custom_fields_values: buildClearCycleFields() });
   });
+}
+
+// ============================================================
+// 8b2. ФИНАЛЬНЫЙ ОТК (ТЗ T-13; актуализация 2.1 п.6.2, 7)
+// ============================================================
+// Сделка на статусе «ОТК Металл» / «ОТК дерево» без тега «Не принято ОТК».
+// Проверяет активный ОТК; если активного ОТК нет — тот же сценарий доступен
+// мастеру (T-3.2.3.1), а при отказе он сразу выбирает этап возврата
+// (T-13.4.2.7.2, единственная описанная ветка для отсутствия ОТК).
+
+const FINAL_OTK_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 41835627, // «ОТК Металл»
+  [PIPELINE_ID_WOOD]: 41835516 // «ОТК дерево»
+};
+
+const FINAL_OTK_FAILED_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 58274773, // «ОТК не пройдено», воронка Производство
+  [PIPELINE_ID_WOOD]: 58274701 // «ОТК не пройдено», воронка Дерево производство
+};
+
+const FINAL_OTK_REJECT_COUNTER_FIELD_ID = 560094; // "[Бот] Кол-во не принято ОТК", число
+
+function isAtFinalOtkStatus(lead) {
+  return Number(lead.status_id) === FINAL_OTK_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+}
+
+function isAtFinalOtkFailedStatus(lead) {
+  return Number(lead.status_id) === FINAL_OTK_FAILED_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+}
+
+// Кто может выполнять финальный ОТК: ОТК; мастер — только пока нет активного ОТК.
+function canDoFinalOtk(roleKey, settings, lead) {
+  if (roleKey === "otk") {
+    return true;
+  }
+
+  return (
+    FOREMAN_ROLE_KEYS.includes(roleKey) &&
+    !hasActiveOtk(settings) &&
+    Number(lead.pipeline_id) === PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]
+  );
+}
+
+async function loadFinalLeads(ctx, pipelineIds, statusMap, { withOtkTag }) {
+  const result = [];
+
+  for (const pipelineId of pipelineIds) {
+    const leads = await getLeadsByPipeline(ctx, pipelineId, { statusId: statusMap[pipelineId], withTags: true });
+
+    for (const lead of leads) {
+      if (leadHasTag(lead, PM_DEAL_TAG_NAME) || leadHasTag(lead, OTK_REJECTED_TAG_NAME) !== withOtkTag) {
+        continue;
+      }
+
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+      result.push(lead);
+    }
+  }
+
+  return result;
+}
+
+function getFinalOtkPipelineIds(roleKey) {
+  return roleKey === "otk" ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD] : [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]];
+}
+
+// T-13.1: «Финальный ОТК» — список сделок.
+async function showFinalOtkList(ctx, directId, userKey, roleKey, settings) {
+  const state = productionUserState[userKey];
+
+  if (roleKey !== "otk" && hasActiveOtk(settings)) {
+    await sendProductionDirectMessage(ctx, directId, "Финальный ОТК сейчас выполняет специалист ОТК.");
+    return;
+  }
+
+  const leads = sortDealsForButtons(
+    ctx,
+    await loadFinalLeads(ctx, getFinalOtkPipelineIds(roleKey), FINAL_OTK_STATUS_BY_PIPELINE, { withOtkTag: false })
+  );
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Сделки, ожидающие прохождения контроля\nНет сделок.");
+    return;
+  }
+
+  const lines = ["Сделки, ожидающие прохождения контроля"];
+
+  leads.forEach((lead, i) => lines.push(`${i + 1}. № ${lead.__contractNumber}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "final_otk", leads));
+}
+
+// Сделки «ОТК не пройдено» с тегом — ждут решения мастера (T-20.2.1).
+async function loadFinalFailedLeads(ctx, roleKey) {
+  return loadFinalLeads(ctx, getFinalOtkPipelineIds(roleKey), FINAL_OTK_FAILED_STATUS_BY_PIPELINE, {
+    withOtkTag: true
+  });
+}
+
+async function showFinalOtkCard(ctx, directId, lead, settings, roleKey) {
+  if (
+    !isAtFinalOtkStatus(lead) ||
+    !canDoFinalOtk(roleKey, settings, lead) ||
+    (await leadHasOtkRejectedTag(ctx, lead.id))
+  ) {
+    await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+    return;
+  }
+
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+  const id = `final:${lead.id}`;
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Финальный контроль сделки. Изделие готово?\n№ ${getContractNumberText(ctx, lead)}${pdfLink ? `, ${pdfLink}` : ""}`,
+    [buildTaggedButtonCompat(ctx, "Да", id), buildTaggedButtonCompat(ctx, "Нет", id)]
+  );
+}
+
+// getLead не возвращает теги — проверяем их отдельным запросом.
+async function leadHasOtkRejectedTag(ctx, leadId) {
+  return (await getLeadTags(ctx, leadId)).some((tag) => tag.name === OTK_REJECTED_TAG_NAME);
+}
+
+// T-13.4: «Да» / «Нет» финального ОТК.
+async function handleFinalOtkReply(ctx, directId, userKey, leadId, decision, settings) {
+  const roleKey = productionUserState[userKey].roleKey;
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+
+    if (
+      !lead ||
+      !isAtFinalOtkStatus(lead) ||
+      !canDoFinalOtk(roleKey, settings, lead) ||
+      (await leadHasOtkRejectedTag(ctx, lead.id))
+    ) {
+      await stale();
+      return;
+    }
+
+    if (decision === "no") {
+      productionUserState[userKey].pendingTextInput = { kind: "final_otk_reject_comment", leadId: lead.id };
+      await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+      return;
+    }
+
+    // T-13.4.1: следующий статус — из строки настроек этого этапа.
+    const row = (settings.statusFieldMap || []).find(
+      (r) => Number(r.amoStatusId) === Number(lead.status_id) && r.nextAmoStatusId
+    );
+
+    if (!row) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроен следующий статус amoCRM для этапа финального ОТК. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    await patchLead(ctx, lead.id, { status_id: Number(row.nextAmoStatusId) });
+
+    try {
+      await removeTagFromLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+    } catch (error) {
+      console.error(`[Бот производства] Сделка ${lead.id}: не удалось снять тег:`, error.message);
+    }
+
+    await sendProductionDirectMessage(ctx, directId, `Изделие по сделке № ${getContractNumberText(ctx, lead)} принято.`);
+  });
+}
+
+async function handleFinalOtkRejectCommentInput(ctx, directId, userKey, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  if (!trimmedText) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  state.pendingUpload = {
+    leadId: pending.leadId,
+    kind: "final_otk_defect",
+    baseName: "Дефект изделия",
+    comment: trimmedText,
+    uploadedPaths: []
+  };
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
+}
+
+// T-13.4.2.4-7: одна запись (комментарий, ссылки, счётчик +1), затем ветка по
+// активному ОТК. Исключения — только до записи (см. handleFinishUpload).
+async function finishFinalOtkRejectUpload(ctx, directId, settings, pending) {
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead || !isAtFinalOtkStatus(lead)) {
+    await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+    return;
+  }
+
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const currentSettings = productionWidgetSettingsCache || settings;
+  const otkAvailable = hasActiveOtk(currentSettings);
+  const counter = getLeadNumber(ctx, lead, FINAL_OTK_REJECT_COUNTER_FIELD_ID) + 1;
+
+  const fields = [
+    { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: pending.comment }] },
+    { field_id: FINAL_OTK_REJECT_COUNTER_FIELD_ID, values: [{ value: counter }] }
+  ];
+
+  if (links.length > 0) {
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
+  }
+
+  const body = { custom_fields_values: fields };
+
+  // T-13.4.2.7.1.3: при активном ОТК сделка уходит на «ОТК не пройдено».
+  if (otkAvailable) {
+    body.status_id = FINAL_OTK_FAILED_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+  }
+
+  await patchLead(ctx, lead.id, body);
+
+  const fresh = (await ctx.getLead(lead.id)) || lead;
+  const contractNumber = getContractNumberText(ctx, fresh);
+
+  if (otkAvailable) {
+    try {
+      await addTagToLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+    } catch (error) {
+      console.error(`[Бот производства] Сделка ${lead.id}: не удалось поставить тег:`, error.message);
+    }
+
+    const foremanRoleKey = MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+    const foremanNames = (((currentSettings.roles || {})[foremanRoleKey]) || [])
+      .filter((entry) => entry.active && entry.handle)
+      .map((entry) => entry.handle)
+      .join(", ");
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `Ваши замечания приняты, сделка передана Мастеру${foremanNames ? ` (${foremanNames})` : ""}.`
+    );
+
+    if (foremanRoleKey) {
+      await notifyRoleUsers(
+        ctx,
+        currentSettings,
+        foremanRoleKey,
+        `Вам необходимо принять решение по сделке № ${contractNumber}. Изделие НЕ принято ОТК на Финальном ОТК.`
+      );
+    }
+
+    return;
+  }
+
+  // Активного ОТК нет — T-13.4.2.7.2.1: выбор этапа возврата.
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const request = await buildMasterDecisionRequest(ctx, currentSettings, fresh);
+
+  await sendProductionDirectMessage(ctx, directId, request.text, request.buttons);
 }
 
 // ============================================================
@@ -4478,6 +4806,8 @@ function init(app, ctx) {
             await handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText);
           } else if (kind === "otk_reject_comment") {
             await handleOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "final_otk_reject_comment") {
+            await handleFinalOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
           } else if (kind === "report_period" && settings) {
             await handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText);
           }
@@ -4505,7 +4835,10 @@ function init(app, ctx) {
         const decision = yesLeadId ? "yes" : "no";
 
         try {
-          if (String(leadId).startsWith("cost:")) {
+          if (String(leadId).startsWith("final:")) {
+            // Финальный ОТК (T-13.4): «Да»/«Нет» ОТК или мастера без ОТК.
+            await handleFinalOtkReply(ctx, directId, userKey, String(leadId).slice(6), decision, settings);
+          } else if (String(leadId).startsWith("cost:")) {
             // «Установить этапу … стоимость работ …?» (мастер, п.3.8.1)
             await handleCostSetConfirm(ctx, directId, userKey, String(leadId).slice(5), decision, settings);
           } else if (state.roleKey === PERFORMER_ROLE_KEY) {
@@ -4686,7 +5019,7 @@ function init(app, ctx) {
         return;
       }
 
-      const roleButtons = MAIN_MENU_BUTTONS[state.roleKey] || [];
+      const roleButtons = getMenuButtons(state.roleKey, settings);
 
       if (roleButtons.includes(trimmedText)) {
         // Новый пункт меню — прежний список больше не актуален.
@@ -4704,6 +5037,8 @@ function init(app, ctx) {
             await showInOtkListForPerformer(ctx, directId, userKey, userName, settings);
           } else if (trimmedText === "Промежуточный ОТК" && state.roleKey === "otk" && settings) {
             await showIntermediateOtkList(ctx, directId, userKey, settings);
+          } else if (trimmedText === "Финальный ОТК" && settings && (state.roleKey === "otk" || FOREMAN_ROLE_KEYS.includes(state.roleKey))) {
+            await showFinalOtkList(ctx, directId, userKey, state.roleKey, settings);
           } else if (trimmedText === "Непринятые работы" && settings) {
             if (state.roleKey === "otk") {
               await showUnacceptedListForOtk(ctx, directId, userKey, settings);
