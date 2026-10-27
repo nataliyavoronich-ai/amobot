@@ -3856,6 +3856,306 @@ async function runDailyDeadlineBroadcast(ctx) {
 }
 
 // ============================================================
+// 8d. ОТЧЁТ (ТЗ T-14 исполнитель, T-15 мастер/директор)
+// ============================================================
+
+const PRODUCT_READY_DATE_FIELD_ID = 483072; // "Изделие готово", дата
+const SALES_PIPELINE_ID_METAL = 207259; // воронка «Металл»
+const SALES_PIPELINE_ID_WOOD = 585508; // воронка «Дерево»
+const PIPELINE_ID_RECLAMATION = 4689981; // воронка «Рекламация»
+
+// Воронки поиска выполненных операций (T-14: Производство Металл/Дерево,
+// Металл, Дерево, Рекламация) — сделка после производства уходит в
+// «продающие» воронки, а операция при этом остаётся выполненной.
+const REPORT_PIPELINE_IDS = [
+  PIPELINE_ID_METAL,
+  PIPELINE_ID_WOOD,
+  SALES_PIPELINE_ID_METAL,
+  SALES_PIPELINE_ID_WOOD,
+  PIPELINE_ID_RECLAMATION
+];
+
+const REPORT_BUTTON_FIRST_HALF = "1-15";
+const REPORT_BUTTON_SECOND_HALF = "16-конец месяца";
+const REPORT_BUTTON_CUSTOM = "Выбрать период";
+const REPORT_PERIOD_BUTTONS = [REPORT_BUTTON_FIRST_HALF, REPORT_BUTTON_SECOND_HALF, REPORT_BUTTON_CUSTOM];
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatReportDate(year, month, day) {
+  return `${pad2(day)}.${pad2(month + 1)}.${year}`;
+}
+
+// Границы дней — по Москве (UTC+3).
+function moscowDayStartUnix(year, month, day) {
+  return Date.UTC(year, month, day) / 1000 - 3 * 3600;
+}
+
+function buildReportPeriod(from, to) {
+  const label =
+    from.y === to.y && from.m === to.m && from.d === to.d
+      ? formatReportDate(from.y, from.m, from.d)
+      : `${formatReportDate(from.y, from.m, from.d)} - ${formatReportDate(to.y, to.m, to.d)}`;
+
+  return {
+    label,
+    fromUnix: moscowDayStartUnix(from.y, from.m, from.d),
+    toUnix: moscowDayStartUnix(to.y, to.m, to.d) + 86400 - 1
+  };
+}
+
+// «1-15» / «16-конец месяца» — в рамках текущего месяца.
+function buildMonthHalfPeriod(ctx, secondHalf) {
+  const now = ctx.getMoscowDate();
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+  return secondHalf
+    ? buildReportPeriod({ y, m, d: 16 }, { y, m, d: lastDay })
+    : buildReportPeriod({ y, m, d: 1 }, { y, m, d: 15 });
+}
+
+// «ДД.ММ.ГГГГ - ДД.ММ.ГГГГ» или «ДД.ММ.ГГГГ»; null — не распознано.
+function parseReportPeriodText(text) {
+  const match = String(text || "")
+    .trim()
+    .match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s*-\s*(\d{2})\.(\d{2})\.(\d{4}))?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const toPart = (d, m, y) => {
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+    const valid =
+      date.getUTCFullYear() === Number(y) && date.getUTCMonth() === Number(m) - 1 && date.getUTCDate() === Number(d);
+
+    return valid ? { y: Number(y), m: Number(m) - 1, d: Number(d) } : null;
+  };
+
+  const from = toPart(match[1], match[2], match[3]);
+  const to = match[4] ? toPart(match[4], match[5], match[6]) : from;
+
+  if (!from || !to) {
+    return null;
+  }
+
+  const period = buildReportPeriod(from, to);
+
+  return period.toUnix >= period.fromUnix ? period : null;
+}
+
+function formatReportMoney(value) {
+  return (Math.round(Number(value) * 100) / 100).toLocaleString("ru-RU").replace(/\s/g, " ");
+}
+
+// Сделки из указанных воронок, у которых дата-поле попадает в период.
+// Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
+async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period) {
+  const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
+  const fromKey = `filter[custom_fields_values][${fieldId}][from]`;
+  const toKey = `filter[custom_fields_values][${fieldId}][to]`;
+  const all = [];
+
+  for (let page = 1; page <= 20; page++) {
+    const params = { limit: 250, page, [fromKey]: period.fromUnix, [toKey]: period.toUnix };
+
+    pipelineIds.forEach((id, i) => {
+      params[`filter[pipeline_id][${i}]`] = id;
+    });
+
+    const response = await ctx.amoCrmGet(url, params);
+
+    if (response.status === 204) {
+      break;
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`amoCRM GET /leads (отчёт) HTTP ${response.status}`);
+    }
+
+    const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
+
+    all.push(...leads);
+
+    if (leads.length < 250) {
+      break;
+    }
+  }
+
+  return all.filter((lead) => {
+    const value = Number(ctx.getFieldValues(lead, fieldId)[0]);
+
+    return Number.isFinite(value) && value >= period.fromUnix && value <= period.toUnix;
+  });
+}
+
+// Выполненные операции: строки «Исполнение», у сделки в период заполнен
+// «Факт готовности» и сделка уже ушла с этого статуса. Возвращает
+// Map «исполнитель → { count, sum }».
+async function collectCompletedOperations(ctx, settings, period, { pipelineId = null, userName = null } = {}) {
+  const result = new Map();
+  const target = userName ? normalizeHandleName(userName) : null;
+
+  for (const row of findExecutionRows(settings)) {
+    if (!row.factDateFieldId || !row.amoStatusId || !row.executorFieldId) {
+      continue;
+    }
+
+    if (pipelineId && Number(row.amoPipelineId) !== Number(pipelineId)) {
+      continue;
+    }
+
+    for (const lead of await getLeadsByFieldDateRange(ctx, REPORT_PIPELINE_IDS, row.factDateFieldId, period)) {
+      if (Number(lead.status_id) === Number(row.amoStatusId)) {
+        continue;
+      }
+
+      const names = ctx.getFieldValues(lead, row.executorFieldId);
+
+      if (names.length === 0 || (target && !names.some((name) => normalizeHandleName(name) === target))) {
+        continue;
+      }
+
+      const key = target ? userName : names.join(", ");
+      const price = row.priceFieldId ? Number(ctx.getFieldValues(lead, row.priceFieldId)[0]) || 0 : 0;
+      const entry = result.get(key) || { count: 0, sum: 0 };
+
+      entry.count += 1;
+      entry.sum += price;
+      result.set(key, entry);
+    }
+  }
+
+  return result;
+}
+
+async function buildPerformerReport(ctx, settings, userName, period) {
+  const operations = (await collectCompletedOperations(ctx, settings, period, { userName })).get(userName) || {
+    count: 0,
+    sum: 0
+  };
+
+  return (
+    `Отчет за ${period.label}\nКол-во выполненных операций: ${operations.count}\n` +
+    `Стоимость выполненных операций: ${formatReportMoney(operations.sum)}, руб`
+  );
+}
+
+async function buildForemanReport(ctx, settings, pipelineId, period) {
+  const isMetal = pipelineId === PIPELINE_ID_METAL;
+  const operations = await collectCompletedOperations(ctx, settings, period, { pipelineId });
+
+  const deals = await getLeadsByFieldDateRange(
+    ctx,
+    [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
+    PRODUCT_READY_DATE_FIELD_ID,
+    period
+  );
+
+  const products = new Map();
+  let dealsSum = 0;
+
+  for (const lead of deals) {
+    dealsSum += Number(lead.price) || 0;
+
+    const product = getProductText(ctx, lead);
+
+    products.set(product, (products.get(product) || 0) + 1);
+  }
+
+  const lines = [`Отчет за ${period.label} по Производству (${isMetal ? "Металл" : "Дерево"})`];
+
+  for (const [name, entry] of operations) {
+    lines.push(
+      `${name}:`,
+      `Кол-во выполненных операций: ${entry.count}`,
+      `Стоимость выполненных операций: ${formatReportMoney(entry.sum)}, руб`
+    );
+  }
+
+  lines.push(
+    "",
+    `Кол-во выполненных сделок: ${deals.length}`,
+    `Стоимость выполненных сделок: ${formatReportMoney(dealsSum)}, руб`,
+    "",
+    "Кол-во выполненных продуктов"
+  );
+
+  for (const [product, count] of products) {
+    lines.push(`${product}: ${count}`);
+  }
+
+  return lines.join("\n");
+}
+
+// Директор — по воронкам металл и дерево последовательно; мастер — по своей.
+async function sendReportForRole(ctx, directId, userName, roleKey, settings, period) {
+  await sendProductionDirectMessage(ctx, directId, `Ожидайте, формируем отчет за период ${period.label}`);
+
+  if (roleKey === PERFORMER_ROLE_KEY) {
+    await sendProductionDirectMessage(ctx, directId, await buildPerformerReport(ctx, settings, userName, period));
+    return;
+  }
+
+  const pipelineIds =
+    roleKey === "productionDirector" ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD] : [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]];
+
+  for (const pipelineId of pipelineIds.filter(Boolean)) {
+    await sendProductionDirectMessage(ctx, directId, await buildForemanReport(ctx, settings, pipelineId, period));
+  }
+}
+
+async function startReport(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+
+  state.awaitingReportPeriod = true;
+  delete state.pendingTextInput;
+
+  await sendProductionDirectMessage(ctx, directId, "Выберите период отчета", REPORT_PERIOD_BUTTONS);
+}
+
+async function handleReportPeriodChoice(ctx, directId, userKey, userName, settings, choice) {
+  const state = productionUserState[userKey];
+
+  delete state.awaitingReportPeriod;
+
+  if (choice === REPORT_BUTTON_CUSTOM) {
+    state.pendingTextInput = { kind: "report_period" };
+    await sendProductionDirectMessage(ctx, directId, "Укажите период для отчета");
+    return;
+  }
+
+  const period = buildMonthHalfPeriod(ctx, choice === REPORT_BUTTON_SECOND_HALF);
+
+  await sendReportForRole(ctx, directId, userName, state.roleKey, settings, period);
+}
+
+async function handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const period = parseReportPeriodText(trimmedText);
+
+  if (!period) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      state.roleKey === PERFORMER_ROLE_KEY
+        ? "Не удалось распознать указанную дату. Пожалуйста, введите период в формате:\n" +
+            "ХХ.ХХ.ХХХХ - ХХ.ХХ.ХХХХ\nили\nХХ.ХХ.ХХХХ."
+        : "Не удалось распознать указанную дату. Пожалуйста, введите дату в формате ХХ.ХХ.ХХХХ."
+    );
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  await sendReportForRole(ctx, directId, userName, state.roleKey, settings, period);
+}
+
+// ============================================================
 // 9. ПЛАНИРОВЩИКИ
 // ============================================================
 // Ежедневная рассылка «Контроль сроков» (T-16) в 10:30 по Москве.
@@ -4178,6 +4478,8 @@ function init(app, ctx) {
             await handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText);
           } else if (kind === "otk_reject_comment") {
             await handleOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "report_period" && settings) {
+            await handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText);
           }
         } catch (error) {
           console.error("[Бот производства] Ошибка обработки ввода:", error.stack || error.message);
@@ -4367,14 +4669,34 @@ function init(app, ctx) {
         return;
       }
 
+      // Выбор периода отчёта (T-14.1 / T-15.1) — после нажатия «Отчёт».
+      if (state.awaitingReportPeriod && REPORT_PERIOD_BUTTONS.includes(trimmedText) && settings) {
+        try {
+          await handleReportPeriodChoice(ctx, directId, userKey, userName, settings, trimmedText);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка формирования отчёта:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось сформировать отчёт. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
       const roleButtons = MAIN_MENU_BUTTONS[state.roleKey] || [];
 
       if (roleButtons.includes(trimmedText)) {
         // Новый пункт меню — прежний список больше не актуален.
         delete state.listContext;
+        delete state.awaitingReportPeriod;
 
         try {
-          if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
+          if (trimmedText === "Отчёт") {
+            await startReport(ctx, directId, userKey);
+          } else if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
             await handleDistributionButton(ctx, directId, userKey, userName, state.roleKey);
           } else if (trimmedText === "Исполнение" && state.roleKey === PERFORMER_ROLE_KEY && settings) {
             await showExecutionListForPerformer(ctx, directId, userName, settings);
