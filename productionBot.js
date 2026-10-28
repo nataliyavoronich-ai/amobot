@@ -990,6 +990,16 @@ async function loadUserDirectId(ctx, userName) {
 // известный direct_id (то есть кто хотя бы раз писал боту "старт" или любое
 // сообщение). Для тех, у кого direct_id не известен, сообщение не
 // отправляется — amoMessenger не даёт написать пользователю "в холодную".
+// Значения из amoCRM и от пользователей в сообщениях с разметкой (formatting_mode
+// md): экранируем спецсимволы (* _ ~ | `), чтобы они не ломали жирный шрифт.
+function mdSafe(ctx, value) {
+  if (ctx.sanitizeForMarkdown) {
+    return ctx.sanitizeForMarkdown(value);
+  }
+
+  return String(value === null || value === undefined ? "" : value);
+}
+
 async function notifyRoleUsers(ctx, settings, roleKey, text, buttons, options) {
   const entries = (settings && settings.roles && settings.roles[roleKey]) || [];
   let notified = 0;
@@ -2189,9 +2199,6 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     return;
   }
 
-  // Повторный запрос на том же этапе перезаписывает прежний: действует последняя сумма.
-  const previousEntry = getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), Number(lead.status_id));
-
   await upsertCostRevisionEntry(ctx, lead, Number(lead.status_id), price, userName);
 
   delete state.pendingTextInput;
@@ -2216,10 +2223,10 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     ctx,
     settings,
     managerRoleKey,
-    `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
-      `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.` +
-      (previousEntry ? ` Это обновлённый запрос, предыдущая сумма ${previousEntry.new_price} недействительна.` : ""),
-    await buildCostDecisionButtons(ctx, lead, `${lead.id}:${lead.status_id}`)
+    `№ договора: ${mdSafe(ctx, contractNumber)} Цена: ${mdSafe(ctx, currentPrice)} рублей Проект: ${pdfLink} ` +
+      `Исполнитель: ${mdSafe(ctx, userName)} предлагает следующую стоимость: **${mdSafe(ctx, price)}**.`,
+    await buildCostDecisionButtons(ctx, lead, `${lead.id}:${lead.status_id}`),
+    { markdown: true }
   );
 
   if (notified === 0) {
@@ -2383,9 +2390,10 @@ async function showCostEntryCard(ctx, directId, leadId, statusId, settings) {
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `№ договора: ${getContractNumberText(ctx, lead)}\nЦена: ${currentPrice} рублей\nПроект: ${pdfLink}\n` +
-      `Исполнитель: ${entry.username} предлагает следующую стоимость: ${entry.new_price}.`,
-    await buildCostDecisionButtons(ctx, lead, identifier)
+    `№ договора: ${mdSafe(ctx, getContractNumberText(ctx, lead))}\nЦена: ${mdSafe(ctx, currentPrice)} рублей\nПроект: ${pdfLink}\n` +
+      `Исполнитель: ${mdSafe(ctx, entry.username)} предлагает следующую стоимость: **${mdSafe(ctx, entry.new_price)}**.`,
+    await buildCostDecisionButtons(ctx, lead, identifier),
+    { markdown: true }
   );
 }
 
