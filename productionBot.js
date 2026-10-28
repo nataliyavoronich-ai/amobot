@@ -1122,18 +1122,29 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
     const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, userName);
 
     if (!enumOption) {
+      console.log(
+        `[Бот производства] Распределение: «${userName}» не найден в списке значений поля ${row.executorFieldId} ` +
+          `(воронка ${row.amoPipelineId}, статус ${row.amoStatusId})`
+      );
       continue;
     }
 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
+    let assignedCount = 0;
 
     for (const lead of leads) {
       if (ctx.getFieldValues(lead, row.executorFieldId).length > 0) {
+        assignedCount++;
         continue; // уже назначено кому-то
       }
 
       available.push(lead);
     }
+
+    console.log(
+      `[Бот производства] Распределение: «${userName}», воронка ${row.amoPipelineId}, статус ${row.amoStatusId}, ` +
+        `поле ${row.executorFieldId}: сделок в статусе ${leads.length}, уже с исполнителем ${assignedCount}`
+    );
   }
 
   if (available.length === 0) {
