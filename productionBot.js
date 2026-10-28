@@ -689,8 +689,6 @@ async function sendMainMenu(ctx, directId, roleKey) {
 async function handleStartCommand(ctx, directId, userKey, userName) {
   await saveUserDirectId(ctx, userName, directId);
 
-  await sendProductionDirectMessage(ctx, directId, "Минуту, ищем вас в базе.");
-
   const roleKey = resolveUserRole(productionWidgetSettingsCache, userName);
 
   productionUserState[userKey] = { roleKey, userName };
