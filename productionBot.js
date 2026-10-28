@@ -929,7 +929,7 @@ function getContractNumberWithLink(ctx, lead) {
   const contractNumber = getContractNumberText(ctx, lead);
   const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
 
-  return pdfLink ? `${contractNumber} (${pdfLink})` : contractNumber;
+  return pdfLink ? `${contractNumber} (проект PDF: ${pdfLink})` : contractNumber;
 }
 
 // ТЗ T-2 — сортировка кнопок сделок в любом списке:
