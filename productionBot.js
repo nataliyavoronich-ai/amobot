@@ -2202,7 +2202,7 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `Работа по сделке передана Мастеру (${activeManager ? activeManager.handle : "не назначен"}).`
+    `Запрос новой стоимости передан мастеру (${activeManager ? activeManager.handle : "не назначен"}).`
   );
 
   const contractNumber = getContractNumberText(ctx, lead);
