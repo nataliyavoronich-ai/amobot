@@ -1225,6 +1225,39 @@ function parseTaggedButtonCompat(ctx, text, label) {
   return match ? match[1] : null;
 }
 
+// Кнопки решения мастера по стоимости: на кнопке только действие и номер
+// договора («Подтвердить ПД/77»), без служебных id. Соответствие номера
+// договора и «сделка:этап» хранится в Redis.
+const COST_DECISION_LABELS = ["Подтвердить", "Отклонить", "Изменить"];
+
+function costDecisionRedisKey(contractNumber) {
+  return `production_cost_decision:${normalizeHandleName(contractNumber)}`;
+}
+
+async function buildCostDecisionButtons(ctx, lead, identifier) {
+  const contractNumber = getContractNumberText(ctx, lead);
+
+  await ctx.redisRequest(["SET", costDecisionRedisKey(contractNumber), String(identifier), "EX", 2592000]);
+
+  return COST_DECISION_LABELS.map((label) => `${label} ${contractNumber}`);
+}
+
+// Разбор кнопки «Подтвердить ПД/77»: { label, identifier } либо
+// { label, identifier: null }, если запись уже не найдена; null — это не
+// кнопка решения по стоимости (в том числе служебные «Отклонить (id)»).
+async function resolveCostDecisionButton(ctx, text) {
+  const match = String(text || "").match(/^(Подтвердить|Отклонить|Изменить) (.+)$/);
+
+  if (!match || /^\(.*\)$/.test(match[2])) {
+    return null;
+  }
+
+  const response = await ctx.redisRequest(["GET", costDecisionRedisKey(match[2])]);
+  const identifier = response && response.result ? String(response.result) : null;
+
+  return { label: match[1], identifier };
+}
+
 // ТЗ п.11.1/12/13: ответ "Да"/"Нет" на "Принять сделку [X]?" у исполнителя.
 async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName, leadId, decision, settings) {
   // T-4.5.1
@@ -2188,11 +2221,7 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     managerRoleKey,
     `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
       `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.`,
-    [
-      buildTaggedButtonCompat(ctx, "Подтвердить", `${lead.id}:${lead.status_id}`),
-      buildTaggedButtonCompat(ctx, "Отклонить", `${lead.id}:${lead.status_id}`),
-      buildTaggedButtonCompat(ctx, "Изменить", `${lead.id}:${lead.status_id}`)
-    ]
+    await buildCostDecisionButtons(ctx, lead, `${lead.id}:${lead.status_id}`)
   );
 
   if (notified === 0) {
@@ -2358,11 +2387,7 @@ async function showCostEntryCard(ctx, directId, leadId, statusId, settings) {
     directId,
     `№ договора: ${getContractNumberText(ctx, lead)}\nЦена: ${currentPrice} рублей\nПроект: ${pdfLink}\n` +
       `Исполнитель: ${entry.username} предлагает следующую стоимость: ${entry.new_price}.`,
-    [
-      buildTaggedButtonCompat(ctx, "Подтвердить", identifier),
-      buildTaggedButtonCompat(ctx, "Отклонить", identifier),
-      buildTaggedButtonCompat(ctx, "Изменить", identifier)
-    ]
+    await buildCostDecisionButtons(ctx, lead, identifier)
   );
 }
 
@@ -4933,9 +4958,22 @@ function init(app, ctx) {
       // "Отклонить" также используется в решении по закупке материалов
       // (ниже) — при совпадении текста сначала проверяем, относится ли
       // кнопка к пересмотру стоимости, и только если нет — к закупке.
-      const confirmCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить");
-      const changeCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Изменить");
-      const declineLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+      const costButton = await resolveCostDecisionButton(ctx, trimmedText);
+
+      if (costButton && !costButton.identifier) {
+        await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан или устарел.");
+        return;
+      }
+
+      const confirmCostLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить") ||
+        (costButton && costButton.label === "Подтвердить" ? costButton.identifier : null);
+      const changeCostLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Изменить") ||
+        (costButton && costButton.label === "Изменить" ? costButton.identifier : null);
+      const declineLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Отклонить") ||
+        (costButton && costButton.label === "Отклонить" ? costButton.identifier : null);
       const sendToProcurementLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отправить на закупку");
 
       if ((confirmCostLeadId || changeCostLeadId) && settings) {
