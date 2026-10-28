@@ -680,7 +680,7 @@ async function sendMainMenu(ctx, directId, roleKey) {
   await sendProductionDirectMessage(
     ctx,
     directId,
-    "Выберите тип задач",
+    `${ROLE_LABELS[roleKey] ? `${ROLE_LABELS[roleKey]}, в` : "В"}ыберите тип задач:`,
     getMenuButtons(roleKey, productionWidgetSettingsCache)
   );
 }
@@ -694,12 +694,6 @@ async function handleStartCommand(ctx, directId, userKey, userName) {
   const roleKey = resolveUserRole(productionWidgetSettingsCache, userName);
 
   productionUserState[userKey] = { roleKey, userName };
-
-  await sendProductionDirectMessage(
-    ctx,
-    directId,
-    `Вам присвоена роль: ${ROLE_LABELS[roleKey]}`
-  );
 
   await sendMainMenu(ctx, directId, roleKey);
 }
