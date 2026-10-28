@@ -2189,6 +2189,9 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     return;
   }
 
+  // Повторный запрос на том же этапе перезаписывает прежний: действует последняя сумма.
+  const previousEntry = getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), Number(lead.status_id));
+
   await upsertCostRevisionEntry(ctx, lead, Number(lead.status_id), price, userName);
 
   delete state.pendingTextInput;
@@ -2214,7 +2217,8 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     settings,
     managerRoleKey,
     `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
-      `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.`,
+      `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.` +
+      (previousEntry ? ` Это обновлённый запрос, предыдущая сумма ${previousEntry.new_price} недействительна.` : ""),
     await buildCostDecisionButtons(ctx, lead, `${lead.id}:${lead.status_id}`)
   );
 
