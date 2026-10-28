@@ -599,7 +599,8 @@ const MAIN_MENU_BUTTONS = {
     "Отчёт",
     "Контроль сроков",
     "Вопрос от продаж",
-    "Не принято ОТК"
+    "Не принято ОТК",
+    "Ожидание решения"
   ],
   woodShopForeman: [
     "Распределение",
@@ -608,7 +609,8 @@ const MAIN_MENU_BUTTONS = {
     "Отчёт",
     "Контроль сроков",
     "Вопрос от продаж",
-    "Не принято ОТК"
+    "Не принято ОТК",
+    "Ожидание решения"
   ],
   productionDirector: ["Контроль сроков", "Вопросы от продаж", "Отчёт"]
 };
@@ -3292,6 +3294,75 @@ async function showUnacceptedListForForeman(ctx, directId, userKey, roleKey, set
   await showUnacceptedList(ctx, directId, userKey, "Работы не приняты исполнителем:", "foreman_unaccepted", leads);
 }
 
+// ------------------------------------------------------------
+// T-20 «Ожидание решения» (мастер): подменю с направлениями.
+// Реализованы «Сделки, не принятые на Финальном ОТК» и «Сделки в закупку».
+// Направления с проектным отделом и «ОТК перед монтажом» зависят от
+// нерешённых вопросов ТЗ (ID 555172, процесс Sensei, T-21) — заглушки.
+// ------------------------------------------------------------
+const WAITING_DECISION_FINAL_FAILED = "Сделки, не принятые на Финальном ОТК";
+const WAITING_DECISION_PROCUREMENT = "Сделки в закупку";
+const WAITING_DECISION_STUB_BUTTONS = [
+  "Сделки на доработку проектным отделом",
+  "Сделки в проектном отделе",
+  "Сделки, возвращены из проектного отдела",
+  "Сделки, не прошедшие ОТК перед монтажом"
+];
+const WAITING_DECISION_BUTTONS = [
+  WAITING_DECISION_FINAL_FAILED,
+  ...WAITING_DECISION_STUB_BUTTONS,
+  WAITING_DECISION_PROCUREMENT
+];
+
+async function showWaitingDecisionMenu(ctx, directId) {
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Выберите направление, где хотели бы принять решение по поводу сделки",
+    WAITING_DECISION_BUTTONS
+  );
+}
+
+async function showProcurementListForForeman(ctx, directId, userKey, roleKey) {
+  const state = productionUserState[userKey];
+  const leads = (await getLeadsByPipeline(ctx, PIPELINE_ID_BY_FOREMAN_ROLE[roleKey], { withTags: true })).filter(
+    (lead) => leadHasTag(lead, DOZAKUPKA_TAG_NAME)
+  );
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Сделки, у которых не хватает материала\nНет сделок.");
+    return;
+  }
+
+  leads.forEach((lead) => {
+    lead.__contractNumber = getContractNumberText(ctx, lead);
+  });
+
+  const sorted = sortDealsForButtons(ctx, leads);
+  const lines = ["Сделки, у которых не хватает материала"];
+
+  sorted.forEach((lead, i) => lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "materials_lead", sorted));
+}
+
+async function handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, choice) {
+  const state = productionUserState[userKey];
+
+  delete state.listContext;
+
+  if (choice === WAITING_DECISION_FINAL_FAILED) {
+    const leads = await loadFinalFailedLeads(ctx, roleKey);
+
+    await showUnacceptedList(ctx, directId, userKey, "Сделки, не прошедшие финальный контроль", "foreman_unaccepted", leads);
+  } else if (choice === WAITING_DECISION_PROCUREMENT) {
+    await showProcurementListForForeman(ctx, directId, userKey, roleKey);
+  } else {
+    await handleMenuPlaceholder(ctx, directId, choice);
+  }
+}
+
 // T-19: «Не принято ОТК» у мастера — информационный список без кнопок.
 async function showOtkRejectedInfoForForeman(ctx, directId, userKey, roleKey, settings) {
   delete productionUserState[userKey].listContext;
@@ -3403,6 +3474,23 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
       buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
       buildTaggedButtonCompat(ctx, "Не принять", lead.id)
     ]);
+    return true;
+  }
+
+  if (listContext.kind === "materials_lead") {
+    if (!leadHasTag(lead, DOZAKUPKA_TAG_NAME)) {
+      await stale();
+      return true;
+    }
+
+    const comment = ctx.getFieldValueJoined(lead, NOT_ACCEPTED_TEXT_FIELD_ID) || "—";
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `№ договора: ${getContractNumberWithLink(ctx, lead)}. Не хватает деталей: ${comment}`,
+      [buildTaggedButtonCompat(ctx, "Отправить на закупку", lead.id), buildTaggedButtonCompat(ctx, "Отклонить", lead.id)]
+    );
     return true;
   }
 
@@ -5078,6 +5166,22 @@ function init(app, ctx) {
         return;
       }
 
+      if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && WAITING_DECISION_BUTTONS.includes(trimmedText)) {
+        try {
+          await handleWaitingDecisionChoice(ctx, directId, userKey, state.roleKey, settings, trimmedText);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка «Ожидание решения»:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось получить список сделок. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
       const roleButtons = getMenuButtons(state.roleKey, settings);
 
       if (roleButtons.includes(trimmedText)) {
@@ -5112,6 +5216,8 @@ function init(app, ctx) {
             await showCostRevisionListForForeman(ctx, directId, userKey, state.roleKey, settings);
           } else if (trimmedText === "Контроль сроков" && settings) {
             await showDeadlineControl(ctx, directId, userName, state.roleKey, settings);
+          } else if (trimmedText === "Ожидание решения" && FOREMAN_ROLE_KEYS.includes(state.roleKey)) {
+            await showWaitingDecisionMenu(ctx, directId);
           } else if (trimmedText === "Не принято ОТК" && FOREMAN_ROLE_KEYS.includes(state.roleKey) && settings) {
             await showOtkRejectedInfoForForeman(ctx, directId, userKey, state.roleKey, settings);
           } else {
