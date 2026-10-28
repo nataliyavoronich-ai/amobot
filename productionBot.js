@@ -1739,6 +1739,11 @@ async function showExecutionListForPerformer(ctx, directId, userName, settings) 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId, withTags: true });
 
     for (const lead of leads) {
+      // Только свои сделки: исполнитель этого этапа = пользователь.
+      if (!ctx.getFieldValues(lead, row.executorFieldId).includes(enumOption.value)) {
+        continue;
+      }
+
       // Актуализация п.2.1/§4.1: сделки, уже переданные на промежуточный
       // ОТК, показываются в отдельном пункте меню "В ОТК" (пока не
       // реализован) — здесь их пропускаем, чтобы не путать с активной
@@ -1840,7 +1845,9 @@ async function tryHandleExecutionDealSelection(ctx, directId, userKey, userName,
 
     const lead = leads.find(
       (item) =>
-        getContractNumberText(ctx, item) === trimmedText && !fieldIsTruthy(ctx, item, INTERMEDIATE_OTK_FLAG_FIELD_ID)
+        getContractNumberText(ctx, item) === trimmedText &&
+        ctx.getFieldValues(item, row.executorFieldId).includes(enumOption.value) &&
+        !fieldIsTruthy(ctx, item, INTERMEDIATE_OTK_FLAG_FIELD_ID)
     );
 
     if (!lead) {
