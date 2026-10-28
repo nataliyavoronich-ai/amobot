@@ -922,6 +922,16 @@ function getContractNumberDisplay(ctx, lead, { hyperlink = false } = {}) {
   return pdfLink ? `[${contractNumber}](${pdfLink})` : contractNumber;
 }
 
+// Номер договора для текстов сообщений: после номера в скобках ссылка на
+// «Проект в производство pdf» (если она есть). Для кнопок и сравнения номеров
+// используется getContractNumberText без ссылки.
+function getContractNumberWithLink(ctx, lead) {
+  const contractNumber = getContractNumberText(ctx, lead);
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+
+  return pdfLink ? `${contractNumber} (${pdfLink})` : contractNumber;
+}
+
 // ТЗ T-2 — сортировка кнопок сделок в любом списке:
 // 1) есть непринятые работы (ОТК или Мастер);
 // 2) сделки к исправлению (тег "Не принято ОТК");
@@ -1178,7 +1188,7 @@ async function tryHandlePerformerDealSelection(ctx, directId, userName, settings
       continue;
     }
 
-    const contractNumber = getContractNumberText(ctx, lead);
+    const contractNumber = getContractNumberWithLink(ctx, lead);
 
     // T-4.4: сделка уже на согласовании у мастера — показать без кнопок.
     if (fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID)) {
@@ -1259,7 +1269,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
   // ситуация могла измениться между показом списка и нажатием "Да".
   const hasOtkRejected = await performerHasOtkRejectedDeals(ctx, userName, settings);
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
 
   if (!hasOtkRejected) {
     // T-4.5.2.1
@@ -1303,7 +1313,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
   const pipelineName = (await getPipelineNameById(ctx, row.amoPipelineId)) || PIPELINE_NAME_METAL;
   const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
   const price = getPriceText(ctx, lead, row.priceFieldId);
-  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
+  const contractNumberLinked = getContractNumberWithLink(ctx, lead);
 
   // T-5, случай "Исполнитель берёт в работу новую сделку" — мастеру сразу
   // приходит сообщение 45 (т.к. сделка уже известна, промежуточный список не
@@ -1428,7 +1438,7 @@ async function tryHandleForemanDealSelection(ctx, directId, settings, pipelineNa
 
   const requesterUserName = ctx.getFieldValueJoined(lead, EXECUTOR_PENDING_FIELD_ID);
   const price = getPriceText(ctx, lead, row.priceFieldId);
-  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
+  const contractNumberLinked = getContractNumberWithLink(ctx, lead);
 
   await sendProductionDirectMessage(
     ctx,
@@ -1471,7 +1481,7 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
   const distributionRows = findDistributionRows(settings);
   const row = distributionRows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
 
   // T-5.3.2
   if (decision === "no") {
@@ -1777,7 +1787,7 @@ async function showExecutionListForPerformer(ctx, directId, userName, settings) 
     const price = getPriceText(ctx, lead, row.priceFieldId);
     const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
 
-    lines.push(`${i + 1}. № ${lead.__contractNumber}, Цена ${price}, руб. Срок изготовления ${planDate}`);
+    lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}, Цена ${price}, руб. Срок изготовления ${planDate}`);
   });
 
   const buttons = deals.map((lead) => lead.__contractNumber);
@@ -1799,7 +1809,7 @@ const EXECUTION_CARD_BUTTONS = [
 ];
 
 async function showExecutionDealCard(ctx, directId, userKey, lead, row) {
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const price = getPriceText(ctx, lead, row.priceFieldId);
   const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
 
@@ -2045,7 +2055,12 @@ async function finishDoneUpload(ctx, directId, settings, pending) {
     }
   }
 
-  await sendProductionDirectMessage(ctx, directId, `Работа по сделке № ${contractNumber} завершена.`);
+  const handedTo = hasActiveOtk(currentSettings)
+    ? "Сделка передана ОТК"
+    : "Сделка передана на следующий этап производства";
+  const contractLabel = lead ? getContractNumberWithLink(ctx, lead) : contractNumber;
+
+  await sendProductionDirectMessage(ctx, directId, `Работа по сделке № ${contractLabel}. ${handedTo}`);
 }
 
 // ------------------------------------------------------------
@@ -2226,7 +2241,7 @@ async function handleCostRevisionReply(ctx, directId, userKey, identifier, actio
 
   const executionRows = findExecutionRows(settings);
   const row = executionRows.find((r) => Number(r.amoStatusId) === statusId);
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const requesterDirectId = await loadUserDirectId(ctx, entry.username);
 
   if (action === "confirm") {
@@ -2317,7 +2332,7 @@ async function handleCostSetConfirm(ctx, directId, userKey, identifier, decision
     await notifyUserByName(
       ctx,
       entry.username,
-      `Согласована новая стоимость работ по сделке № ${getContractNumberText(ctx, lead)}, цена ${entry.new_price} рублей`
+      `Согласована новая стоимость работ по сделке № ${getContractNumberWithLink(ctx, lead)}, цена ${entry.new_price} рублей`
     );
   });
 }
@@ -2387,7 +2402,7 @@ async function showCostRevisionListForForeman(ctx, directId, userKey, roleKey, s
   const sorted = sortDealsForButtons(ctx, leads);
   const lines = ["Пересмотреть стоимость работ:"];
 
-  sorted.forEach((lead, i) => lines.push(`${i + 1}. № договора ${lead.__contractNumber}.`));
+  sorted.forEach((lead, i) => lines.push(`${i + 1}. № договора ${getContractNumberWithLink(ctx, lead)}.`));
 
   await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "cost_lead", sorted));
 }
@@ -2407,7 +2422,7 @@ async function showCostStageChoice(ctx, directId, userKey, lead, settings) {
     return;
   }
 
-  const lines = [`Пересмотреть стоимость работ в сделке № договора ${getContractNumberText(ctx, lead)}:`];
+  const lines = [`Пересмотреть стоимость работ в сделке № договора ${getContractNumberWithLink(ctx, lead)}:`];
   const items = {};
 
   for (let i = 0; i < rows.length; i++) {
@@ -2470,7 +2485,7 @@ async function handleCostMasterChangeInput(ctx, directId, userKey, settings, tri
   });
   await removeCostRevisionEntry(ctx, lead, pending.statusId);
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const requesterDirectId = entry ? await loadUserDirectId(ctx, entry.username) : null;
 
   if (requesterDirectId) {
@@ -2560,7 +2575,7 @@ async function finishDefectUpload(ctx, directId, settings, pending) {
       ctx,
       currentSettings,
       "otk",
-      `Производство № ${getContractNumberText(ctx, lead)} не принято к исправлению.\n` +
+      `Производство № ${getContractNumberWithLink(ctx, lead)} не принято к исправлению.\n` +
         `Комментарий: ${comment}\nФото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
       [
         buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
@@ -2655,7 +2670,7 @@ async function handleMaterialsDecision(ctx, directId, leadId, decision, settings
     return;
   }
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const reporterDirectId = await loadUserDirectId(ctx, reporterUserName);
 
   if (decision === "send") {
@@ -3079,7 +3094,7 @@ function getCompletedStageRows(ctx, settings, lead) {
 
 async function buildMasterDecisionRequest(ctx, settings, lead) {
   const { comment, photos } = getRejectDetails(ctx, lead);
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const stageButtons = [];
 
   for (const row of getCompletedStageRows(ctx, settings, lead)) {
@@ -3149,12 +3164,8 @@ async function showInOtkListForPerformer(ctx, directId, userKey, userName, setti
   sortDealsForButtons(ctx, leads).forEach((lead, i) => {
     const price = getPriceText(ctx, lead, lead.__row.priceFieldId);
     const planDate = ctx.formatDateFieldValue(lead, lead.__row.planDateFieldId) || "—";
-    const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
 
-    lines.push(
-      `${i + 1}. № ${lead.__contractNumber}, Цена ${price} руб.` +
-        `${pdfLink ? `, Проект: ${pdfLink}` : ""}, Срок изготовления ${planDate}`
-    );
+    lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}, Цена ${price} руб., Срок изготовления ${planDate}`);
   });
 
   await sendProductionDirectMessage(ctx, directId, lines.join("\n"));
@@ -3195,7 +3206,7 @@ async function showIntermediateOtkList(ctx, directId, userKey, settings) {
     lines.push(stageName);
 
     for (const lead of byStage.get(stageName)) {
-      lines.push(`№ ${lead.__contractNumber}.`);
+      lines.push(`№ ${getContractNumberWithLink(ctx, lead)}.`);
       ordered.push(lead);
     }
   }
@@ -3209,7 +3220,7 @@ async function formatUnacceptedLine(ctx, lead, index) {
   const { comment, photos } = getRejectDetails(ctx, lead);
   const stageName = await getStatusNameById(ctx, lead.pipeline_id, lead.status_id);
 
-  return `${index}. № ${lead.__contractNumber}, Этап: ${stageName}, К исправлению: ${comment}, Фото дефекта: ${photos}`;
+  return `${index}. № ${getContractNumberWithLink(ctx, lead)}, Этап: ${stageName}, К исправлению: ${comment}, Фото дефекта: ${photos}`;
 }
 
 async function showUnacceptedList(ctx, directId, userKey, title, kind, leads) {
@@ -3284,7 +3295,7 @@ async function showOtkRejectedInfoForForeman(ctx, directId, userKey, roleKey, se
     const stageName = await getStatusNameById(ctx, lead.pipeline_id, lead.status_id);
     const maker = getLeadExecutorName(ctx, lead, lead.__row) || "—";
 
-    lines.push(`№ ${lead.__contractNumber}, Статус сделки: ${stageName}, Изготовитель: ${maker}`);
+    lines.push(`№ ${getContractNumberWithLink(ctx, lead)}, Статус сделки: ${stageName}, Изготовитель: ${maker}`);
   }
 
   await sendProductionDirectMessage(ctx, directId, lines.join("\n"));
@@ -3320,7 +3331,7 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
   const contractNumber = getContractNumberText(ctx, lead);
   const row = findExecutionRowForLead(settings, lead);
   const stale = () =>
-    sendProductionDirectMessage(ctx, directId, `По сделке № ${contractNumber} решение уже принято или не требуется.`);
+    sendProductionDirectMessage(ctx, directId, `По сделке № ${getContractNumberWithLink(ctx, lead)} решение уже принято или не требуется.`);
 
   if (listContext.kind === "cost_lead") {
     await showCostStageChoice(ctx, directId, userKey, lead, settings);
@@ -3355,7 +3366,7 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
     await sendProductionDirectMessage(
       ctx,
       directId,
-      `Производство № ${contractNumber} не принято к исправлению.\nКомментарий: ${comment}\n` +
+      `Производство № ${getContractNumberWithLink(ctx, lead)} не принято к исправлению.\nКомментарий: ${comment}\n` +
         `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
       [
         buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
@@ -3403,7 +3414,7 @@ function buildPerformerDecisionText(ctx, lead) {
   const { comment, photos } = getRejectDetails(ctx, lead);
 
   return (
-    `№ ${getContractNumberText(ctx, lead)}\nК исправлению: ${comment}\nФото дефекта: ${photos}\n` +
+    `№ ${getContractNumberWithLink(ctx, lead)}\nК исправлению: ${comment}\nФото дефекта: ${photos}\n` +
     "Решение специалиста ОТК: продолжить работу.\nПринять сделку?"
   );
 }
@@ -3422,7 +3433,7 @@ async function handleOtkAcceptReply(ctx, directId, userKey, leadId, decision, se
       return;
     }
 
-    const contractNumber = getContractNumberText(ctx, lead);
+    const contractNumber = getContractNumberWithLink(ctx, lead);
 
     if (decision === "no") {
       productionUserState[userKey].pendingTextInput = { kind: "otk_reject_comment", leadId: lead.id, row };
@@ -3497,7 +3508,7 @@ async function finishOtkRejectUpload(ctx, directId, settings, pending) {
   const links = await collectPublicLinks(ctx, pending.uploadedPaths);
   const row = findExecutionRowForLead(settings, lead) || pending.row;
   const executorName = getLeadExecutorName(ctx, lead, row);
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const counter = getLeadNumber(ctx, lead, INTERMEDIATE_OTK_REJECT_COUNTER_FIELD_ID) + 1;
 
   const fields = [
@@ -3554,7 +3565,7 @@ async function handleUnacceptedDecision(ctx, directId, userKey, userName, leadId
       return;
     }
 
-    const contractNumber = getContractNumberText(ctx, lead);
+    const contractNumber = getContractNumberWithLink(ctx, lead);
 
     // --- ОТК (T-9.4) ---
     if (roleKey === "otk") {
@@ -3691,7 +3702,7 @@ async function handleForemanReturnToStage(ctx, directId, userKey, leadId, status
       return;
     }
 
-    const contractNumber = getContractNumberText(ctx, lead);
+    const contractNumber = getContractNumberWithLink(ctx, lead);
     const { comment, photos } = getRejectDetails(ctx, lead);
     const stageName = await getStatusNameById(ctx, targetRow.amoPipelineId, targetRow.amoStatusId);
     const newExecutorName = getLeadExecutorName(ctx, lead, targetRow);
@@ -3814,7 +3825,7 @@ async function showFinalOtkList(ctx, directId, userKey, roleKey, settings) {
 
   const lines = ["Сделки, ожидающие прохождения контроля"];
 
-  leads.forEach((lead, i) => lines.push(`${i + 1}. № ${lead.__contractNumber}.`));
+  leads.forEach((lead, i) => lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}.`));
 
   await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "final_otk", leads));
 }
@@ -3898,7 +3909,7 @@ async function handleFinalOtkReply(ctx, directId, userKey, leadId, decision, set
       console.error(`[Бот производства] Сделка ${lead.id}: не удалось снять тег:`, error.message);
     }
 
-    await sendProductionDirectMessage(ctx, directId, `Изделие по сделке № ${getContractNumberText(ctx, lead)} принято.`);
+    await sendProductionDirectMessage(ctx, directId, `Изделие по сделке № ${getContractNumberWithLink(ctx, lead)} принято.`);
   });
 }
 
@@ -3958,7 +3969,7 @@ async function finishFinalOtkRejectUpload(ctx, directId, settings, pending) {
   await patchLead(ctx, lead.id, body);
 
   const fresh = (await ctx.getLead(lead.id)) || lead;
-  const contractNumber = getContractNumberText(ctx, fresh);
+  const contractNumber = getContractNumberWithLink(ctx, fresh);
 
   if (otkAvailable) {
     try {
@@ -4081,7 +4092,7 @@ async function collectOverdueDeals(ctx, settings, pipelineId) {
 
 function formatOverdueLine(ctx, item, index) {
   return (
-    `${index + 1}. № ${getContractNumberText(ctx, item.lead)}. Статус сделки amoCRM: ${item.stageName}. ` +
+    `${index + 1}. № ${getContractNumberWithLink(ctx, item.lead)}. Статус сделки amoCRM: ${item.stageName}. ` +
     `Изготовитель: ${item.maker}. Кол-во дней просрочки: ${item.days}`
   );
 }
