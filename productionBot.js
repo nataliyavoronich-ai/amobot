@@ -4713,7 +4713,7 @@ async function runDailyDeadlineBroadcast(ctx) {
 // 8d. ОТЧЁТ (ТЗ T-14 исполнитель, T-15 мастер/директор)
 // ============================================================
 
-const PRODUCT_READY_DATE_FIELD_ID = 483072; // "Изделие готово", дата
+const PRODUCT_READY_DATE_FIELD_ID = 445999; // "Лестница изготовлена" (в ТЗ — «Изделие готово»), дата
 const SALES_PIPELINE_ID_METAL = 207259; // воронка «Металл»
 const SALES_PIPELINE_ID_WOOD = 585508; // воронка «Дерево»
 const PIPELINE_ID_RECLAMATION = 4689981; // воронка «Рекламация»
