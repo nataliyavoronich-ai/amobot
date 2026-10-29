@@ -4103,7 +4103,11 @@ async function handleUnacceptedDecision(ctx, directId, userKey, userName, leadId
       const executorName = getLeadExecutorName(ctx, lead, row);
 
       // Сначала сообщения (им нужны данные цикла), затем очистка — п.5.6.
-      await sendProductionDirectMessage(ctx, directId, decisionText);
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        `Сделку вернули в работу, исполнитель (${executorName || "—"}) уведомлен.`
+      );
       await notifyRoleUsers(ctx, settings, "otk", decisionText);
       await notifyUserByName(ctx, executorName, decisionText);
       await patchLead(ctx, lead.id, { custom_fields_values: buildClearCycleFields() });
