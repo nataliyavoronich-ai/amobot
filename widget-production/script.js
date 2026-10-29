@@ -1426,7 +1426,7 @@ define(["jquery"], function ($) {
           // собственного явного color, из-за чего заголовки/подписи
           // пропадали визуально, хотя реально присутствовали в DOM.
           $root = $('<div class="production-widget"></div>').css({
-            "margin-top": "120px",
+            "margin-top": "16px",
             "padding-top": "8px",
             color: "#333",
             "font-size": "13px"
