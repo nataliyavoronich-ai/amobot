@@ -79,6 +79,7 @@ define(["jquery"], function ($) {
     var $root = null; // корневой контейнер расширенных настроек
     var activeTab = "roles";
     var $saveButton = null; // кнопка «Сохранить» (подсвечивается, если есть несохранённые правки)
+    var settingsSource = "server"; // откуда загружены настройки: "server" | "native" | "empty"
     var savedSnapshot = null; // JSON настроек на момент загрузки/последнего сохранения
 
     // ------------------------------------------------------------
@@ -241,9 +242,21 @@ define(["jquery"], function ($) {
       // .catch() — используем универсальную форму .then(успех, ошибка).
       return backendRequest("GET").then(
         function (data) {
-          return data || parseNativeSettings() || emptySettings();
+          if (data) {
+            settingsSource = "server";
+            return data;
+          }
+
+          var nativeSettings = parseNativeSettings();
+
+          settingsSource = nativeSettings ? "native" : "empty";
+          console.warn("[Виджет Производство] На сервере нет сохранённых настроек, источник:", settingsSource);
+
+          return nativeSettings || emptySettings();
         },
-        function () {
+        function (xhr) {
+          settingsSource = "native";
+          console.warn("[Виджет Производство] Ошибка загрузки с сервера:", xhr && xhr.status, xhr && xhr.statusText);
           console.warn(
             "[Виджет Производство] Не удалось получить настройки с backend — " +
               "использую встроенное хранилище amoCRM как запасной вариант."
@@ -1221,7 +1234,20 @@ define(["jquery"], function ($) {
 
       $header.append($tabsBar);
 
-      $root.append($header).append($tabBody);
+      $root.append($header);
+
+      if (settingsSource !== "server") {
+        $root.append(
+          '<div style="margin:8px 0;padding:8px 12px;background:#fdecea;color:#c0392b;border:1px solid #f5c6cb;">' +
+            "Настройки не загружены с сервера (источник: " +
+            (settingsSource === "native" ? "резервная копия в amoCRM, может быть устаревшей" : "пусто") +
+            "). Сохранение отключено, чтобы не затереть серверные настройки. Обновите страницу (Ctrl+F5); " +
+            "если сообщение повторяется — сообщите администратору." +
+            "</div>"
+        );
+      }
+
+      $root.append($tabBody);
 
       // Высота закреплённой верхней части — на неё сдвигаем шапку таблицы.
       var applyHeaderHeight = function () {
@@ -1243,8 +1269,17 @@ define(["jquery"], function ($) {
         saveSettings
       );
 
+      if (settingsSource !== "server") {
+        $saveButton.prop("disabled", true);
+      }
+
       $footer.append($saveButton);
       $footer.append('<span class="production-widget__save-message"></span>');
+      $footer.append(
+        '<span style="color:#999;font-size:12px;">Строк в «Связи этапов и полей»: ' +
+          settingsState.statusFieldMap.length +
+          "</span>"
+      );
 
       $root.append($footer);
       refreshSaveButton();
