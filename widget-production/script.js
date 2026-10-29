@@ -382,6 +382,28 @@ define(["jquery"], function ($) {
         .attr("title", dirty ? "Есть несохранённые изменения" : "Изменений нет");
     }
 
+    // Контейнер настроек в amoCRM может быть ниже окна и сам прокручиваться:
+    // тогда добавленные строки прячутся внутри него, а свободное место снизу
+    // не используется. Такие родители (ниже окна и с обрезанным содержимым)
+    // растягиваем по содержимому. Высокий «основной» скроллер страницы не трогаем.
+    function unclipAncestors() {
+      var node = $root && $root[0] && $root[0].parentNode;
+
+      while (node && node !== document.body && node !== document.documentElement) {
+        var style = window.getComputedStyle(node);
+        var clipped = /(auto|scroll|hidden)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
+
+        if (clipped && node.clientHeight < window.innerHeight - 100) {
+          node.style.setProperty("height", "auto", "important");
+          node.style.setProperty("max-height", "none", "important");
+          node.style.setProperty("overflow-y", "visible", "important");
+          console.log("[Виджет Производство] Контейнер растянут по содержимому:", node.className || node.id || node.tagName);
+        }
+
+        node = node.parentNode;
+      }
+    }
+
     // Перерисовка таблицы на мгновение сжимает страницу и сбрасывает/сдвигает
     // прокрутку — запоминаем её у окна и всех родителей и возвращаем.
     function preserveScroll(action) {
@@ -400,6 +422,8 @@ define(["jquery"], function ($) {
       var pageTop = scroller ? scroller.scrollTop : window.pageYOffset;
 
       action();
+
+      unclipAncestors();
 
       saved.forEach(function (item) {
         item[0].scrollTop = item[1];
@@ -1224,6 +1248,8 @@ define(["jquery"], function ($) {
 
       $root.append($footer);
       refreshSaveButton();
+      unclipAncestors();
+      setTimeout(unclipAncestors, 0);
     }
 
     // ------------------------------------------------------------
