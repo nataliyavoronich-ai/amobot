@@ -1680,6 +1680,8 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
 // --- Поля (см. "Таблица 2. Поля, используемые в боте" в ТЗ v2.0) ---
 const DEFECT_PHOTO_LINK_FIELD_ID = 555164; // "[Бот] Ссылка на фото", ссылка — фото дефекта (T-6.5.4/T-6.5.6); у фото готового изделия (T-6.5.1) своего поля-ссылки в ТЗ нет
 const NOT_ACCEPTED_TEXT_FIELD_ID = 555162; // "[Бот] Не принято", текстовая область
+const SCENARIO_FIELD_ID = 564075; // "[Бот] Сценарий производства", список
+const SCENARIO_RETURN_TO_DESIGN = "Вернуть в проектный отдел";
 const INTERMEDIATE_OTK_FLAG_FIELD_ID = 555172; // "[Бот] Промежуточный ОТК", флаг
 const COST_REVISION_FIELD_ID = 557156; // "[Бот] Согласование стоимости 1", текстовая область — JSON-массив {status_id, new_price, username}
 const DXF_LINK_FIELD_ID = 543270; // "Проект в производство dxf", ссылка
@@ -2124,7 +2126,7 @@ async function handleFinishUpload(ctx, directId, userKey, userName, settings) {
     } else if (pending.kind === "final_otk_defect") {
       await finishFinalOtkRejectUpload(ctx, directId, settings, pending);
     } else if (pending.kind === "project_return_defect") {
-      await finishProjectReturnUpload(ctx, directId, pending);
+      await finishProjectReturnUpload(ctx, directId, settings, userName, pending);
     }
   } catch (error) {
     state.pendingUpload = pending;
@@ -2894,11 +2896,7 @@ async function handleMaterialsCommentInput(ctx, directId, userKey, userName, set
 // ------------------------------------------------------------
 // 8.10 Карточка: "Вернуть в проектный отдел" (ТЗ T-6.5.6)
 // ------------------------------------------------------------
-// Последний шаг (флаг "[Бот] Передано в проектный отдел") заблокирован: в
-// ТЗ у этого поля указан тот же id (555172), что и у "Промежуточный ОТК"
-// (см. открытый вопрос №5 актуализации — "нужно сверить фактические id и
-// типы полей в amoCRM"). Угадывать id нельзя, поэтому комментарий и фото
-// сохраняются, а дальше сценарий останавливается с явным сообщением.
+// Вместо флага 555172 заполняется список 564075 «[Бот] Сценарий производства».
 
 async function handleExecutionReturnToDesign(ctx, directId, userKey) {
   const state = productionUserState[userKey];
@@ -2935,36 +2933,54 @@ async function handleProjectReturnCommentInput(ctx, directId, userKey, trimmedTe
   await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
 }
 
-async function finishProjectReturnUpload(ctx, directId, pending) {
-  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
-
-  const links = [];
-
-  for (const path of pending.uploadedPaths) {
-    try {
-      links.push(await ctx.ydGetFolderPublicUrl(path));
-    } catch (error) {
-      console.error("[Бот производства] Не удалось получить ссылку на фото дефекта:", error.message);
-    }
-  }
+async function finishProjectReturnUpload(ctx, directId, settings, userName, pending) {
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const fields = [];
 
   if (links.length > 0) {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] }]
-    });
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
   }
 
-  console.error(
-    `[Бот производства] "Вернуть в проектный отдел": сделка ${pending.leadId} — остановлено перед записью ` +
-      "флага «Передано в проектный отдел» (конфликт id полей, см. открытый вопрос №5 в актуализации ТЗ)."
-  );
+  // T-6.5.6: вместо флага 555172 заполняем список «[Бот] Сценарий производства»
+  // значением «Вернуть в проектный отдел». Значение не найдено — ничего не пишем.
+  const scenarioOption = await findFieldEnumForUserName(ctx, SCENARIO_FIELD_ID, SCENARIO_RETURN_TO_DESIGN);
 
-  await sendProductionDirectMessage(
-    ctx,
-    directId,
-    "Замечания и фото сохранены. Передача в проектный отдел требует уточнения у администратора " +
-      "(в ТЗ конфликт id технических полей) — сообщите, пожалуйста, об этом администратору."
-  );
+  if (!scenarioOption) {
+    console.error(
+      `[Бот производства] В списке поля ${SCENARIO_FIELD_ID} нет значения «${SCENARIO_RETURN_TO_DESIGN}»: ` +
+        `сделка ${pending.leadId}, сценарий возврата в проектный отдел не записан.`
+    );
+
+    if (fields.length > 0) {
+      await patchLead(ctx, pending.leadId, { custom_fields_values: fields });
+    }
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "Замечания и фото сохранены, но передать в проектный отдел не удалось: в amoCRM нет значения " +
+        `«${SCENARIO_RETURN_TO_DESIGN}» в поле «[Бот] Сценарий производства». Сообщите администратору.`
+    );
+    return;
+  }
+
+  fields.push({ field_id: SCENARIO_FIELD_ID, values: [{ value: scenarioOption.value, enum_id: scenarioOption.id }] });
+  await patchLead(ctx, pending.leadId, { custom_fields_values: fields });
+
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const lead = await ctx.getLead(pending.leadId);
+  const foremanRole = lead && MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+  const currentSettings = productionWidgetSettingsCache || settings;
+
+  if (foremanRole) {
+    await notifyRoleUsers(
+      ctx,
+      currentSettings,
+      foremanRole,
+      `${userName} запросил ${getContractNumberWithLink(ctx, lead)} вернуть в проектный отдел.`
+    );
+  }
 }
 
 // ============================================================
