@@ -417,6 +417,25 @@ define(["jquery"], function ($) {
       }
     }
 
+    // Браузерная «привязка прокрутки» (scroll anchoring) берёт якорем элемент
+    // ВНЕ виджета (ниже него) и при росте таблицы сдвигает прокрутку, чтобы
+    // якорь остался на месте — отсюда «уезжание» вверх. Запрещаем её на всех
+    // родителях, включая страницу.
+    function disableScrollAnchoring() {
+      var node = $root && $root[0];
+
+      while (node) {
+        if (node.style) {
+          node.style.setProperty("overflow-anchor", "none");
+        }
+
+        node = node.parentNode;
+      }
+
+      document.documentElement.style.setProperty("overflow-anchor", "none");
+      document.body.style.setProperty("overflow-anchor", "none");
+    }
+
     // Перерисовка таблицы на мгновение сжимает страницу и сбрасывает/сдвигает
     // прокрутку — запоминаем её у окна и всех родителей и возвращаем.
     function preserveScroll(action) {
@@ -437,14 +456,21 @@ define(["jquery"], function ($) {
       action();
 
       unclipAncestors();
+      disableScrollAnchoring();
 
-      saved.forEach(function (item) {
-        item[0].scrollTop = item[1];
-      });
+      var restore = function () {
+        saved.forEach(function (item) {
+          item[0].scrollTop = item[1];
+        });
 
-      if (scroller) {
-        scroller.scrollTop = pageTop;
-      }
+        if (scroller) {
+          scroller.scrollTop = pageTop;
+        }
+      };
+
+      restore();
+      setTimeout(restore, 30);
+      setTimeout(restore, 150);
     }
 
     function showSaveMessage(text, isError) {
@@ -1284,6 +1310,7 @@ define(["jquery"], function ($) {
       $root.append($footer);
       refreshSaveButton();
       unclipAncestors();
+      disableScrollAnchoring();
       setTimeout(unclipAncestors, 0);
     }
 
