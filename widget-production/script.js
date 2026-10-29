@@ -1194,7 +1194,7 @@ define(["jquery"], function ($) {
       // когда вкладки визуально "пропадали" при переходе на разделы с
       // большими таблицами).
       var $header = $(
-        '<div style="position:sticky;top:0;background:#fff;z-index:10;padding-top:4px;"></div>'
+        '<div style="position:sticky;top:0;background:#fff;z-index:10;padding-top:4px;padding-bottom:12px;"></div>'
       );
 
       var $botsRow = $(
@@ -1213,7 +1213,7 @@ define(["jquery"], function ($) {
 
       var $tabsBar = $(
         '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
-          'border-bottom:2px solid #ddd;margin-bottom:20px;padding-bottom:4px;font-size:15px;"></div>'
+          'border-bottom:2px solid #ddd;margin-bottom:0;padding-bottom:4px;font-size:15px;"></div>'
       );
       var $tabBody = $('<div class="production-widget__tab-body"></div>').css({ "padding-top": "12px" });
 
