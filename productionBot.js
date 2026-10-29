@@ -220,9 +220,51 @@ async function restoreTaggedButtonText(ctx, directId, text) {
   }
 }
 
+const MAX_MESSAGE_LENGTH = 3500;
+
+// Режем длинный текст по строкам: amoMessenger отвечает ошибкой на слишком
+// большие сообщения. Кнопки уходят с последней частью.
+function splitLongMessage(text) {
+  const parts = [];
+  let current = "";
+
+  for (const line of String(text).split("\n")) {
+    if (current && current.length + line.length + 1 > MAX_MESSAGE_LENGTH) {
+      parts.push(current);
+      current = "";
+    }
+
+    current = current ? `${current}\n${line}` : line;
+
+    while (current.length > MAX_MESSAGE_LENGTH) {
+      parts.push(current.slice(0, MAX_MESSAGE_LENGTH));
+      current = current.slice(MAX_MESSAGE_LENGTH);
+    }
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
 async function sendProductionDirectMessage(ctx, directId, text, buttons, options) {
   if (!productionAccessToken) {
     throw new Error("Токен amoMessenger бота производства не найден");
+  }
+
+  if (String(text).length > MAX_MESSAGE_LENGTH) {
+    const parts = splitLongMessage(text);
+    let last = null;
+
+    for (let i = 0; i < parts.length; i++) {
+      const isLast = i === parts.length - 1;
+
+      last = await sendProductionDirectMessage(ctx, directId, parts[i], isLast ? buttons : undefined, options);
+    }
+
+    return last;
   }
 
   buttons = await humanizeTaggedButtons(ctx, directId, buttons);
@@ -259,7 +301,11 @@ async function sendProductionDirectMessage(ctx, directId, text, buttons, options
   }
 
   if (response.status >= 400) {
-    throw new Error(`amoMessenger (производство) DIRECT HTTP ${response.status}`);
+    throw new Error(
+      `amoMessenger (производство) DIRECT HTTP ${response.status}` +
+        ` (длина текста ${String(text).length}, кнопок ${buttons ? buttons.length : 0}): ` +
+        JSON.stringify(response.data).slice(0, 300)
+    );
   }
 
   return response;
@@ -4763,38 +4809,58 @@ function formatReportMoney(value) {
 // Сделки из указанных воронок, у которых дата-поле попадает в период.
 // Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
 async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period) {
+  // amoCRM (400) не принимает фильтр по пользовательским полям сделок, поэтому
+  // запрашиваем сделки, изменённые не раньше начала периода (дата в поле
+  // выставляется при изменении сделки), а период проверяем сами.
   const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
-  const fromKey = `filter[custom_fields_values][${fieldId}][from]`;
-  const toKey = `filter[custom_fields_values][${fieldId}][to]`;
+  const cacheKey = `${pipelineIds.join(",")}|${period.fromUnix}`;
+  const cached = reportLeadsCache.get(cacheKey);
+
+  // Отчёт спрашивает сделки по каждой строке настроек — не гоняем amoCRM заново.
+  if (cached && Date.now() - cached.at < 60000) {
+    return filterLeadsByDateField(ctx, cached.leads, fieldId, period);
+  }
+
   const all = [];
 
-  for (let page = 1; page <= 20; page++) {
-    const params = { limit: 250, page, [fromKey]: period.fromUnix, [toKey]: period.toUnix };
+  for (const pipelineId of pipelineIds) {
+    for (let page = 1; page <= 40; page++) {
+      const response = await ctx.amoCrmGet(url, {
+        limit: 250,
+        page,
+        "filter[pipeline_id]": pipelineId,
+        "filter[updated_at][from]": period.fromUnix
+      });
 
-    pipelineIds.forEach((id, i) => {
-      params[`filter[pipeline_id][${i}]`] = id;
-    });
+      if (response.status === 204) {
+        break;
+      }
 
-    const response = await ctx.amoCrmGet(url, params);
+      if (response.status !== 200) {
+        throw new Error(
+          `amoCRM GET /leads (отчёт) HTTP ${response.status}: ${JSON.stringify(response.data).slice(0, 300)}`
+        );
+      }
 
-    if (response.status === 204) {
-      break;
-    }
+      const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
 
-    if (response.status !== 200) {
-      throw new Error(`amoCRM GET /leads (отчёт) HTTP ${response.status}`);
-    }
+      all.push(...leads);
 
-    const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
-
-    all.push(...leads);
-
-    if (leads.length < 250) {
-      break;
+      if (leads.length < 250) {
+        break;
+      }
     }
   }
 
-  return all.filter((lead) => {
+  reportLeadsCache.set(cacheKey, { at: Date.now(), leads: all });
+
+  return filterLeadsByDateField(ctx, all, fieldId, period);
+}
+
+const reportLeadsCache = new Map();
+
+function filterLeadsByDateField(ctx, leads, fieldId, period) {
+  return leads.filter((lead) => {
     const value = Number(ctx.getFieldValues(lead, fieldId)[0]);
 
     return Number.isFinite(value) && value >= period.fromUnix && value <= period.toUnix;
