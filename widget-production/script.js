@@ -1323,6 +1323,9 @@ define(["jquery"], function ($) {
               ".production-widget table { border-collapse: collapse; }" +
               ".production-widget table th, .production-widget table td {" +
               " border: 1px solid #ccc; color: #333; }" +
+              // Браузер сам «прокручивает следом» за сдвинувшимся содержимым при
+              // добавлении строки и уводит старые строки под шапку — отключаем.
+              ".production-widget, .production-widget * { overflow-anchor: none; }" +
               // Шапка таблицы остаётся видимой под закреплённой строкой вкладок.
               ".production-widget table thead th {" +
               " position: sticky; top: var(--pw-head-h, 0px); z-index: 5; background: #f7f7f7; }" +
