@@ -141,10 +141,91 @@ async function refreshProductionMessengerToken(ctx) {
 // 3. amoMessenger API (бот производства)
 // ============================================================
 
+// Служебные кнопки вида «Да (35562322)», «Да (cost:35562322:74635057)»,
+// «Вернуть на Сварка (35562322:90)» показываем пользователю как
+// «Да (№ ПД/77)». Исходный текст кнопки запоминаем в Redis (по получателю и
+// новому тексту), а при нажатии подставляем обратно (см. restoreTaggedButtonText),
+// поэтому остальной код продолжает работать со служебным текстом.
+const TAGGED_BUTTON_PATTERN = /^(.+?) \(((?:[a-z]+:)?(\d+)(?::\d+)?)\)$/;
+
+function taggedButtonRedisKey(directId, buttonText) {
+  return `production_btn:${directId}:${normalizeHandleName(buttonText)}`;
+}
+
+async function humanizeTaggedButtons(ctx, directId, buttons) {
+  if (!buttons || buttons.length === 0 || !ctx.getLead) {
+    return buttons;
+  }
+
+  const numbersByLeadId = new Map();
+  const result = [];
+
+  for (const button of buttons) {
+    const match = TAGGED_BUTTON_PATTERN.exec(String(button));
+
+    if (!match) {
+      result.push(button);
+      continue;
+    }
+
+    const leadId = match[3];
+
+    if (!numbersByLeadId.has(leadId)) {
+      let contractNumber = "";
+
+      try {
+        const lead = await ctx.getLead(leadId);
+
+        contractNumber = lead ? getContractNumberText(ctx, lead) : "";
+      } catch (error) {
+        console.error("[Бот производства] Не удалось получить номер договора для кнопки:", error.message);
+      }
+
+      numbersByLeadId.set(leadId, contractNumber);
+    }
+
+    const contractNumber = numbersByLeadId.get(leadId);
+
+    if (!contractNumber) {
+      result.push(button);
+      continue;
+    }
+
+    const shownText = `${match[1]} (№ ${contractNumber})`;
+
+    try {
+      await ctx.redisRequest(["SET", taggedButtonRedisKey(directId, shownText), String(button), "EX", 2592000]);
+      result.push(shownText);
+    } catch (error) {
+      console.error("[Бот производства] Не удалось сохранить кнопку:", error.message);
+      result.push(button);
+    }
+  }
+
+  return result;
+}
+
+// Обратная подстановка: «Да (№ ПД/77)» → исходный служебный текст кнопки.
+async function restoreTaggedButtonText(ctx, directId, text) {
+  if (!/\(№ .+\)$/.test(text)) {
+    return text;
+  }
+
+  try {
+    const response = await ctx.redisRequest(["GET", taggedButtonRedisKey(directId, text)]);
+
+    return response && response.result ? String(response.result) : text;
+  } catch (error) {
+    return text;
+  }
+}
+
 async function sendProductionDirectMessage(ctx, directId, text, buttons, options) {
   if (!productionAccessToken) {
     throw new Error("Токен amoMessenger бота производства не найден");
   }
+
+  buttons = await humanizeTaggedButtons(ctx, directId, buttons);
 
   const url = `https://api.amo.tm/v1.3/direct/${directId}/sendMessage`;
 
@@ -4884,7 +4965,7 @@ function init(app, ctx) {
         JSON.stringify({ userKey: String(userKey), userName, text })
       );
 
-      const trimmedText = String(text || "").trim();
+      const trimmedText = await restoreTaggedButtonText(ctx, directId, String(text || "").trim());
 
       if (ctx.isStartCommand(trimmedText)) {
         await handleStartCommand(ctx, directId, userKey, userName);
