@@ -4808,64 +4808,14 @@ function formatReportMoney(value) {
 
 // Сделки из указанных воронок, у которых дата-поле попадает в период.
 // Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
-async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
-  // amoCRM (400) не принимает фильтр по пользовательским полям сделок, поэтому
-  // запрашиваем сделки, изменённые не раньше начала периода (дата в поле
-  // выставляется при изменении сделки), а период проверяем сами.
-  const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
-  const cacheKey = `${pipelineIds.join(",")}|${byUpdatedAt ? period.fromUnix : "all"}`;
-  const cached = reportLeadsCache.get(cacheKey);
-
-  // Отчёт спрашивает сделки по каждой строке настроек — не гоняем amoCRM заново.
-  if (cached && Date.now() - cached.at < 60000) {
-    return filterLeadsByDateField(ctx, cached.leads, fieldId, period);
-  }
-
-  const all = [];
-
-  for (const pipelineId of pipelineIds) {
-    for (let page = 1; page <= 120; page++) {
-      const params = { limit: 250, page, "filter[pipeline_id]": pipelineId };
-
-      if (byUpdatedAt) {
-        params["filter[updated_at][from]"] = period.fromUnix;
-      }
-
-      const response = await ctx.amoCrmGet(url, params);
-
-      if (response.status === 204) {
-        break;
-      }
-
-      if (response.status !== 200) {
-        throw new Error(
-          `amoCRM GET /leads (отчёт) HTTP ${response.status}: ${JSON.stringify(response.data).slice(0, 300)}`
-        );
-      }
-
-      const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
-
-      all.push(...leads);
-
-      if (leads.length < 250) {
-        break;
-      }
-    }
-  }
-
-  reportLeadsCache.set(cacheKey, { at: Date.now(), leads: all });
-
-  const matched = filterLeadsByDateField(ctx, all, fieldId, period);
-
-  console.log(
-    `[Бот производства] Отчёт: воронки ${pipelineIds.join(",")}, поле ${fieldId}: ` +
-      `просмотрено сделок ${all.length}, в периоде ${matched.length}.`
-  );
-
-  return matched;
-}
-
+// Фильтр amoCRM по пользовательскому полю-дате отвечал 400, поэтому по
+// умолчанию работаем «просмотром» сделок воронки с отбором по дате изменения
+// (ограничено по числу страниц и времени). Чтобы вернуть пробу фильтра —
+// поставить null.
+let customDateFilterSupported = false;
 const reportLeadsCache = new Map();
+const REPORT_SCAN_MAX_PAGES = 40;
+const REPORT_SCAN_MAX_MS = 90000;
 
 function filterLeadsByDateField(ctx, leads, fieldId, period) {
   return leads.filter((lead) => {
@@ -4873,6 +4823,106 @@ function filterLeadsByDateField(ctx, leads, fieldId, period) {
 
     return Number.isFinite(value) && value >= period.fromUnix && value <= period.toUnix;
   });
+}
+
+async function fetchLeadPages(ctx, baseParams, { maxPages, deadline }) {
+  const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
+  const all = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    if (deadline && Date.now() > deadline) {
+      console.error("[Бот производства] Отчёт: превышено время просмотра сделок, результат может быть неполным.");
+      break;
+    }
+
+    const response = await ctx.amoCrmGet(url, { ...baseParams, limit: 250, page });
+
+    if (response.status === 204) {
+      break;
+    }
+
+    if (response.status !== 200) {
+      const error = new Error(
+        `amoCRM GET /leads (отчёт) HTTP ${response.status}: ${JSON.stringify(response.data).slice(0, 300)}`
+      );
+
+      error.httpStatus = response.status;
+      throw error;
+    }
+
+    const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
+
+    all.push(...leads);
+
+    if (leads.length < 250) {
+      break;
+    }
+  }
+
+  return all;
+}
+
+async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
+  const result = [];
+  const deadline = Date.now() + REPORT_SCAN_MAX_MS;
+
+  for (const pipelineId of pipelineIds) {
+    const cacheKey = `${pipelineId}|${fieldId}|${period.fromUnix}|${period.toUnix}|${byUpdatedAt}`;
+    const cached = reportLeadsCache.get(cacheKey);
+
+    if (cached && Date.now() - cached.at < 60000) {
+      result.push(...cached.leads);
+      continue;
+    }
+
+    let matched = null;
+    let mode = "фильтр amoCRM";
+
+    if (customDateFilterSupported !== false) {
+      try {
+        const found = await fetchLeadPages(
+          ctx,
+          {
+            "filter[pipeline_id]": pipelineId,
+            [`filter[custom_fields_values][${fieldId}][from]`]: period.fromUnix,
+            [`filter[custom_fields_values][${fieldId}][to]`]: period.toUnix
+          },
+          { maxPages: 40 }
+        );
+
+        customDateFilterSupported = true;
+        matched = filterLeadsByDateField(ctx, found, fieldId, period);
+      } catch (error) {
+        if (error.httpStatus !== 400 || customDateFilterSupported === true) {
+          throw error;
+        }
+
+        customDateFilterSupported = false;
+        console.error("[Бот производства] Отчёт: amoCRM не принял фильтр по полю-дате, просматриваем сделки.", error.message);
+      }
+    }
+
+    if (!matched) {
+      mode = byUpdatedAt ? "просмотр с даты изменения" : "полный просмотр";
+
+      const params = { "filter[pipeline_id]": pipelineId };
+
+      if (byUpdatedAt) {
+        params["filter[updated_at][from]"] = period.fromUnix;
+      }
+
+      const scanned = await fetchLeadPages(ctx, params, { maxPages: REPORT_SCAN_MAX_PAGES, deadline });
+
+      matched = filterLeadsByDateField(ctx, scanned, fieldId, period);
+    }
+
+    console.log(`[Бот производства] Отчёт: воронка ${pipelineId}, поле ${fieldId} (${mode}): в периоде ${matched.length}.`);
+
+    reportLeadsCache.set(cacheKey, { at: Date.now(), leads: matched });
+    result.push(...matched);
+  }
+
+  return result;
 }
 
 // Выполненные операции: строки «Исполнение», у сделки в период заполнен
@@ -4935,8 +4985,7 @@ async function buildForemanReport(ctx, settings, pipelineId, period) {
     ctx,
     [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
     PRODUCT_READY_DATE_FIELD_ID,
-    period,
-    { byUpdatedAt: false }
+    period
   );
 
   const products = new Map();
