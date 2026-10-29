@@ -4808,14 +4808,14 @@ function formatReportMoney(value) {
 
 // Сделки из указанных воронок, у которых дата-поле попадает в период.
 // Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
-// Фильтр amoCRM по пользовательскому полю-дате отвечал 400, поэтому по
-// умолчанию работаем «просмотром» сделок воронки с отбором по дате изменения
-// (ограничено по числу страниц и времени). Чтобы вернуть пробу фильтра —
-// поставить null.
-let customDateFilterSupported = false;
-const reportLeadsCache = new Map();
+// Фильтр amoCRM по пользовательскому полю-дате отвечает 400, поэтому
+// просматриваем сделки воронки с отбором по дате изменения (ограничено по
+// числу страниц и времени), а дату в поле проверяем сами. Выгрузка воронки
+// одна на все поля отчёта: раньше она повторялась на каждую строку настроек.
+const reportScanCache = new Map(); // ключ → { at, promise }
 const REPORT_SCAN_MAX_PAGES = 40;
 const REPORT_SCAN_MAX_MS = 90000;
+const REPORT_SCAN_TTL_MS = 120000;
 
 function filterLeadsByDateField(ctx, leads, fieldId, period) {
   return leads.filter((lead) => {
@@ -4830,7 +4830,7 @@ async function fetchLeadPages(ctx, baseParams, { maxPages, deadline }) {
   const all = [];
 
   for (let page = 1; page <= maxPages; page++) {
-    if (deadline && Date.now() > deadline) {
+    if (Date.now() > deadline) {
       console.error("[Бот производства] Отчёт: превышено время просмотра сделок, результат может быть неполным.");
       break;
     }
@@ -4842,12 +4842,9 @@ async function fetchLeadPages(ctx, baseParams, { maxPages, deadline }) {
     }
 
     if (response.status !== 200) {
-      const error = new Error(
+      throw new Error(
         `amoCRM GET /leads (отчёт) HTTP ${response.status}: ${JSON.stringify(response.data).slice(0, 300)}`
       );
-
-      error.httpStatus = response.status;
-      throw error;
     }
 
     const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
@@ -4862,67 +4859,46 @@ async function fetchLeadPages(ctx, baseParams, { maxPages, deadline }) {
   return all;
 }
 
-async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
-  const result = [];
-  const deadline = Date.now() + REPORT_SCAN_MAX_MS;
+function scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt) {
+  const key = `${pipelineId}|${byUpdatedAt ? period.fromUnix : "all"}`;
+  const cached = reportScanCache.get(key);
 
-  for (const pipelineId of pipelineIds) {
-    const cacheKey = `${pipelineId}|${fieldId}|${period.fromUnix}|${period.toUnix}|${byUpdatedAt}`;
-    const cached = reportLeadsCache.get(cacheKey);
-
-    if (cached && Date.now() - cached.at < 60000) {
-      result.push(...cached.leads);
-      continue;
-    }
-
-    let matched = null;
-    let mode = "фильтр amoCRM";
-
-    if (customDateFilterSupported !== false) {
-      try {
-        const found = await fetchLeadPages(
-          ctx,
-          {
-            "filter[pipeline_id]": pipelineId,
-            [`filter[custom_fields_values][${fieldId}][from]`]: period.fromUnix,
-            [`filter[custom_fields_values][${fieldId}][to]`]: period.toUnix
-          },
-          { maxPages: 40 }
-        );
-
-        customDateFilterSupported = true;
-        matched = filterLeadsByDateField(ctx, found, fieldId, period);
-      } catch (error) {
-        if (error.httpStatus !== 400 || customDateFilterSupported === true) {
-          throw error;
-        }
-
-        customDateFilterSupported = false;
-        console.error("[Бот производства] Отчёт: amoCRM не принял фильтр по полю-дате, просматриваем сделки.", error.message);
-      }
-    }
-
-    if (!matched) {
-      mode = byUpdatedAt ? "просмотр с даты изменения" : "полный просмотр";
-
-      const params = { "filter[pipeline_id]": pipelineId };
-
-      if (byUpdatedAt) {
-        params["filter[updated_at][from]"] = period.fromUnix;
-      }
-
-      const scanned = await fetchLeadPages(ctx, params, { maxPages: REPORT_SCAN_MAX_PAGES, deadline });
-
-      matched = filterLeadsByDateField(ctx, scanned, fieldId, period);
-    }
-
-    console.log(`[Бот производства] Отчёт: воронка ${pipelineId}, поле ${fieldId} (${mode}): в периоде ${matched.length}.`);
-
-    reportLeadsCache.set(cacheKey, { at: Date.now(), leads: matched });
-    result.push(...matched);
+  if (cached && Date.now() - cached.at < REPORT_SCAN_TTL_MS) {
+    return cached.promise;
   }
 
-  return result;
+  const params = { "filter[pipeline_id]": pipelineId };
+
+  if (byUpdatedAt) {
+    params["filter[updated_at][from]"] = period.fromUnix;
+  }
+
+  const startedAt = Date.now();
+  const promise = fetchLeadPages(ctx, params, {
+    maxPages: REPORT_SCAN_MAX_PAGES,
+    deadline: startedAt + REPORT_SCAN_MAX_MS
+  }).then((leads) => {
+    console.log(
+      `[Бот производства] Отчёт: воронка ${pipelineId}, просмотрено сделок ${leads.length} ` +
+        `за ${Math.round((Date.now() - startedAt) / 100) / 10} с.`
+    );
+
+    return leads;
+  });
+
+  reportScanCache.set(key, { at: startedAt, promise });
+  promise.catch(() => reportScanCache.delete(key));
+
+  return promise;
+}
+
+async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
+  // Воронки грузим параллельно (amoCRM допускает до ~7 запросов в секунду).
+  const scanned = await Promise.all(
+    pipelineIds.map((pipelineId) => scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt))
+  );
+
+  return filterLeadsByDateField(ctx, scanned.flat(), fieldId, period);
 }
 
 // Выполненные операции: строки «Исполнение», у сделки в период заполнен
@@ -4979,14 +4955,15 @@ async function buildPerformerReport(ctx, settings, userName, period) {
 
 async function buildForemanReport(ctx, settings, pipelineId, period) {
   const isMetal = pipelineId === PIPELINE_ID_METAL;
-  const operations = await collectCompletedOperations(ctx, settings, period, { pipelineId });
-
-  const deals = await getLeadsByFieldDateRange(
-    ctx,
-    [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
-    PRODUCT_READY_DATE_FIELD_ID,
-    period
-  );
+  const [operations, deals] = await Promise.all([
+    collectCompletedOperations(ctx, settings, period, { pipelineId }),
+    getLeadsByFieldDateRange(
+      ctx,
+      [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
+      PRODUCT_READY_DATE_FIELD_ID,
+      period
+    )
+  ]);
 
   const products = new Map();
   let dealsSum = 0;
