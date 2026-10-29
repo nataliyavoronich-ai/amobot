@@ -877,7 +877,7 @@ define(["jquery"], function ($) {
       rerenderTable();
 
       $table.append($tbody);
-      $tab.append($table);
+      $tab.append($('<div class="production-widget__scroll"></div>').append($table));
 
       var $addBtn = $(
         '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">Добавить группу</div>'
@@ -1159,7 +1159,7 @@ define(["jquery"], function ($) {
         });
 
         $table.append($tbody);
-        $matrixContainer.append($table);
+        $matrixContainer.append($('<div class="production-widget__scroll"></div>').append($table));
       }
 
       renderReadinessMatrixTable();
@@ -1391,7 +1391,10 @@ define(["jquery"], function ($) {
               ".production-widget, .production-widget * { overflow-anchor: none; }" +
               // Шапка таблицы остаётся видимой под закреплённой строкой вкладок.
               ".production-widget table thead th {" +
-              " position: sticky; top: var(--pw-head-h, 0px); z-index: 5; background: #f7f7f7; }" +
+              " position: sticky; top: 0; z-index: 5; background: #f7f7f7; }" +
+              // Таблицы листаются внутри собственной области на всю высоту окна.
+              ".production-widget .production-widget__scroll {" +
+              " max-height: calc(100vh - 250px); min-height: 220px; overflow: auto; }" +
               "</style>"
           );
 
