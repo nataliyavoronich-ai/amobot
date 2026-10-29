@@ -1197,12 +1197,37 @@ async function processUploadBatch(ctx, state, userKey, imageUrls, send) {
   task.noticeUploadedPaths = task.noticeUploadedPaths || [];
   task.noticeUploadedPaths.push(...uploadedPaths);
 
-  try {
-    const publicUrl = await ctx.ydGetFolderPublicUrl(lastPath);
+  // Публикация и запись в поле сделки — с повторами: сразу после загрузки
+  // Диск может ещё не отдавать файл (404 на publish), а amoCRM — отвечать
+  // 429/5xx. Раньше любая такая разовая ошибка только писалась в лог, и
+  // ссылка в поле сделки молча оставалась старой.
+  let linkError = null;
 
-    await ctx.updateLeadCustomFields(task.lead_id, { [fileConfig.fieldId]: publicUrl });
-  } catch (error) {
-    console.error("[Бот проектировщиков] Не удалось записать ссылку на файл в сделку:", error.message);
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const publicUrl = await ctx.ydGetFolderPublicUrl(lastPath);
+
+      await ctx.updateLeadCustomFields(task.lead_id, { [fileConfig.fieldId]: publicUrl });
+      linkError = null;
+      break;
+    } catch (error) {
+      linkError = error;
+      console.error(
+        `[Бот проектировщиков] Не удалось записать ссылку на файл в сделку (попытка ${attempt}/4):`,
+        error.message
+      );
+
+      if (attempt < 4) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+      }
+    }
+  }
+
+  if (linkError) {
+    await send(
+      `⚠️ Файл сохранён на Яндекс.Диске, но ссылку в поле сделки обновить не удалось (${fileConfig.noteLabel}). ` +
+        "Сообщите администратору."
+    );
   }
 
   const config = TASK_TYPE_CONFIG[task.task_type_id];
