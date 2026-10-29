@@ -78,6 +78,8 @@ define(["jquery"], function ($) {
     var settingsState = null; // текущее состояние формы (объект схемы настроек)
     var $root = null; // корневой контейнер расширенных настроек
     var activeTab = "roles";
+    var $saveButton = null; // кнопка «Сохранить» (подсвечивается, если есть несохранённые правки)
+    var savedSnapshot = null; // JSON настроек на момент загрузки/последнего сохранения
 
     // ------------------------------------------------------------
     // ЗАГРУЗКА ЖИВЫХ ДАННЫХ AMOCRM (напрямую из браузера админа)
@@ -338,11 +340,15 @@ define(["jquery"], function ($) {
       }
 
       // 1) Встроенное хранилище amoCRM — для нативного UX при переоткрытии.
-      syncNativeSettingsField(JSON.stringify(settingsState));
+      var snapshotToSave = JSON.stringify(settingsState);
+
+      syncNativeSettingsField(snapshotToSave);
 
       // 2) Backend / Redis — источник истины для бота в рантайме.
       backendRequest("POST", settingsState).then(
         function () {
+          savedSnapshot = snapshotToSave;
+          refreshSaveButton();
           showSaveMessage("Настройки сохранены.", false);
         },
         function (xhr) {
@@ -353,6 +359,53 @@ define(["jquery"], function ($) {
           showSaveMessage(message, true);
         }
       );
+    }
+
+    // «Сохранить» синяя, пока в форме есть правки, которых нет в сохранённом.
+    function refreshSaveButton() {
+      if (!$saveButton || !settingsState) {
+        return;
+      }
+
+      var dirty = JSON.stringify(settingsState) !== savedSnapshot;
+
+      $saveButton
+        .css({
+          background: dirty ? "#2d7ff9" : "#f0f0f0",
+          color: dirty ? "#fff" : "#666",
+          border: dirty ? "1px solid #2d7ff9" : "1px solid #ccc",
+          "border-radius": "4px",
+          cursor: "pointer"
+        })
+        .attr("title", dirty ? "Есть несохранённые изменения" : "Изменений нет");
+    }
+
+    // Перерисовка таблицы на мгновение сжимает страницу и сбрасывает/сдвигает
+    // прокрутку — запоминаем её у окна и всех родителей и возвращаем.
+    function preserveScroll(action) {
+      var saved = [];
+      var node = $root && $root[0];
+
+      while (node) {
+        if (node.scrollTop) {
+          saved.push([node, node.scrollTop]);
+        }
+
+        node = node.parentNode;
+      }
+
+      var scroller = document.scrollingElement;
+      var pageTop = scroller ? scroller.scrollTop : window.pageYOffset;
+
+      action();
+
+      saved.forEach(function (item) {
+        item[0].scrollTop = item[1];
+      });
+
+      if (scroller) {
+        scroller.scrollTop = pageTop;
+      }
     }
 
     function showSaveMessage(text, isError) {
@@ -747,18 +800,42 @@ define(["jquery"], function ($) {
           }
         );
 
-        $deleteTd.append($delete);
+        var arrowStyle = "cursor:pointer;color:#2d7ff9;margin-right:6px;user-select:none;";
+        var $up = $('<span style="' + arrowStyle + '" title="Выше">▲</span>').on("click", function () {
+          moveRow(row, -1);
+        });
+        var $down = $('<span style="' + arrowStyle + '" title="Ниже">▼</span>').on("click", function () {
+          moveRow(row, 1);
+        });
+
+        $deleteTd.css("white-space", "nowrap").append($up).append($down).append($delete);
         $tr.append($deleteTd);
 
         return $tr;
       }
 
       function rerenderTable() {
-        $tbody.empty();
+        preserveScroll(function () {
+          $tbody.empty();
 
-        settingsState.statusFieldMap.forEach(function (row) {
-          $tbody.append(renderRow(row));
+          settingsState.statusFieldMap.forEach(function (row) {
+            $tbody.append(renderRow(row));
+          });
         });
+      }
+
+      function moveRow(row, delta) {
+        var rows = settingsState.statusFieldMap;
+        var idx = rows.indexOf(row);
+        var target = idx + delta;
+
+        if (idx === -1 || target < 0 || target >= rows.length) {
+          return;
+        }
+
+        rows.splice(idx, 1);
+        rows.splice(target, 0, row);
+        rerenderTable();
       }
 
       rerenderTable();
@@ -895,6 +972,10 @@ define(["jquery"], function ($) {
       }
 
       function renderReadinessMatrixTable() {
+        preserveScroll(renderReadinessMatrixTableInner);
+      }
+
+      function renderReadinessMatrixTableInner() {
         $matrixContainer.empty();
 
         var productField = currentProductField();
@@ -1126,15 +1207,16 @@ define(["jquery"], function ($) {
       $tabBody.append(currentTab.render());
 
       var $footer = $('<div style="margin-top:20px;display:flex;align-items:center;gap:12px;"></div>');
-      var $saveBtn = $('<button type="button" style="padding:8px 16px;">Сохранить</button>').on(
+      $saveButton = $('<button type="button" style="padding:8px 16px;">Сохранить</button>').on(
         "click",
         saveSettings
       );
 
-      $footer.append($saveBtn);
+      $footer.append($saveButton);
       $footer.append('<span class="production-widget__save-message"></span>');
 
       $root.append($footer);
+      refreshSaveButton();
     }
 
     // ------------------------------------------------------------
@@ -1221,6 +1303,12 @@ define(["jquery"], function ($) {
 
           $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
 
+          // Любая правка в форме — перепроверяем, есть ли несохранённое
+          // (после обработчика самого элемента, поэтому через setTimeout).
+          $root.on("change input click keyup", function () {
+            setTimeout(refreshSaveButton, 0);
+          });
+
           // Общая разметка таблиц виджета (сетка ячеек) — общий <style>,
           // вынесенный ЗА пределы $root, т.к. renderShell() делает
           // $root.empty() при каждом переключении вкладки/сохранении, а
@@ -1246,6 +1334,8 @@ define(["jquery"], function ($) {
               settingsState.readinessMatrix.statusIds = settingsState.readinessMatrix.statusIds || [];
               settingsState.readinessMatrix.cells = settingsState.readinessMatrix.cells || {};
               settingsState.scenarios = settingsState.scenarios || {};
+
+              savedSnapshot = JSON.stringify(settingsState);
 
               renderShell();
             },
