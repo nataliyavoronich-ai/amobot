@@ -4808,12 +4808,12 @@ function formatReportMoney(value) {
 
 // Сделки из указанных воронок, у которых дата-поле попадает в период.
 // Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
-async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period) {
+async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
   // amoCRM (400) не принимает фильтр по пользовательским полям сделок, поэтому
   // запрашиваем сделки, изменённые не раньше начала периода (дата в поле
   // выставляется при изменении сделки), а период проверяем сами.
   const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
-  const cacheKey = `${pipelineIds.join(",")}|${period.fromUnix}`;
+  const cacheKey = `${pipelineIds.join(",")}|${byUpdatedAt ? period.fromUnix : "all"}`;
   const cached = reportLeadsCache.get(cacheKey);
 
   // Отчёт спрашивает сделки по каждой строке настроек — не гоняем amoCRM заново.
@@ -4824,13 +4824,14 @@ async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period) {
   const all = [];
 
   for (const pipelineId of pipelineIds) {
-    for (let page = 1; page <= 40; page++) {
-      const response = await ctx.amoCrmGet(url, {
-        limit: 250,
-        page,
-        "filter[pipeline_id]": pipelineId,
-        "filter[updated_at][from]": period.fromUnix
-      });
+    for (let page = 1; page <= 120; page++) {
+      const params = { limit: 250, page, "filter[pipeline_id]": pipelineId };
+
+      if (byUpdatedAt) {
+        params["filter[updated_at][from]"] = period.fromUnix;
+      }
+
+      const response = await ctx.amoCrmGet(url, params);
 
       if (response.status === 204) {
         break;
@@ -4854,7 +4855,14 @@ async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period) {
 
   reportLeadsCache.set(cacheKey, { at: Date.now(), leads: all });
 
-  return filterLeadsByDateField(ctx, all, fieldId, period);
+  const matched = filterLeadsByDateField(ctx, all, fieldId, period);
+
+  console.log(
+    `[Бот производства] Отчёт: воронки ${pipelineIds.join(",")}, поле ${fieldId}: ` +
+      `просмотрено сделок ${all.length}, в периоде ${matched.length}.`
+  );
+
+  return matched;
 }
 
 const reportLeadsCache = new Map();
@@ -4927,7 +4935,8 @@ async function buildForemanReport(ctx, settings, pipelineId, period) {
     ctx,
     [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
     PRODUCT_READY_DATE_FIELD_ID,
-    period
+    period,
+    { byUpdatedAt: false }
   );
 
   const products = new Map();
