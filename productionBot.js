@@ -4891,7 +4891,15 @@ function init(app, ctx) {
         return;
       }
 
-      const state = productionUserState[userKey];
+      let state = productionUserState[userKey];
+
+      // После перезапуска бота память очищается. Роль восстанавливаем молча по
+      // имени пользователя (как при «старт»), чтобы кнопки из прежних
+      // сообщений продолжали работать без повторного «старт».
+      if (!state && userName && productionWidgetSettingsCache) {
+        state = { roleKey: resolveUserRole(productionWidgetSettingsCache, userName), userName };
+        productionUserState[userKey] = state;
+      }
 
       if (!state) {
         await sendProductionDirectMessage(
