@@ -1194,7 +1194,7 @@ define(["jquery"], function ($) {
       // когда вкладки визуально "пропадали" при переходе на разделы с
       // большими таблицами).
       var $header = $(
-        '<div style="position:sticky;top:0;background:#fff;z-index:10;padding-top:4px;padding-bottom:12px;"></div>'
+        '<div style="background:#fff;padding-top:4px;padding-bottom:12px;"></div>'
       );
 
       var $botsRow = $(
@@ -1394,7 +1394,7 @@ define(["jquery"], function ($) {
               " position: sticky; top: 0; z-index: 5; background: #f7f7f7; }" +
               // Таблицы листаются внутри собственной области на всю высоту окна.
               ".production-widget .production-widget__scroll {" +
-              " max-height: calc(100vh - 250px); min-height: 220px; overflow: auto; }" +
+              " max-height: calc(100vh - 330px); min-height: 220px; overflow: auto; }" +
               "</style>"
           );
 
