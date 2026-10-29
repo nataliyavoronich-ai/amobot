@@ -5039,7 +5039,13 @@ function resolvePlannedDateRules(settings, lead, statusId) {
     rules.push({ fieldId: PLANNED_READY_FIELD_ID, coefficient: Number(product.readinessValue) });
   }
 
-  if ((matrix.statusIds || []).map(Number).includes(statusId)) {
+  if (PLANNED_READY_STATUS_IDS.includes(statusId) && !(matrix.statusIds || []).map(Number).includes(statusId)) {
+    rules.push({
+      skip:
+        `статуса ${statusId} нет среди столбцов таблицы «Плановая готовность» ` +
+        `(там: ${(matrix.statusIds || []).join(", ") || "пусто"}) — поле плана этапа не заполняем`
+    });
+  } else if ((matrix.statusIds || []).map(Number).includes(statusId)) {
     const row = ((settings && settings.statusFieldMap) || []).find(
       (item) => Number(item.amoStatusId) === statusId && item.planDateFieldId
     );
