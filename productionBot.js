@@ -4987,6 +4987,123 @@ function startSchedulers(ctx) {
 // 10. WEBHOOK И МАРШРУТЫ
 // ============================================================
 
+// ============================================================
+// F-4. ПЛАНОВЫЕ ДАТЫ ГОТОВНОСТИ (ТЗ F-3, F-4)
+// ============================================================
+// amoCRM шлёт вебхук о смене статуса сделки на тот же адрес, что и
+// amoMessenger (/webhook/production). Дата = округлённое вверх (кол-во
+// этажей × коэффициент продукта) дней от сегодняшнего дня; выходные не
+// учитываются. Уже заполненное поле не перезаписываем.
+
+const FLOORS_FIELD_ID = 415782; // "Количество этажей?", список с числами 1–10
+const PLANNED_READY_FIELD_ID = 550764; // "Плановая дата готовности"
+const PLANNED_READY_STATUS_IDS = [33139332, 36642552]; // ЛАЗЕР исполнение, РАСКРОЙ исполнение
+
+function extractStatusChangeEvents(body) {
+  const leads = (body && body.leads) || {};
+  const events = [];
+
+  for (const kind of ["status", "add"]) {
+    const items = leads[kind];
+    const list = Array.isArray(items) ? items : items && typeof items === "object" ? Object.values(items) : [];
+
+    for (const item of list) {
+      if (item && item.id && item.status_id) {
+        events.push({ leadId: Number(item.id), statusId: Number(item.status_id) });
+      }
+    }
+  }
+
+  return events;
+}
+
+// Возвращает { fieldId, coefficient } или null, если для статуса дата не нужна.
+function resolvePlannedDateRule(settings, lead, ctx, statusId) {
+  const matrix = (settings && settings.readinessMatrix) || {};
+  const productEnumId = ((lead.custom_fields_values || []).find(
+    (field) => Number(field.field_id) === Number(matrix.productFieldId || PRODUCT_FIELD_ID)
+  ) || { values: [] }).values[0];
+  const enumId = productEnumId && productEnumId.enum_id;
+  const product = (matrix.products || []).find((item) => Number(item.enumId) === Number(enumId));
+
+  if (!product) {
+    return { skip: `продукт сделки (enum ${enumId || "—"}) не найден в таблице «Плановая готовность»` };
+  }
+
+  if (PLANNED_READY_STATUS_IDS.includes(statusId)) {
+    return { fieldId: PLANNED_READY_FIELD_ID, coefficient: Number(product.readinessValue) };
+  }
+
+  if (!(matrix.statusIds || []).map(Number).includes(statusId)) {
+    return null;
+  }
+
+  const row = ((settings && settings.statusFieldMap) || []).find(
+    (item) => Number(item.amoStatusId) === statusId && item.planDateFieldId
+  );
+
+  if (!row) {
+    return { skip: `для статуса ${statusId} в «Связи этапов и полей» не указано поле «План готовности»` };
+  }
+
+  return { fieldId: Number(row.planDateFieldId), coefficient: Number((matrix.cells || {})[`${enumId}:${statusId}`]) };
+}
+
+async function fillPlannedReadyDate(ctx, leadId, statusId) {
+  const settings = productionWidgetSettingsCache;
+
+  if (!settings || !settings.readinessMatrix) {
+    return;
+  }
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!lead) {
+      return;
+    }
+
+    const rule = resolvePlannedDateRule(settings, lead, ctx, statusId);
+
+    if (!rule) {
+      return;
+    }
+
+    const log = (reason) =>
+      console.log(`[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId} — пропуск: ${reason}`);
+
+    if (rule.skip) {
+      log(rule.skip);
+      return;
+    }
+
+    if (ctx.getFieldValues(lead, rule.fieldId).length > 0) {
+      log(`поле ${rule.fieldId} уже заполнено`);
+      return;
+    }
+
+    const floors = parseFloat(String(ctx.getFieldValueJoined(lead, FLOORS_FIELD_ID)).replace(",", "."));
+
+    if (!Number.isFinite(floors) || floors <= 0 || !Number.isFinite(rule.coefficient) || rule.coefficient <= 0) {
+      log(`не хватает данных (этажей: ${floors}, коэффициент: ${rule.coefficient})`);
+      return;
+    }
+
+    // round(…, 6) — чтобы 2 × 0,6 = 1,2000000000000002 не превращалось в лишний день.
+    const days = Math.ceil(Math.round(floors * rule.coefficient * 1e6) / 1e6);
+    const dateUnix = ctx.todayMoscowStartUnix() + days * 86400;
+
+    await patchLead(ctx, leadId, {
+      custom_fields_values: [{ field_id: rule.fieldId, values: [{ value: dateUnix }] }]
+    });
+
+    console.log(
+      `[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId}: ` +
+        `${floors} × ${rule.coefficient} → +${days} дн., поле ${rule.fieldId} заполнено.`
+    );
+  });
+}
+
 function init(app, ctx) {
   app.get("/oauth/amomessenger/production", (req, res) => {
     if (!AMOMESSENGER_PRODUCTION_CLIENT_ID) {
@@ -5171,6 +5288,17 @@ function init(app, ctx) {
     const body = req.body || {};
 
     res.status(200).json({ status: "OK" });
+
+    // Вебхук amoCRM о смене статуса сделки (F-4).
+    if (body.leads) {
+      for (const event of extractStatusChangeEvents(body)) {
+        fillPlannedReadyDate(ctx, event.leadId, event.statusId).catch((error) =>
+          console.error(`[Бот производства] Плановая дата, сделка ${event.leadId}:`, error.stack || error.message)
+        );
+      }
+
+      return;
+    }
 
     console.log("[Бот производства] Webhook получен, event_type:", body.event_type);
 
