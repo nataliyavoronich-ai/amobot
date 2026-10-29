@@ -5373,6 +5373,7 @@ function init(app, ctx) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
+    res.set("Cache-Control", "no-store");
     res.json(productionWidgetSettingsCache || null);
   });
 

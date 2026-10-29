@@ -4,7 +4,7 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "author": "ZLMK",
     "locale": ["ru"],
     "installation": true,

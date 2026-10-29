@@ -215,7 +215,9 @@ define(["jquery"], function ($) {
         headers: { "X-Widget-Secret": WIDGET_SECRET },
         contentType: "application/json",
         data: body ? JSON.stringify(body) : undefined,
-        dataType: "json"
+        dataType: "json",
+        // Без кэша браузера: иначе после сохранения можно увидеть старую версию.
+        cache: false
       });
     }
 
