@@ -674,10 +674,7 @@ define(["jquery"], function ($) {
     // строку"), а не автоматически по всем живым статусам — статус для
     // строки выбирается из выпадающего списка, как и в "Сценариях".
     function renderStatusFieldMapTab() {
-      var $tab = $('<div class="production-widget__status-map"></div>').css({
-        "overflow-x": "auto",
-        "max-width": "100%"
-      });
+      var $tab = $('<div class="production-widget__status-map"></div>');
       var $table = $("<table></table>").css({ width: "100%", minWidth: "1100px", borderCollapse: "collapse" });
 
       var headers = [
@@ -1200,6 +1197,14 @@ define(["jquery"], function ($) {
 
       $root.append($header).append($tabBody);
 
+      // Высота закреплённой верхней части — на неё сдвигаем шапку таблицы.
+      var applyHeaderHeight = function () {
+        $root[0].style.setProperty("--pw-head-h", $header.outerHeight() + "px");
+      };
+
+      applyHeaderHeight();
+      setTimeout(applyHeaderHeight, 0);
+
       var currentTab = TABS.filter(function (t) {
         return t.key === activeTab;
       })[0];
@@ -1318,6 +1323,9 @@ define(["jquery"], function ($) {
               ".production-widget table { border-collapse: collapse; }" +
               ".production-widget table th, .production-widget table td {" +
               " border: 1px solid #ccc; color: #333; }" +
+              // Шапка таблицы остаётся видимой под закреплённой строкой вкладок.
+              ".production-widget table thead th {" +
+              " position: sticky; top: var(--pw-head-h, 0px); z-index: 5; background: #f7f7f7; }" +
               "</style>"
           );
 
