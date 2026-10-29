@@ -3242,6 +3242,8 @@ async function buildMasterDecisionRequest(ctx, settings, lead) {
   // Финальный ОТК (T-13.4.2.7.2.1 / T-20.2.1): «Продолжить работу» нет —
   // только выбор этапа возврата.
   if (isAtFinalOtkStatus(lead) || isAtFinalOtkFailedStatus(lead)) {
+    stageButtons.push(buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`));
+
     return {
       text:
         `Производство № ${contractNumber} НЕ принято.\nК исправлению: ${comment}. Фото дефекта: ${photos}\n` +
@@ -3417,17 +3419,14 @@ async function showUnacceptedListForForeman(ctx, directId, userKey, roleKey, set
 // Направления с проектным отделом и «ОТК перед монтажом» зависят от
 // нерешённых вопросов ТЗ (ID 555172, процесс Sensei, T-21) — заглушки.
 // ------------------------------------------------------------
-const WAITING_DECISION_FINAL_FAILED = "Сделки, не принятые на Финальном ОТК";
+const WAITING_DECISION_FINAL_FAILED = "Не приняты Финальным ОТК";
+const WAITING_DECISION_DESIGN = "Доработка проектным отделом";
+const WAITING_DECISION_BEFORE_MOUNT = "Не прошли ОТК перед монтажом";
 const WAITING_DECISION_PROCUREMENT = "Сделки в закупку";
-const WAITING_DECISION_STUB_BUTTONS = [
-  "Сделки на доработку проектным отделом",
-  "Сделки в проектном отделе",
-  "Сделки, возвращены из проектного отдела",
-  "Сделки, не прошедшие ОТК перед монтажом"
-];
 const WAITING_DECISION_BUTTONS = [
   WAITING_DECISION_FINAL_FAILED,
-  ...WAITING_DECISION_STUB_BUTTONS,
+  WAITING_DECISION_DESIGN,
+  WAITING_DECISION_BEFORE_MOUNT,
   WAITING_DECISION_PROCUREMENT
 ];
 
@@ -3468,16 +3467,221 @@ async function handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, sett
   const state = productionUserState[userKey];
 
   delete state.listContext;
+  delete state.designMenuStage;
 
   if (choice === WAITING_DECISION_FINAL_FAILED) {
     const leads = await loadFinalFailedLeads(ctx, roleKey);
 
     await showUnacceptedList(ctx, directId, userKey, "Сделки, не прошедшие финальный контроль", "foreman_unaccepted", leads);
+  } else if (choice === WAITING_DECISION_DESIGN) {
+    await showDesignMenu(ctx, directId, userKey);
   } else if (choice === WAITING_DECISION_PROCUREMENT) {
     await showProcurementListForForeman(ctx, directId, userKey, roleKey);
   } else {
+    // «Не прошли ОТК перед монтажом» (T-20.2.4 / T-21): этапы возврата и
+    // шаги не определены однозначно — ждём ТЗ.
     await handleMenuPlaceholder(ctx, directId, choice);
   }
+}
+
+// ------------------------------------------------------------
+// T-20.2.6 «Доработка проектным отделом» и возврат в проектный отдел
+// ------------------------------------------------------------
+// Состояние сделки хранится в списке «[Бот] Сценарий производства» (564075):
+// «Вернуть в проектный отдел» — исполнитель просит мастера передать сделку,
+// «Передано в проектный отдел» — мастер принял решение.
+const SCENARIO_TRANSFERRED_TO_DESIGN = "Передано в проектный отдел";
+const REWORK_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 62531197, // «На доработке», Производство
+  [PIPELINE_ID_WOOD]: 62531165 // «На доработке», Дерево Производство
+};
+const DESIGN_SUBMENU_TRANSFER = "Передать на доработку";
+const DESIGN_SUBMENU_IN_WORK = "В работе";
+const DESIGN_SUBMENU_BACK = "Назад";
+const DESIGN_TAG_PREFIX = "design:";
+
+function leadScenarioIs(ctx, lead, value) {
+  const target = normalizeHandleName(value);
+
+  return ctx.getFieldValues(lead, SCENARIO_FIELD_ID).some((v) => normalizeHandleName(v) === target);
+}
+
+async function buildScenarioField(ctx, value) {
+  const option = await findFieldEnumForUserName(ctx, SCENARIO_FIELD_ID, value);
+
+  if (!option) {
+    throw new Error(`В поле ${SCENARIO_FIELD_ID} нет значения «${value}»`);
+  }
+
+  return { field_id: SCENARIO_FIELD_ID, values: [{ value: option.value, enum_id: option.id }] };
+}
+
+async function showDesignMenu(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+
+  state.designMenuStage = "menu";
+  await sendProductionDirectMessage(ctx, directId, "Выберите нужный статус", [
+    DESIGN_SUBMENU_TRANSFER,
+    DESIGN_SUBMENU_IN_WORK
+  ]);
+}
+
+function isDesignSubmenuInput(state, text) {
+  if (!state || !state.designMenuStage) {
+    return false;
+  }
+
+  return state.designMenuStage === "menu"
+    ? text === DESIGN_SUBMENU_TRANSFER || text === DESIGN_SUBMENU_IN_WORK
+    : text === DESIGN_SUBMENU_BACK;
+}
+
+async function handleDesignSubmenu(ctx, directId, userKey, roleKey, text) {
+  const state = productionUserState[userKey];
+  const pipelineId = PIPELINE_ID_BY_FOREMAN_ROLE[roleKey];
+
+  delete state.listContext;
+
+  if (text === DESIGN_SUBMENU_BACK) {
+    await showDesignMenu(ctx, directId, userKey);
+    return;
+  }
+
+  if (text === DESIGN_SUBMENU_TRANSFER) {
+    const leads = (await getLeadsByPipeline(ctx, pipelineId, { withTags: true })).filter(
+      (lead) => !leadHasTag(lead, PM_DEAL_TAG_NAME) && leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN)
+    );
+    const title = "Сделки, находящиеся на рассмотрение на передачу на доработку";
+
+    if (leads.length === 0) {
+      await sendProductionDirectMessage(ctx, directId, `${title}\nНет сделок.`);
+      return;
+    }
+
+    leads.forEach((lead) => {
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+    });
+
+    const sorted = sortDealsForButtons(ctx, leads);
+    const lines = [title];
+
+    sorted.forEach((lead, i) => lines.push(`${i + 1}.№ ${getContractNumberWithLink(ctx, lead)}.`));
+
+    await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "design_request", sorted));
+    return;
+  }
+
+  // «В работе»: сделки на этапе «На доработке» (T-20.2.2).
+  const leads = (
+    await getLeadsByPipeline(ctx, pipelineId, { statusId: REWORK_STATUS_BY_PIPELINE[pipelineId], withTags: true })
+  ).filter((lead) => !leadHasTag(lead, PM_DEAL_TAG_NAME));
+  const lines = ["Сделки, переданные в проектный отдел:"];
+
+  if (leads.length === 0) {
+    lines.push("Нет сделок.");
+  }
+
+  sortDealsForButtons(ctx, leads).forEach((lead, i) => lines.push(`${i + 1}.№ ${getContractNumberWithLink(ctx, lead)}.`));
+
+  state.designMenuStage = "inwork";
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), [DESIGN_SUBMENU_BACK]);
+}
+
+function isDesignDecisionValid(ctx, lead, roleKey, { allowFinalFailed }) {
+  return (
+    lead &&
+    FOREMAN_ROLE_KEYS.includes(roleKey) &&
+    Number(lead.pipeline_id) === PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] &&
+    (leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN) || (allowFinalFailed && isAtFinalOtkFailedStatus(lead)))
+  );
+}
+
+// Мастер нажал «Вернуть в проектный отдел» (T-20.2.3.3.1.1): спрашиваем, что
+// не принято. Сам перевод делает handleDesignMasterCommentInput.
+async function handleDesignReturnButton(ctx, directId, userKey, leadId, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: true })) {
+      await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+      return;
+    }
+
+    state.pendingTextInput = { kind: "design_master_comment", leadId: lead.id };
+    await sendProductionDirectMessage(ctx, directId, "Укажите, что не принято");
+  });
+}
+
+async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  if (!trimmedText) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите, что не принято");
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  try {
+    await runExclusive(pending.leadId, async () => {
+      const lead = await ctx.getLead(pending.leadId);
+
+      if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: true })) {
+        await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+        return;
+      }
+
+      const executorName = getLeadExecutorName(ctx, lead, findExecutionRowForLead(settings, lead));
+      const contractNumber = getContractNumberWithLink(ctx, lead);
+
+      await patchLead(ctx, lead.id, {
+        status_id: REWORK_STATUS_BY_PIPELINE[Number(lead.pipeline_id)],
+        custom_fields_values: [
+          await buildScenarioField(ctx, SCENARIO_TRANSFERRED_TO_DESIGN),
+          { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }
+        ]
+      });
+
+      const text = `Решение руководителя по ${contractNumber}: вернуть в проектный отдел.`;
+
+      await sendProductionDirectMessage(ctx, directId, text);
+      await notifyRoleUsers(ctx, settings, "otk", text);
+      await notifyUserByName(ctx, executorName, text);
+    });
+  } catch (error) {
+    state.pendingTextInput = pending;
+    throw error;
+  }
+}
+
+async function handleDesignDecline(ctx, directId, userKey, leadId, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: false })) {
+      await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+      return;
+    }
+
+    const executorName = getLeadExecutorName(ctx, lead, findExecutionRowForLead(settings, lead));
+    const text = `Решение руководителя по ${getContractNumberWithLink(ctx, lead)}: не передавать на доработку в проектный отдел.`;
+
+    await patchLead(ctx, lead.id, {
+      custom_fields_values: [
+        { field_id: SCENARIO_FIELD_ID, values: null },
+        { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: "" }] },
+        { field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: null }
+      ]
+    });
+
+    await sendProductionDirectMessage(ctx, directId, text);
+    await notifyUserByName(ctx, executorName, text);
+  });
 }
 
 // T-19: «Не принято ОТК» у мастера — информационный список без кнопок.
@@ -3607,6 +3811,27 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
       directId,
       `№ договора: ${getContractNumberWithLink(ctx, lead)}. Не хватает деталей: ${comment}`,
       [buildTaggedButtonCompat(ctx, "Отправить на закупку", lead.id), buildTaggedButtonCompat(ctx, "Отклонить", lead.id)]
+    );
+    return true;
+  }
+
+  if (listContext.kind === "design_request") {
+    if (!leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN)) {
+      await stale();
+      return true;
+    }
+
+    const { comment, photos } = getRejectDetails(ctx, lead);
+    const executorName = getLeadExecutorName(ctx, lead, row) || "Исполнитель";
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `${executorName} указал, что № ${getContractNumberWithLink(ctx, lead)} необходимо отправить на доработку.\n${comment}\n${photos}`,
+      [
+        buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`),
+        buildTaggedButtonCompat(ctx, "Отклонить", `${DESIGN_TAG_PREFIX}${lead.id}`)
+      ]
     );
     return true;
   }
@@ -5063,6 +5288,8 @@ function init(app, ctx) {
             await handleMaterialsCommentInput(ctx, directId, userKey, userName, settings, trimmedText);
           } else if (kind === "project_return_comment") {
             await handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "design_master_comment") {
+            await handleDesignMasterCommentInput(ctx, directId, userKey, settings, trimmedText);
           } else if (kind === "otk_reject_comment") {
             await handleOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
           } else if (kind === "final_otk_reject_comment") {
@@ -5147,6 +5374,34 @@ function init(app, ctx) {
           }
         } catch (error) {
           console.error("[Бот производства] Ошибка решения по непринятым работам:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать решение. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // Возврат в проектный отдел / отказ (T-20.2.6): id вида design:<сделка>.
+      const designReturnTag = parseTaggedButtonCompat(ctx, trimmedText, "Вернуть в проектный отдел");
+      const designDeclineTag = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+
+      if (
+        settings &&
+        ((designReturnTag && String(designReturnTag).startsWith(DESIGN_TAG_PREFIX)) ||
+          (designDeclineTag && String(designDeclineTag).startsWith(DESIGN_TAG_PREFIX)))
+      ) {
+        try {
+          if (designReturnTag) {
+            await handleDesignReturnButton(ctx, directId, userKey, String(designReturnTag).slice(DESIGN_TAG_PREFIX.length), settings);
+          } else {
+            await handleDesignDecline(ctx, directId, userKey, String(designDeclineTag).slice(DESIGN_TAG_PREFIX.length), settings);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка решения по проектному отделу:", error.stack || error.message);
 
           await sendProductionDirectMessage(
             ctx,
@@ -5291,6 +5546,22 @@ function init(app, ctx) {
         return;
       }
 
+      if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && isDesignSubmenuInput(state, trimmedText)) {
+        try {
+          await handleDesignSubmenu(ctx, directId, userKey, state.roleKey, trimmedText);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка «Доработка проектным отделом»:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось получить список сделок. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
       if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && WAITING_DECISION_BUTTONS.includes(trimmedText)) {
         try {
           await handleWaitingDecisionChoice(ctx, directId, userKey, state.roleKey, settings, trimmedText);
@@ -5313,6 +5584,7 @@ function init(app, ctx) {
         // Новый пункт меню — прежний список больше не актуален.
         delete state.listContext;
         delete state.awaitingReportPeriod;
+        delete state.designMenuStage;
 
         try {
           if (trimmedText === "Отчёт") {
