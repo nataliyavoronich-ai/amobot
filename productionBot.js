@@ -4909,24 +4909,36 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
   const target = userName ? normalizeHandleName(userName) : null;
 
   for (const row of findExecutionRows(settings)) {
-    if (!row.factDateFieldId || !row.amoStatusId || !row.executorFieldId) {
-      continue;
-    }
-
     if (pipelineId && Number(row.amoPipelineId) !== Number(pipelineId)) {
       continue;
     }
 
+    if (!row.factDateFieldId || !row.amoStatusId || !row.executorFieldId) {
+      console.log(
+        `[Бот производства] Отчёт: строка настроек «Исполнение» (воронка ${row.amoPipelineId}, статус ${row.amoStatusId}) ` +
+          "пропущена — не заполнены «Исполнитель» или «Факт готовности»."
+      );
+      continue;
+    }
+
+    const rowStats = { withFact: 0, leftStage: 0, withExecutor: 0 };
+
     for (const lead of await getLeadsByFieldDateRange(ctx, REPORT_PIPELINE_IDS, row.factDateFieldId, period)) {
+      rowStats.withFact += 1;
+
       if (Number(lead.status_id) === Number(row.amoStatusId)) {
         continue;
       }
+
+      rowStats.leftStage += 1;
 
       const names = ctx.getFieldValues(lead, row.executorFieldId);
 
       if (names.length === 0 || (target && !names.some((name) => normalizeHandleName(name) === target))) {
         continue;
       }
+
+      rowStats.withExecutor += 1;
 
       const key = target ? userName : names.join(", ");
       const price = row.priceFieldId ? Number(ctx.getFieldValues(lead, row.priceFieldId)[0]) || 0 : 0;
@@ -4936,6 +4948,11 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
       entry.sum += price;
       result.set(key, entry);
     }
+
+    console.log(
+      `[Бот производства] Отчёт: этап ${row.amoStatusId} (факт ${row.factDateFieldId}, исполнитель ${row.executorFieldId}): ` +
+        `с датой в периоде ${rowStats.withFact}, уже ушли с этапа ${rowStats.leftStage}, с исполнителем ${rowStats.withExecutor}.`
+    );
   }
 
   return result;
