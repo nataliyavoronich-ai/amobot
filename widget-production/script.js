@@ -417,6 +417,40 @@ define(["jquery"], function ($) {
       }
     }
 
+    // Блок настроек в amoCRM низкий (64px), а виджет в нём высокий. Если
+    // родитель выравнивает содержимое по ЦЕНТРУ (flex/grid/table-cell), высокий
+    // виджет вылезает и вверх, и вниз: верх оказывается за краем экрана, а при
+    // каждой новой строке всё «уезжает» вверх ещё на полстроки. Выравниваем по
+    // верху всех родителей виджета.
+    function alignAncestorsToTop() {
+      var node = $root && $root[0];
+
+      while (node && node.parentNode && node !== document.body) {
+        var parent = node.parentNode;
+        var style = parent.nodeType === 1 ? window.getComputedStyle(parent) : null;
+
+        if (style) {
+          if (/flex/.test(style.display)) {
+            node.style.setProperty("align-self", "flex-start", "important");
+            parent.style.setProperty("align-items", "flex-start", "important");
+
+            if (/column/.test(style.flexDirection)) {
+              parent.style.setProperty("justify-content", "flex-start", "important");
+            }
+          } else if (/grid/.test(style.display)) {
+            node.style.setProperty("align-self", "start", "important");
+            parent.style.setProperty("align-items", "start", "important");
+          }
+
+          if (/table-cell/.test(window.getComputedStyle(node).display)) {
+            node.style.setProperty("vertical-align", "top", "important");
+          }
+        }
+
+        node = parent;
+      }
+    }
+
     // Браузерная «привязка прокрутки» (scroll anchoring) берёт якорем элемент
     // ВНЕ виджета (ниже него) и при росте таблицы сдвигает прокрутку, чтобы
     // якорь остался на месте — отсюда «уезжание» вверх. Запрещаем её на всех
@@ -456,6 +490,7 @@ define(["jquery"], function ($) {
       action();
 
       unclipAncestors();
+      alignAncestorsToTop();
       disableScrollAnchoring();
 
       var restore = function () {
@@ -1310,6 +1345,7 @@ define(["jquery"], function ($) {
       $root.append($footer);
       refreshSaveButton();
       unclipAncestors();
+      alignAncestorsToTop();
       disableScrollAnchoring();
       setTimeout(unclipAncestors, 0);
     }
