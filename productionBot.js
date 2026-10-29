@@ -5017,36 +5017,44 @@ function extractStatusChangeEvents(body) {
   return events;
 }
 
-// Возвращает { fieldId, coefficient } или null, если для статуса дата не нужна.
-function resolvePlannedDateRule(settings, lead, ctx, statusId) {
+// Возвращает список правил { fieldId, coefficient } либо { skip: причина }.
+// Для статусов ЛАЗЕР/РАСКРОЙ заполняются ДВА поля: общая плановая дата изделия
+// (коэффициент «Готовность изделия») и поле «План готовности» самого этапа
+// (коэффициент из столбца этого статуса). Для остальных статусов — только
+// поле этапа.
+function resolvePlannedDateRules(settings, lead, statusId) {
   const matrix = (settings && settings.readinessMatrix) || {};
-  const productEnumId = ((lead.custom_fields_values || []).find(
+  const productValue = ((lead.custom_fields_values || []).find(
     (field) => Number(field.field_id) === Number(matrix.productFieldId || PRODUCT_FIELD_ID)
   ) || { values: [] }).values[0];
-  const enumId = productEnumId && productEnumId.enum_id;
+  const enumId = productValue && productValue.enum_id;
   const product = (matrix.products || []).find((item) => Number(item.enumId) === Number(enumId));
+  const rules = [];
 
   if (!product) {
-    return { skip: `продукт сделки (enum ${enumId || "—"}) не найден в таблице «Плановая готовность»` };
+    return [{ skip: `продукт сделки (enum ${enumId || "—"}) не найден в таблице «Плановая готовность»` }];
   }
 
   if (PLANNED_READY_STATUS_IDS.includes(statusId)) {
-    return { fieldId: PLANNED_READY_FIELD_ID, coefficient: Number(product.readinessValue) };
+    rules.push({ fieldId: PLANNED_READY_FIELD_ID, coefficient: Number(product.readinessValue) });
   }
 
-  if (!(matrix.statusIds || []).map(Number).includes(statusId)) {
-    return null;
+  if ((matrix.statusIds || []).map(Number).includes(statusId)) {
+    const row = ((settings && settings.statusFieldMap) || []).find(
+      (item) => Number(item.amoStatusId) === statusId && item.planDateFieldId
+    );
+
+    if (!row) {
+      rules.push({ skip: `для статуса ${statusId} в «Связи этапов и полей» не указано поле «План готовности»` });
+    } else if (Number(row.planDateFieldId) !== PLANNED_READY_FIELD_ID || rules.length === 0) {
+      rules.push({
+        fieldId: Number(row.planDateFieldId),
+        coefficient: Number((matrix.cells || {})[`${enumId}:${statusId}`])
+      });
+    }
   }
 
-  const row = ((settings && settings.statusFieldMap) || []).find(
-    (item) => Number(item.amoStatusId) === statusId && item.planDateFieldId
-  );
-
-  if (!row) {
-    return { skip: `для статуса ${statusId} в «Связи этапов и полей» не указано поле «План готовности»` };
-  }
-
-  return { fieldId: Number(row.planDateFieldId), coefficient: Number((matrix.cells || {})[`${enumId}:${statusId}`]) };
+  return rules;
 }
 
 async function fillPlannedReadyDate(ctx, leadId, statusId) {
@@ -5063,44 +5071,42 @@ async function fillPlannedReadyDate(ctx, leadId, statusId) {
       return;
     }
 
-    const rule = resolvePlannedDateRule(settings, lead, ctx, statusId);
-
-    if (!rule) {
-      return;
-    }
-
     const log = (reason) =>
       console.log(`[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId} — пропуск: ${reason}`);
-
-    if (rule.skip) {
-      log(rule.skip);
-      return;
-    }
-
-    if (ctx.getFieldValues(lead, rule.fieldId).length > 0) {
-      log(`поле ${rule.fieldId} уже заполнено`);
-      return;
-    }
-
     const floors = parseFloat(String(ctx.getFieldValueJoined(lead, FLOORS_FIELD_ID)).replace(",", "."));
+    const fields = [];
+    const done = [];
 
-    if (!Number.isFinite(floors) || floors <= 0 || !Number.isFinite(rule.coefficient) || rule.coefficient <= 0) {
-      log(`не хватает данных (этажей: ${floors}, коэффициент: ${rule.coefficient})`);
+    for (const rule of resolvePlannedDateRules(settings, lead, statusId)) {
+      if (rule.skip) {
+        log(rule.skip);
+        continue;
+      }
+
+      if (ctx.getFieldValues(lead, rule.fieldId).length > 0) {
+        log(`поле ${rule.fieldId} уже заполнено`);
+        continue;
+      }
+
+      if (!Number.isFinite(floors) || floors <= 0 || !Number.isFinite(rule.coefficient) || rule.coefficient <= 0) {
+        log(`поле ${rule.fieldId}: не хватает данных (этажей: ${floors}, коэффициент: ${rule.coefficient})`);
+        continue;
+      }
+
+      // round(…, 6) — чтобы 2 × 0,6 = 1,2000000000000002 не превращалось в лишний день.
+      const days = Math.ceil(Math.round(floors * rule.coefficient * 1e6) / 1e6);
+
+      fields.push({ field_id: rule.fieldId, values: [{ value: ctx.todayMoscowStartUnix() + days * 86400 }] });
+      done.push(`поле ${rule.fieldId}: ${floors} × ${rule.coefficient} → +${days} дн.`);
+    }
+
+    if (fields.length === 0) {
       return;
     }
 
-    // round(…, 6) — чтобы 2 × 0,6 = 1,2000000000000002 не превращалось в лишний день.
-    const days = Math.ceil(Math.round(floors * rule.coefficient * 1e6) / 1e6);
-    const dateUnix = ctx.todayMoscowStartUnix() + days * 86400;
+    await patchLead(ctx, leadId, { custom_fields_values: fields });
 
-    await patchLead(ctx, leadId, {
-      custom_fields_values: [{ field_id: rule.fieldId, values: [{ value: dateUnix }] }]
-    });
-
-    console.log(
-      `[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId}: ` +
-        `${floors} × ${rule.coefficient} → +${days} дн., поле ${rule.fieldId} заполнено.`
-    );
+    console.log(`[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId}: ${done.join("; ")}.`);
   });
 }
 
