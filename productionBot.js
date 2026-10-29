@@ -2687,8 +2687,8 @@ async function finishDefectUpload(ctx, directId, settings, pending) {
       ctx,
       currentSettings,
       "otk",
-      `Производство № ${getContractNumberWithLink(ctx, lead)} не принято к исправлению.\n` +
-        `Комментарий: ${comment}\nФото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
+        `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
       [
         buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
         buildTaggedButtonCompat(ctx, "Отдать на доработку", lead.id)
@@ -3095,6 +3095,14 @@ function getLeadNumber(ctx, lead, fieldId) {
   return Number.isFinite(value) ? value : 0;
 }
 
+function buildNotAcceptedHeadline(ctx, lead, comment) {
+  const row = productionWidgetSettingsCache ? findExecutionRowForLead(productionWidgetSettingsCache, lead) : null;
+  const executorName = getLeadExecutorName(ctx, lead, row);
+  const who = executorName ? `исполнителем (${executorName})` : "исполнителем";
+
+  return `НЕ ПРИНЯТО ${who} производство № ${getContractNumberWithLink(ctx, lead)} к исправлению: ${comment}`;
+}
+
 function getRejectDetails(ctx, lead) {
   return {
     comment: ctx.getFieldValueJoined(lead, NOT_ACCEPTED_TEXT_FIELD_ID) || "—",
@@ -3228,8 +3236,8 @@ async function buildMasterDecisionRequest(ctx, settings, lead) {
 
   return {
     text:
-      `Производство № ${contractNumber} не принято к исправлению.\n` +
-      `Комментарий: ${comment}\nФото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
+      `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
     buttons: [buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id), ...stageButtons]
   };
 }
@@ -3547,7 +3555,7 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
     await sendProductionDirectMessage(
       ctx,
       directId,
-      `Производство № ${getContractNumberWithLink(ctx, lead)} не принято к исправлению.\nКомментарий: ${comment}\n` +
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
         `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
       [
         buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
