@@ -1229,7 +1229,28 @@ define(["jquery"], function ($) {
             });
           });
 
-          $labelTd.append($productSelect).append($deleteRow);
+          var arrowStyle = "cursor:pointer;color:#2d7ff9;margin-right:6px;user-select:none;";
+          var moveProduct = function (delta) {
+            var target = rowIdx + delta;
+
+            if (target < 0 || target >= matrix.products.length) {
+              return;
+            }
+
+            var moved = matrix.products.splice(rowIdx, 1)[0];
+
+            matrix.products.splice(target, 0, moved);
+            renderReadinessMatrixTable();
+          };
+          var $upProduct = $('<span style="' + arrowStyle + '" title="Выше">▲</span>').on("click", function () {
+            moveProduct(-1);
+          });
+          var $downProduct = $('<span style="' + arrowStyle + '" title="Ниже">▼</span>').on("click", function () {
+            moveProduct(1);
+          });
+
+          $labelTd.css("white-space", "nowrap");
+          $labelTd.append($upProduct).append($downProduct).append($productSelect).append($deleteRow);
           $tr.append($labelTd);
 
           var $readinessTd = $('<td style="padding:6px;"></td>');
