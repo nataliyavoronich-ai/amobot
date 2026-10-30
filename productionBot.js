@@ -420,7 +420,10 @@ function validateProductionWidgetSettings(settings) {
   // например "@nataliya_voronich"), а не по id пользователя amoCRM — это
   // разные системы, и живой список пользователей amoMessenger браузер
   // виджета получить не может.
-  const activeHandles = new Set();
+  // Один человек может быть одновременно директором и мастером (обоих
+  // цехов); остальные сочетания ролей, как и повтор внутри роли, запрещены.
+  const COMBINABLE_ROLE_KEYS = ["productionDirector", "metalShopForeman", "woodShopForeman"];
+  const activeHandles = new Map(); // имя → роли, в которых он активен
 
   for (const roleKey of KNOWN_ROLE_KEYS) {
     const entries = roles[roleKey];
@@ -449,15 +452,23 @@ function validateProductionWidgetSettings(settings) {
       }
 
       if (entry.active) {
-        if (activeHandles.has(handle)) {
+        const previousRoles = activeHandles.get(handle) || [];
+        const allRoles = [...previousRoles, roleKey];
+
+        if (
+          previousRoles.includes(roleKey) ||
+          (allRoles.length > 1 && allRoles.some((key) => !COMBINABLE_ROLE_KEYS.includes(key)))
+        ) {
           return {
             valid: false,
-            error: "Один пользователь не может одновременно состоять в двух активных ролях.",
+            error:
+              "Один пользователь может совмещать только роли директора и мастеров; " +
+              "в других сочетаниях (например, с ОТК) и дважды в одной роли — нельзя.",
             field: `roles.${roleKey}`
           };
         }
 
-        activeHandles.add(handle);
+        activeHandles.set(handle, allRoles);
       }
     }
   }
@@ -791,6 +802,50 @@ function resolveUserRole(settings, userName) {
   return PERFORMER_ROLE_KEY;
 }
 
+// Все роли пользователя (директор + мастера могут совпадать в одном человеке).
+function resolveUserRoles(settings, userName) {
+  const normalizedUserName = normalizeHandleName(userName);
+  const roles = [];
+
+  if (settings && settings.roles && normalizedUserName) {
+    for (const roleKey of KNOWN_ROLE_KEYS) {
+      const entries = settings.roles[roleKey];
+
+      if (
+        Array.isArray(entries) &&
+        entries.some((entry) => entry.active && normalizeHandleName(entry.handle) === normalizedUserName)
+      ) {
+        roles.push(roleKey);
+      }
+    }
+  }
+
+  return roles.length > 0 ? roles : [PERFORMER_ROLE_KEY];
+}
+
+function buildUserState(settings, userName, directId) {
+  const roleKeys = resolveUserRoles(settings, userName);
+
+  rolesByDirectId.set(String(directId), roleKeys);
+
+  return { roleKey: roleKeys[0], roleKeys, userName };
+}
+
+// directId → роли пользователя: нужно меню (кнопка «Сменить роль»), которое
+// строится без доступа к состоянию пользователя.
+const rolesByDirectId = new Map();
+const SWITCH_ROLE_BUTTON = "Сменить роль";
+
+// У пользователя несколько ролей — действия по сделке выполняем от роли
+// мастера той воронки, в которой лежит сделка (а не только от выбранной).
+function roleForLead(state, lead) {
+  const needed = lead && MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+
+  return needed && state.roleKeys && state.roleKeys.includes(needed) && (FOREMAN_ROLE_KEYS.includes(state.roleKey) || state.roleKey === "productionDirector")
+    ? needed
+    : state.roleKey;
+}
+
 // ТЗ T-3.2.3.1: если активного ОТК нет, мастеру доступен «Финальный ОТК»
 // (после «Пересмотреть стоимость»). Проверяется на момент запроса меню.
 function getMenuButtons(roleKey, settings) {
@@ -806,23 +861,54 @@ function getMenuButtons(roleKey, settings) {
 }
 
 async function sendMainMenu(ctx, directId, roleKey) {
+  const roleKeys = rolesByDirectId.get(String(directId)) || [];
+  const buttons = getMenuButtons(roleKey, productionWidgetSettingsCache);
+
   await sendProductionDirectMessage(
     ctx,
     directId,
     `${ROLE_LABELS[roleKey] ? `${ROLE_LABELS[roleKey]}, в` : "В"}ыберите тип задач:`,
-    getMenuButtons(roleKey, productionWidgetSettingsCache)
+    roleKeys.length > 1 ? [...buttons, SWITCH_ROLE_BUTTON] : buttons
   );
+}
+
+async function showRoleChoice(ctx, directId, state) {
+  state.awaitingRoleChoice = true;
+  delete state.listContext;
+  delete state.designMenuStage;
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Выберите роль",
+    state.roleKeys.map((key) => ROLE_LABELS[key])
+  );
+}
+
+async function applyRoleChoice(ctx, directId, state, label) {
+  const roleKey = state.roleKeys.find((key) => ROLE_LABELS[key] === label);
+
+  delete state.awaitingRoleChoice;
+  delete state.pendingCard;
+  delete state.pendingTextInput;
+  delete state.awaitingReportPeriod;
+
+  if (roleKey) {
+    state.roleKey = roleKey;
+  }
+
+  await sendMainMenu(ctx, directId, state.roleKey);
 }
 
 // ТЗ п.7: полный поток авторизации по команде "старт".
 async function handleStartCommand(ctx, directId, userKey, userName) {
   await saveUserDirectId(ctx, userName, directId);
 
-  const roleKey = resolveUserRole(productionWidgetSettingsCache, userName);
+  const state = buildUserState(productionWidgetSettingsCache, userName, directId);
 
-  productionUserState[userKey] = { roleKey, userName };
+  productionUserState[userKey] = state;
 
-  await sendMainMenu(ctx, directId, roleKey);
+  await sendMainMenu(ctx, directId, state.roleKey);
 }
 
 // Заглушка для пунктов меню, для которых ТЗ ещё не описывает поведение
@@ -3650,7 +3736,7 @@ async function handleDesignReturnButton(ctx, directId, userKey, leadId, settings
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
 
-    if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: true })) {
+    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true })) {
       await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
       return;
     }
@@ -3675,7 +3761,7 @@ async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, 
     await runExclusive(pending.leadId, async () => {
       const lead = await ctx.getLead(pending.leadId);
 
-      if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: true })) {
+      if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true })) {
         await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
         return;
       }
@@ -3709,7 +3795,7 @@ async function handleDesignDecline(ctx, directId, userKey, leadId, settings) {
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
 
-    if (!isDesignDecisionValid(ctx, lead, state.roleKey, { allowFinalFailed: false })) {
+    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: false })) {
       await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
       return;
     }
@@ -3883,7 +3969,7 @@ async function tryHandleOtkListSelection(ctx, directId, userKey, userName, setti
   }
 
   if (listContext.kind === "final_otk") {
-    await showFinalOtkCard(ctx, directId, lead, settings, state.roleKey);
+    await showFinalOtkCard(ctx, directId, lead, settings, roleForLead(state, lead));
     return true;
   }
 
@@ -4046,10 +4132,10 @@ async function finishOtkRejectUpload(ctx, directId, settings, pending) {
 
 async function handleUnacceptedDecision(ctx, directId, userKey, userName, leadId, action, settings) {
   const state = productionUserState[userKey];
-  const roleKey = state.roleKey;
 
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
     const row = lead ? findExecutionRowForLead(settings, lead) : null;
     const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
 
@@ -4167,10 +4253,11 @@ async function handleUnacceptedDecision(ctx, directId, userKey, userName, leadId
 // T-11.4.2 / актуализация п.5.6: мастер возвращает сделку на ранее
 // завершённый этап.
 async function handleForemanReturnToStage(ctx, directId, userKey, leadId, statusId, settings) {
-  const roleKey = productionUserState[userKey].roleKey;
+  const state = productionUserState[userKey];
 
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
     const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
 
     // Решение мастера: либо флаг «Не приняты работы: Мастер», либо финальный
@@ -4362,10 +4449,11 @@ async function leadHasOtkRejectedTag(ctx, leadId) {
 
 // T-13.4: «Да» / «Нет» финального ОТК.
 async function handleFinalOtkReply(ctx, directId, userKey, leadId, decision, settings) {
-  const roleKey = productionUserState[userKey].roleKey;
+  const state = productionUserState[userKey];
 
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
     const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
 
     if (
@@ -4698,10 +4786,14 @@ async function runDailyDeadlineBroadcast(ctx) {
         continue;
       }
 
-      const roleKey = resolveUserRole(settings, userName);
+      // Директор видит обе воронки сразу — отдельные сообщения мастеров не нужны.
+      const roleKeys = resolveUserRoles(settings, userName);
+      const roles = roleKeys.includes("productionDirector") ? ["productionDirector"] : roleKeys;
 
-      for (const text of await buildDeadlineMessages(ctx, settings, roleKey, userName)) {
-        await sendProductionDirectMessage(ctx, directId, text);
+      for (const roleKey of roles) {
+        for (const text of await buildDeadlineMessages(ctx, settings, roleKey, userName)) {
+          await sendProductionDirectMessage(ctx, directId, text);
+        }
       }
     } catch (error) {
       console.error(`[Бот производства] Рассылка «Контроль сроков» ${key}:`, error.message);
@@ -5490,7 +5582,7 @@ function init(app, ctx) {
       // имени пользователя (как при «старт»), чтобы кнопки из прежних
       // сообщений продолжали работать без повторного «старт».
       if (!state && userName && productionWidgetSettingsCache) {
-        state = { roleKey: resolveUserRole(productionWidgetSettingsCache, userName), userName };
+        state = buildUserState(productionWidgetSettingsCache, userName, directId);
         productionUserState[userKey] = state;
       }
 
@@ -5806,6 +5898,19 @@ function init(app, ctx) {
           );
         }
 
+        return;
+      }
+
+      // Несколько ролей у одного человека: «Сменить роль» → выбор роли.
+      rolesByDirectId.set(String(directId), state.roleKeys || [state.roleKey]);
+
+      if (trimmedText === SWITCH_ROLE_BUTTON && state.roleKeys && state.roleKeys.length > 1) {
+        await showRoleChoice(ctx, directId, state);
+        return;
+      }
+
+      if (state.awaitingRoleChoice && state.roleKeys && state.roleKeys.some((key) => ROLE_LABELS[key] === trimmedText)) {
+        await applyRoleChoice(ctx, directId, state, trimmedText);
         return;
       }
 

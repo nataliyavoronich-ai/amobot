@@ -289,20 +289,35 @@ define(["jquery"], function ($) {
     // (productionBot.js: validateProductionWidgetSettings) — именно её
     // результат блокирует реальное сохранение.
     function validateClientSide(settings) {
+      // Совмещать можно директора и мастеров обоих цехов; остальное — нельзя.
+      var combinable = ["productionDirector", "metalShopForeman", "woodShopForeman"];
       var activeHandles = {};
 
       for (var i = 0; i < ROLE_DEFS.length; i++) {
-        var entries = settings.roles[ROLE_DEFS[i].key] || [];
+        var roleKey = ROLE_DEFS[i].key;
+        var entries = settings.roles[roleKey] || [];
 
         for (var j = 0; j < entries.length; j++) {
           var handle = (entries[j].handle || "").trim();
 
           if (entries[j].active && handle) {
-            if (activeHandles[handle]) {
-              return "Один пользователь не может одновременно состоять в двух активных ролях.";
+            var previous = activeHandles[handle] || [];
+            var all = previous.concat([roleKey]);
+
+            if (
+              previous.indexOf(roleKey) !== -1 ||
+              (all.length > 1 &&
+                all.some(function (key) {
+                  return combinable.indexOf(key) === -1;
+                }))
+            ) {
+              return (
+                "Один пользователь может совмещать только роли директора и мастеров; " +
+                "в других сочетаниях (например, с ОТК) и дважды в одной роли — нельзя."
+              );
             }
 
-            activeHandles[handle] = true;
+            activeHandles[handle] = all;
           }
         }
       }
