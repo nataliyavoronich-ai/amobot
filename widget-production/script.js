@@ -115,7 +115,7 @@ define(["jquery"], function ($) {
             id: p.id,
             name: p.name,
             statuses: statuses.map(function (s) {
-              return { id: s.id, name: s.name, pipeline_id: p.id };
+              return { id: s.id, name: s.name, pipeline_id: p.id, color: s.color || "" };
             })
           };
         });
@@ -129,7 +129,13 @@ define(["jquery"], function ($) {
 
       liveData.pipelines.forEach(function (p) {
         p.statuses.forEach(function (s) {
-          result.push({ id: s.id, name: s.name, pipelineName: p.name, pipelineId: p.id });
+          result.push({
+            id: s.id,
+            name: s.name,
+            pipelineName: p.name,
+            pipelineId: p.id,
+            color: s.color || ""
+          });
         });
       });
 
@@ -595,6 +601,7 @@ define(["jquery"], function ($) {
           '<option value="' +
           key +
           '"' +
+          (s.color ? ' data-color="' + s.color + '" style="background:' + s.color + ';color:#333;"' : "") +
           (isSelected ? " selected" : "") +
           ">" +
           escapeHtml(s.name) +
@@ -604,6 +611,22 @@ define(["jquery"], function ($) {
       });
 
       return html;
+    }
+
+    // Фон списка статуса = цвет выбранного статуса в amoCRM.
+    function paintStatusSelects() {
+      if (!$root) {
+        return;
+      }
+
+      $root.find("select").each(function () {
+        var color = $(this).find("option:selected").attr("data-color");
+        var hasColored = $(this).find("option[data-color]").length > 0;
+
+        if (hasColored) {
+          $(this).css({ background: color || "#fff", color: "#333" });
+        }
+      });
     }
 
     function escapeHtml(text) {
@@ -1066,6 +1089,8 @@ define(["jquery"], function ($) {
       return html;
     }
 
+    var PRODUCT_FIELD_ID = 172572;
+
     function renderReadinessTab() {
       var $tab = $('<div class="production-widget__readiness"></div>');
       var matrix = settingsState.readinessMatrix;
@@ -1074,25 +1099,8 @@ define(["jquery"], function ($) {
       matrix.statusIds = matrix.statusIds || [];
       matrix.cells = matrix.cells || {};
 
-      var $productFieldRow = $('<div style="margin-bottom:12px;"></div>');
-      $productFieldRow.append(
-        '<div style="font-weight:600;margin-bottom:4px;color:#333;">Поле «Продукт»</div>'
-      );
-
-      var $productFieldSelect = $("<select></select>").html(
-        fieldOptionsHtml(matrix.productFieldId, ["select", "multiselect"])
-      );
-
-      $productFieldSelect.on("change", function () {
-        var value = $(this).val();
-
-        matrix.productFieldId = value ? Number(value) : null;
-        matrix.products = [];
-        renderReadinessMatrixTable();
-      });
-
-      $productFieldRow.append($productFieldSelect);
-      $tab.append($productFieldRow);
+      // Поле всегда «Продукт» (id 172572), выбирать его не нужно.
+      matrix.productFieldId = PRODUCT_FIELD_ID;
 
       var $matrixContainer = $('<div class="production-widget__readiness-matrix"></div>').css({
         "overflow-x": "auto",
@@ -1124,7 +1132,7 @@ define(["jquery"], function ($) {
 
         if (!productField) {
           $matrixContainer.append(
-            '<div style="color:#999;">Выберите поле «Продукт», чтобы добавлять строки.</div>'
+            '<div style="color:#c0392b;">Поле «Продукт» (id ' + PRODUCT_FIELD_ID + ') не найдено в amoCRM.</div>'
           );
           $addProductBtn.hide();
           return;
@@ -1140,7 +1148,7 @@ define(["jquery"], function ($) {
 
         var usedStatusIds = matrix.statusIds.filter(Boolean);
 
-        var $table = $("<table></table>").css({ width: "100%", minWidth: "900px", borderCollapse: "collapse" });
+        var $table = $("<table></table>").css({ borderCollapse: "collapse" });
         var $headRow = $(
           '<tr><th style="padding:6px;"></th>' +
             '<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;">Готовность изделия</th></tr>'
@@ -1148,14 +1156,16 @@ define(["jquery"], function ($) {
 
         matrix.statusIds.forEach(function (statusId, colIdx) {
           var $th = $('<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;"></th>');
-          var $select = $("<select></select>").html(
-            statusOptionsHtml(
-              statusId,
-              usedStatusIds.filter(function (id) {
-                return id !== statusId;
-              })
-            )
-          );
+          var $select = $("<select></select>")
+            .css({ width: "110px", "max-width": "110px" })
+            .html(
+              statusOptionsHtml(
+                statusId,
+                usedStatusIds.filter(function (id) {
+                  return id !== statusId;
+                })
+              )
+            );
 
           $select.on("change", function () {
             matrix.statusIds[colIdx] = parseStatusValue($(this).val()).statusId;
@@ -1245,6 +1255,7 @@ define(["jquery"], function ($) {
 
             var $td = $('<td style="padding:6px;"></td>');
             var $input = $('<input type="number" min="0" step="0.01" />')
+              .css({ width: "110px" })
               .val(value)
               .prop("disabled", !product.enumId || !statusId);
 
@@ -1482,6 +1493,14 @@ define(["jquery"], function ($) {
           $root.on("change input click keyup", function () {
             setTimeout(refreshSaveButton, 0);
           });
+
+          if (window.MutationObserver) {
+            new MutationObserver(function () {
+              paintStatusSelects();
+            }).observe($root[0], { childList: true, subtree: true });
+          }
+
+          $root.on("change", "select", paintStatusSelects);
 
           // Общая разметка таблиц виджета (сетка ячеек) — общий <style>,
           // вынесенный ЗА пределы $root, т.к. renderShell() делает
