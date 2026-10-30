@@ -78,6 +78,7 @@ define(["jquery"], function ($) {
     var settingsState = null; // текущее состояние формы (объект схемы настроек)
     var $root = null; // корневой контейнер расширенных настроек
     var activeTab = "roles";
+    var $cancelButton = null; // «Отменить» — возврат к последней сохранённой версии
     var $saveButton = null; // кнопка «Сохранить» (подсвечивается, если есть несохранённые правки)
     var settingsSource = "server"; // откуда загружены настройки: "server" | "native" | "empty"
     var savedSnapshot = null; // JSON настроек на момент загрузки/последнего сохранения
@@ -404,6 +405,10 @@ define(["jquery"], function ($) {
       }
 
       var dirty = JSON.stringify(settingsState) !== savedSnapshot;
+
+      if ($cancelButton) {
+        $cancelButton.prop("disabled", !dirty).css("cursor", dirty ? "pointer" : "default");
+      }
 
       $saveButton
         .css({
@@ -1409,13 +1414,22 @@ define(["jquery"], function ($) {
         $saveButton.prop("disabled", true);
       }
 
-      $footer.append($saveButton);
-      $footer.append('<span class="production-widget__save-message"></span>');
-      $footer.append(
-        '<span style="color:#999;font-size:12px;">Строк в «Связи этапов и полей»: ' +
-          settingsState.statusFieldMap.length +
-          "</span>"
+      $cancelButton = $('<button type="button" style="padding:8px 16px;">Отменить</button>').on(
+        "click",
+        function () {
+          if (!savedSnapshot) {
+            return;
+          }
+
+          settingsState = JSON.parse(savedSnapshot);
+          renderShell();
+          showSaveMessage("Изменения отменены.", false);
+        }
       );
+
+      $footer.append($saveButton);
+      $footer.append($cancelButton);
+      $footer.append('<span class="production-widget__save-message"></span>');
 
       $root.append($footer);
       refreshSaveButton();
