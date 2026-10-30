@@ -129,7 +129,7 @@ define(["jquery"], function ($) {
 
       liveData.pipelines.forEach(function (p) {
         p.statuses.forEach(function (s) {
-          result.push({ id: s.id, name: s.name, pipelineName: p.name });
+          result.push({ id: s.id, name: s.name, pipelineName: p.name, pipelineId: p.id });
         });
       });
 
@@ -555,21 +555,47 @@ define(["jquery"], function ($) {
       return html;
     }
 
-    function statusOptionsHtml(selectedId, excludeIds) {
+    // «Успешно реализовано» / «Закрыто и не реализовано» имеют ОДИН И ТОТ ЖЕ id
+    // (142 / 143) во всех воронках, поэтому значение пункта списка — пара
+    // «воронка:статус». Выбранный статус ищем по обоим числам.
+    function statusKey(pipelineId, statusId) {
+      return pipelineId + ":" + statusId;
+    }
+
+    function parseStatusValue(value) {
+      var parts = String(value || "").split(":");
+
+      return parts.length === 2
+        ? { pipelineId: Number(parts[0]), statusId: Number(parts[1]) }
+        : { pipelineId: null, statusId: value ? Number(value) : null };
+    }
+
+    // selectedPipelineId необязателен: у старых записей воронка не сохранена,
+    // тогда выбирается первый статус с таким id.
+    function statusOptionsHtml(selectedId, excludeIds, selectedPipelineId) {
       var html = '<option value="">— выбрать статус —</option>';
+      var selectedDone = false;
 
       allLiveStatuses().forEach(function (s) {
-        if (excludeIds && excludeIds.indexOf(s.id) !== -1 && String(s.id) !== String(selectedId)) {
+        var key = statusKey(s.pipelineId, s.id);
+        var isSelected =
+          !selectedDone &&
+          String(s.id) === String(selectedId) &&
+          (!selectedPipelineId || String(s.pipelineId) === String(selectedPipelineId));
+
+        if (isSelected) {
+          selectedDone = true;
+        }
+
+        if (excludeIds && (excludeIds.indexOf(s.id) !== -1 || excludeIds.indexOf(key) !== -1) && !isSelected) {
           return;
         }
 
-        var selected = String(s.id) === String(selectedId) ? " selected" : "";
-
         html +=
           '<option value="' +
-          s.id +
+          key +
           '"' +
-          selected +
+          (isSelected ? " selected" : "") +
           ">" +
           escapeHtml(s.name) +
           " (" +
@@ -826,7 +852,7 @@ define(["jquery"], function ($) {
             return r !== excludeRow && r.amoStatusId;
           })
           .map(function (r) {
-            return r.amoStatusId;
+            return statusKey(r.amoPipelineId, r.amoStatusId);
           });
       }
 
@@ -835,17 +861,14 @@ define(["jquery"], function ($) {
 
         var $statusTd = $('<td style="padding:6px;"></td>');
         var $statusSelect = $("<select></select>").html(
-          statusOptionsHtml(row.amoStatusId, usedStatusIds(row))
+          statusOptionsHtml(row.amoStatusId, usedStatusIds(row), row.amoPipelineId)
         );
 
         $statusSelect.on("change", function () {
-          var value = $(this).val();
+          var chosen = parseStatusValue($(this).val());
 
-          row.amoStatusId = value ? Number(value) : null;
-          row.amoPipelineId =
-            row.amoStatusId && liveData.statusesById[row.amoStatusId]
-              ? liveData.statusesById[row.amoStatusId].pipeline_id
-              : null;
+          row.amoStatusId = chosen.statusId;
+          row.amoPipelineId = chosen.pipelineId;
         });
 
         $statusTd.append($statusSelect);
@@ -886,11 +909,15 @@ define(["jquery"], function ($) {
         });
 
         var $nextStatusTd = $('<td style="padding:6px;"></td>');
-        var $nextStatusSelect = $("<select></select>").html(statusOptionsHtml(row.nextAmoStatusId));
+        var $nextStatusSelect = $("<select></select>").html(
+          statusOptionsHtml(row.nextAmoStatusId, null, row.nextAmoPipelineId)
+        );
 
         $nextStatusSelect.on("change", function () {
-          var value = $(this).val();
-          row.nextAmoStatusId = value ? Number(value) : null;
+          var chosen = parseStatusValue($(this).val());
+
+          row.nextAmoStatusId = chosen.statusId;
+          row.nextAmoPipelineId = chosen.pipelineId;
         });
 
         $nextStatusTd.append($nextStatusSelect);
@@ -966,7 +993,8 @@ define(["jquery"], function ($) {
           planDateFieldId: null,
           factDateFieldId: null,
           priceFieldId: null,
-          nextAmoStatusId: null
+          nextAmoStatusId: null,
+          nextAmoPipelineId: null
         });
 
         rerenderTable();
@@ -1001,8 +1029,10 @@ define(["jquery"], function ($) {
         var $select = $("<select></select>").html(statusOptionsHtml(entry.amoStatusId));
 
         $select.on("change", function () {
-          var value = $(this).val();
-          entry.amoStatusId = value ? Number(value) : null;
+          var chosen = parseStatusValue($(this).val());
+
+          entry.amoStatusId = chosen.statusId;
+          entry.amoPipelineId = chosen.pipelineId;
         });
 
         $row.append($select);
@@ -1128,9 +1158,7 @@ define(["jquery"], function ($) {
           );
 
           $select.on("change", function () {
-            var value = $(this).val();
-
-            matrix.statusIds[colIdx] = value ? Number(value) : null;
+            matrix.statusIds[colIdx] = parseStatusValue($(this).val()).statusId;
             renderReadinessMatrixTable();
           });
 

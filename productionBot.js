@@ -509,7 +509,8 @@ function validateProductionWidgetSettings(settings) {
       "planDateFieldId",
       "factDateFieldId",
       "priceFieldId",
-      "nextAmoStatusId"
+      "nextAmoStatusId",
+      "nextAmoPipelineId"
     ];
 
     for (const fieldName of optionalIdFields) {
@@ -1090,6 +1091,18 @@ async function patchLead(ctx, leadId, body) {
 // двух значений — "Распределение" (сделка ждёт назначения исполнителя) и
 // "Исполнение" (уже назначена, в работе). Оба набора строк нужны отдельно
 // в разных местах сценария — не взаимозаменяемы.
+// Следующий статус из настроек. Системные статусы «Успешно реализовано» /
+// «Закрыто» имеют один id во всех воронках, поэтому воронку передаём явно.
+function nextStatusFields(row) {
+  const fields = { status_id: Number(row.nextAmoStatusId) };
+
+  if (row.nextAmoPipelineId) {
+    fields.pipeline_id = Number(row.nextAmoPipelineId);
+  }
+
+  return fields;
+}
+
 function findDistributionRows(settings) {
   return ((settings && settings.statusFieldMap) || []).filter((row) => row.botStatus === "distribution");
 }
@@ -1538,7 +1551,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
         { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
         { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
       ],
-      status_id: Number(row.nextAmoStatusId)
+      ...nextStatusFields(row)
     });
 
     const product = getProductText(ctx, lead);
@@ -1783,7 +1796,7 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
       { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
       { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
     ],
-    status_id: Number(row.nextAmoStatusId)
+    ...nextStatusFields(row)
   });
 
   const price = getPriceText(ctx, lead, row.priceFieldId);
@@ -2303,7 +2316,7 @@ async function finishDoneUpload(ctx, directId, settings, pending) {
     const row = pending.row;
 
     if (row.nextAmoStatusId) {
-      await patchLead(ctx, pending.leadId, { status_id: Number(row.nextAmoStatusId) });
+      await patchLead(ctx, pending.leadId, { ...nextStatusFields(row) });
     }
   }
 
@@ -4033,7 +4046,7 @@ async function handleOtkAcceptReply(ctx, directId, userKey, leadId, decision, se
     const executorName = getLeadExecutorName(ctx, lead, row);
 
     await patchLead(ctx, lead.id, {
-      status_id: Number(row.nextAmoStatusId),
+      ...nextStatusFields(row),
       custom_fields_values: buildClearCycleFields([INTERMEDIATE_OTK_FLAG_FIELD_ID])
     });
 
@@ -4486,7 +4499,7 @@ async function handleFinalOtkReply(ctx, directId, userKey, leadId, decision, set
       return;
     }
 
-    await patchLead(ctx, lead.id, { status_id: Number(row.nextAmoStatusId) });
+    await patchLead(ctx, lead.id, { ...nextStatusFields(row) });
 
     try {
       await removeTagFromLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
