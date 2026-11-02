@@ -771,6 +771,32 @@ function normalizeHandleName(value) {
     .replace(/\s+/g, " ");
 }
 
+// Имя в amoMessenger («Иванов Иван») и значение поля «Исполнитель»
+// («Иванов иван @ivan_tg» — с ником Telegram) сравниваем по частичному
+// совпадению: слова одного имени целиком входят в слова другого. Регистр, «ё»
+// и знак «@» не важны.
+function nameTokens(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .split(/[\s,;]+/)
+    .map((token) => token.replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+function namesMatch(first, second) {
+  const a = nameTokens(first);
+  const b = nameTokens(second);
+
+  if (a.length === 0 || b.length === 0) {
+    return false;
+  }
+
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+
+  return shorter.every((token) => longer.includes(token));
+}
+
 // ТЗ п.7: ищем пользователя среди АКТИВНЫХ записей всех ролей по совпадению
 // имени (не id — список пользователей amoMessenger недоступен виджету, см.
 // комментарий в widget-production/script.js). Первое совпадение побеждает;
@@ -792,7 +818,7 @@ function resolveUserRole(settings, userName) {
     }
 
     const match = entries.some(
-      (entry) => entry.active && normalizeHandleName(entry.handle) === normalizedUserName
+      (entry) => entry.active && namesMatch(entry.handle, userName)
     );
 
     if (match) {
@@ -814,7 +840,7 @@ function resolveUserRoles(settings, userName) {
 
       if (
         Array.isArray(entries) &&
-        entries.some((entry) => entry.active && normalizeHandleName(entry.handle) === normalizedUserName)
+        entries.some((entry) => entry.active && namesMatch(entry.handle, userName))
       ) {
         roles.push(roleKey);
       }
@@ -1073,7 +1099,11 @@ async function findFieldEnumForUserName(ctx, fieldId, userName) {
   const enums = (response.data && response.data.enums) || [];
   const normalizedUserName = normalizeHandleName(userName);
 
-  return enums.find((item) => normalizeHandleName(item.value) === normalizedUserName) || null;
+  return (
+    enums.find((item) => normalizeHandleName(item.value) === normalizedUserName) ||
+    enums.find((item) => namesMatch(item.value, userName)) ||
+    null
+  );
 }
 
 async function patchLead(ctx, leadId, body) {
@@ -1204,7 +1234,23 @@ async function loadUserDirectId(ctx, userName) {
   try {
     const response = await ctx.redisRequest(["GET", directIdRedisKey(userName)]);
 
-    return response.result || null;
+    if (response.result) {
+      return response.result;
+    }
+
+    // В поле «Исполнитель» имя может быть с ником Telegram — ищем ключ
+    // с частично совпадающим именем.
+    const keys = ((await ctx.redisRequest(["KEYS", "production_direct_id:*"])).result) || [];
+    const prefix = "production_direct_id:";
+    const matched = keys.filter((key) => namesMatch(key.slice(prefix.length), userName));
+
+    if (matched.length === 1) {
+      const found = await ctx.redisRequest(["GET", matched[0]]);
+
+      return found.result || null;
+    }
+
+    return null;
   } catch (error) {
     console.error("[Бот производства] Не удалось загрузить direct_id:", error.message);
 
@@ -3245,9 +3291,7 @@ function leadExecutorIs(ctx, lead, row, userName) {
     return false;
   }
 
-  const target = normalizeHandleName(userName);
-
-  return ctx.getFieldValues(lead, row.executorFieldId).some((value) => normalizeHandleName(value) === target);
+  return ctx.getFieldValues(lead, row.executorFieldId).some((value) => namesMatch(value, userName));
 }
 
 function getLeadNumber(ctx, lead, fieldId) {
@@ -5039,7 +5083,7 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
 
       const names = ctx.getFieldValues(lead, row.executorFieldId);
 
-      if (names.length === 0 || (target && !names.some((name) => normalizeHandleName(name) === target))) {
+      if (names.length === 0 || (target && !names.some((name) => namesMatch(name, userName)))) {
         continue;
       }
 
