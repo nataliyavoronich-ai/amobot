@@ -862,7 +862,49 @@ function resolveUserRoles(settings, userName) {
     }
   }
 
+  // Один человек — мастер обоих цехов (возможно, и директор): работает как
+  // мастер двух воронок, роль директора отдельно не нужна.
+  if (isCombinedForeman(roles)) {
+    return roles.filter((key) => key !== "productionDirector");
+  }
+
   return roles.length > 0 ? roles : [PERFORMER_ROLE_KEY];
+}
+
+function isCombinedForeman(roleKeys) {
+  return Array.isArray(roleKeys) && FOREMAN_ROLE_KEYS.every((key) => roleKeys.includes(key));
+}
+
+// Роли, под которые выполняется нажатая кнопка: у «объединённого» мастера —
+// обе воронки по очереди (сначала металл, потом дерево), у остальных — текущая.
+// once — действие не зависит от воронки и выполняется один раз. Списки сделок
+// (listContext) от обоих запусков объединяются, чтобы выбор сделки работал.
+async function forEachMenuRole(state, once, task) {
+  const original = state.roleKey;
+  const roles = isCombinedForeman(state.roleKeys) && !once ? FOREMAN_ROLE_KEYS : [original];
+  let merged = null;
+
+  try {
+    for (const roleKey of roles) {
+      state.roleKey = roleKey;
+      delete state.listContext;
+
+      await task(roleKey);
+
+      if (state.listContext) {
+        merged =
+          merged && merged.kind === state.listContext.kind
+            ? { kind: merged.kind, items: { ...merged.items, ...state.listContext.items } }
+            : state.listContext;
+      }
+    }
+  } finally {
+    state.roleKey = original;
+  }
+
+  if (merged) {
+    state.listContext = merged;
+  }
 }
 
 function buildUserState(settings, userName, directId) {
@@ -909,8 +951,10 @@ async function sendMainMenu(ctx, directId, roleKey) {
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `${ROLE_LABELS[roleKey] ? `${ROLE_LABELS[roleKey]}, в` : "В"}ыберите тип задач:`,
-    roleKeys.length > 1 ? [...buttons, SWITCH_ROLE_BUTTON] : buttons
+    isCombinedForeman(roleKeys)
+      ? "Мастер, выберите тип задач:"
+      : `${ROLE_LABELS[roleKey] ? `${ROLE_LABELS[roleKey]}, в` : "В"}ыберите тип задач:`,
+    roleKeys.length > 1 && !isCombinedForeman(roleKeys) ? [...buttons, SWITCH_ROLE_BUTTON] : buttons
   );
 }
 
@@ -5281,7 +5325,9 @@ async function handleReportPeriodChoice(ctx, directId, userKey, userName, settin
 
   const period = buildMonthHalfPeriod(ctx, choice === REPORT_BUTTON_SECOND_HALF);
 
-  await sendReportForRole(ctx, directId, userName, state.roleKey, settings, period);
+  await forEachMenuRole(state, false, (roleKey) =>
+    sendReportForRole(ctx, directId, userName, roleKey, settings, period)
+  );
 }
 
 async function handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText) {
@@ -5302,7 +5348,9 @@ async function handleReportPeriodInput(ctx, directId, userKey, userName, setting
 
   delete state.pendingTextInput;
 
-  await sendReportForRole(ctx, directId, userName, state.roleKey, settings, period);
+  await forEachMenuRole(state, false, (roleKey) =>
+    sendReportForRole(ctx, directId, userName, roleKey, settings, period)
+  );
 }
 
 // ============================================================
@@ -6036,7 +6084,7 @@ function init(app, ctx) {
       // Несколько ролей у одного человека: «Сменить роль» → выбор роли.
       rolesByDirectId.set(String(directId), state.roleKeys || [state.roleKey]);
 
-      if (trimmedText === SWITCH_ROLE_BUTTON && state.roleKeys && state.roleKeys.length > 1) {
+      if (trimmedText === SWITCH_ROLE_BUTTON && state.roleKeys && state.roleKeys.length > 1 && !isCombinedForeman(state.roleKeys)) {
         await showRoleChoice(ctx, directId, state);
         return;
       }
@@ -6048,7 +6096,9 @@ function init(app, ctx) {
 
       if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && isDesignSubmenuInput(state, trimmedText)) {
         try {
-          await handleDesignSubmenu(ctx, directId, userKey, state.roleKey, trimmedText);
+          await forEachMenuRole(state, trimmedText === DESIGN_SUBMENU_BACK, (roleKey) =>
+            handleDesignSubmenu(ctx, directId, userKey, roleKey, trimmedText)
+          );
         } catch (error) {
           console.error("[Бот производства] Ошибка «Доработка проектным отделом»:", error.stack || error.message);
 
@@ -6064,7 +6114,9 @@ function init(app, ctx) {
 
       if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && WAITING_DECISION_BUTTONS.includes(trimmedText)) {
         try {
-          await handleWaitingDecisionChoice(ctx, directId, userKey, state.roleKey, settings, trimmedText);
+          await forEachMenuRole(state, trimmedText === WAITING_DECISION_DESIGN, (roleKey) =>
+            handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, trimmedText)
+          );
         } catch (error) {
           console.error("[Бот производства] Ошибка «Ожидание решения»:", error.stack || error.message);
 
@@ -6087,6 +6139,9 @@ function init(app, ctx) {
         delete state.designMenuStage;
 
         try {
+          const once = ["Отчёт", "Ожидание решения", "Вопрос от продаж", "Вопросы от продаж"].includes(trimmedText);
+
+          await forEachMenuRole(state, once, async () => {
           if (trimmedText === "Отчёт") {
             await startReport(ctx, directId, userKey);
           } else if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
@@ -6120,6 +6175,7 @@ function init(app, ctx) {
           } else {
             await handleMenuPlaceholder(ctx, directId, trimmedText);
           }
+          });
         } catch (error) {
           console.error("[Бот производства] Ошибка пункта меню:", error.stack || error.message);
 
@@ -6166,7 +6222,10 @@ function init(app, ctx) {
               (await tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText)) ||
               (await tryHandleExecutionDealSelection(ctx, directId, userKey, userName, settings, trimmedText));
           } else if (state.roleKey === "metalShopForeman") {
-            handled = await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_METAL, trimmedText);
+            handled =
+              (await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_METAL, trimmedText)) ||
+              (isCombinedForeman(state.roleKeys) &&
+                (await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_WOOD, trimmedText)));
           } else if (state.roleKey === "woodShopForeman") {
             handled = await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_WOOD, trimmedText);
           }
