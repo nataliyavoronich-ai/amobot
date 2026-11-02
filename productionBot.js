@@ -3812,6 +3812,24 @@ const REWORK_STATUS_BY_PIPELINE = {
   [PIPELINE_ID_METAL]: 62531197, // «На доработке», Производство
   [PIPELINE_ID_WOOD]: 62531165 // «На доработке», Дерево Производство
 };
+// Этап «На доработке» ищем в воронке сделки по названию (id из ТЗ легко
+// перепутать между воронками); id из ТЗ — запасной вариант, и только если он
+// действительно относится к этой воронке.
+async function resolveReworkStatusId(ctx, pipelineId) {
+  await getStatusNameById(ctx, pipelineId, 0);
+
+  const names = statusNamesByPipelineId[pipelineId] || {};
+  const byName = Object.keys(names).find((id) => /доработк/i.test(names[id]));
+
+  if (byName) {
+    return Number(byName);
+  }
+
+  const configured = REWORK_STATUS_BY_PIPELINE[pipelineId];
+
+  return configured && (Object.keys(names).length === 0 || names[configured]) ? configured : null;
+}
+
 const DESIGN_SUBMENU_TRANSFER = "Передать на доработку";
 const DESIGN_SUBMENU_IN_WORK = "В работе";
 const DESIGN_SUBMENU_BACK = "Назад";
@@ -3890,7 +3908,10 @@ async function handleDesignSubmenu(ctx, directId, userKey, roleKey, text) {
 
   // «В работе»: сделки на этапе «На доработке» (T-20.2.2).
   const leads = (
-    await getLeadsByPipeline(ctx, pipelineId, { statusId: REWORK_STATUS_BY_PIPELINE[pipelineId], withTags: true })
+    await getLeadsByPipeline(ctx, pipelineId, {
+      statusId: (await resolveReworkStatusId(ctx, pipelineId)) || REWORK_STATUS_BY_PIPELINE[pipelineId],
+      withTags: true
+    })
   ).filter((lead) => !leadHasTag(lead, PM_DEAL_TAG_NAME));
   const lines = ["Сделки, переданные в проектный отдел:"];
 
@@ -3954,8 +3975,21 @@ async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, 
       const executorName = getLeadExecutorName(ctx, lead, findExecutionRowForLead(settings, lead));
       const contractNumber = getContractNumberWithLink(ctx, lead);
 
+      const reworkStatusId = await resolveReworkStatusId(ctx, Number(lead.pipeline_id));
+
+      if (!reworkStatusId) {
+        state.pendingTextInput = pending;
+        await sendProductionDirectMessage(
+          ctx,
+          directId,
+          "❌ В воронке сделки не найден этап «На доработке». Обратитесь к администратору."
+        );
+        return;
+      }
+
       await patchLead(ctx, lead.id, {
-        status_id: REWORK_STATUS_BY_PIPELINE[Number(lead.pipeline_id)],
+        status_id: reworkStatusId,
+        pipeline_id: Number(lead.pipeline_id),
         custom_fields_values: [
           await buildScenarioField(ctx, SCENARIO_TRANSFERRED_TO_DESIGN),
           { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }
