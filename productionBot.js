@@ -793,8 +793,9 @@ function normalizeHandleName(value) {
 
 // Имя в amoMessenger («Иванов Иван») и значение поля «Исполнитель»
 // («Иванов иван @ivan_tg» — с ником Telegram) сравниваем по частичному
-// совпадению: слова одного имени целиком входят в слова другого. Регистр, «ё»
-// и знак «@» не важны.
+// совпадению: ВСЕ слова имени пользователя должны входить в значение поля.
+// Обратное не работает: значение «Александр» не подходит пользователю
+// «Закаров Александр». Регистр, «ё» и знак «@» не важны.
 function nameTokens(value) {
   return String(value || "")
     .toLowerCase()
@@ -804,17 +805,11 @@ function nameTokens(value) {
     .filter(Boolean);
 }
 
-function namesMatch(first, second) {
-  const a = nameTokens(first);
-  const b = nameTokens(second);
+function namesMatch(fieldValue, userName) {
+  const field = nameTokens(fieldValue);
+  const user = nameTokens(userName);
 
-  if (a.length === 0 || b.length === 0) {
-    return false;
-  }
-
-  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
-
-  return shorter.every((token) => longer.includes(token));
+  return field.length > 0 && user.length > 0 && user.every((token) => field.includes(token));
 }
 
 // ТЗ п.7: ищем пользователя среди АКТИВНЫХ записей всех ролей по совпадению
@@ -1262,7 +1257,7 @@ async function loadUserDirectId(ctx, userName) {
     // с частично совпадающим именем.
     const keys = ((await ctx.redisRequest(["KEYS", "production_direct_id:*"])).result) || [];
     const prefix = "production_direct_id:";
-    const matched = keys.filter((key) => namesMatch(key.slice(prefix.length), userName));
+    const matched = keys.filter((key) => namesMatch(userName, key.slice(prefix.length)));
 
     if (matched.length === 1) {
       const found = await ctx.redisRequest(["GET", matched[0]]);
