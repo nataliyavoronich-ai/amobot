@@ -249,6 +249,8 @@ function splitLongMessage(text) {
   return parts;
 }
 
+const MAX_BUTTONS_PER_MESSAGE = 20;
+
 async function sendProductionDirectMessage(ctx, directId, text, buttons, options) {
   if (!productionAccessToken) {
     throw new Error("Токен amoMessenger бота производства не найден");
@@ -262,6 +264,24 @@ async function sendProductionDirectMessage(ctx, directId, text, buttons, options
       const isLast = i === parts.length - 1;
 
       last = await sendProductionDirectMessage(ctx, directId, parts[i], isLast ? buttons : undefined, options);
+    }
+
+    return last;
+  }
+
+  // amoMessenger принимает не более 20 кнопок в сообщении: остальные
+  // отправляем следующими сообщениями («Назад» и т.п. остаётся в последнем).
+  if (buttons && buttons.length > MAX_BUTTONS_PER_MESSAGE) {
+    let last = null;
+
+    for (let i = 0; i < buttons.length; i += MAX_BUTTONS_PER_MESSAGE) {
+      last = await sendProductionDirectMessage(
+        ctx,
+        directId,
+        i === 0 ? text : "Продолжение списка:",
+        buttons.slice(i, i + MAX_BUTTONS_PER_MESSAGE),
+        options
+      );
     }
 
     return last;
