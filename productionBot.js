@@ -3573,7 +3573,11 @@ async function buildMasterDecisionRequest(ctx, settings, lead) {
     text:
       `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
       `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
-    buttons: [buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id), ...stageButtons]
+    buttons: [
+      buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+      ...stageButtons,
+      buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`)
+    ]
   };
 }
 
@@ -3925,12 +3929,15 @@ async function handleDesignSubmenu(ctx, directId, userKey, roleKey, text) {
   await sendProductionDirectMessage(ctx, directId, lines.join("\n"), [DESIGN_SUBMENU_BACK]);
 }
 
-function isDesignDecisionValid(ctx, lead, roleKey, { allowFinalFailed }) {
+function isDesignDecisionValid(ctx, lead, roleKey, { allowFinalFailed, allowUnaccepted = false }) {
   return (
     lead &&
     FOREMAN_ROLE_KEYS.includes(roleKey) &&
     Number(lead.pipeline_id) === PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] &&
-    (leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN) || (allowFinalFailed && isAtFinalOtkFailedStatus(lead)))
+    (leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN) ||
+      (allowFinalFailed && isAtFinalOtkFailedStatus(lead)) ||
+      // непринятая работа, решение по которой ждёт мастера
+      (allowUnaccepted && fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)))
   );
 }
 
@@ -3942,7 +3949,7 @@ async function handleDesignReturnButton(ctx, directId, userKey, leadId, settings
   await runExclusive(leadId, async () => {
     const lead = await ctx.getLead(leadId);
 
-    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true })) {
+    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true, allowUnaccepted: true })) {
       await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
       return;
     }
@@ -3967,7 +3974,7 @@ async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, 
     await runExclusive(pending.leadId, async () => {
       const lead = await ctx.getLead(pending.leadId);
 
-      if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true })) {
+      if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true, allowUnaccepted: true })) {
         await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
         return;
       }
@@ -3991,6 +3998,10 @@ async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, 
         status_id: reworkStatusId,
         pipeline_id: Number(lead.pipeline_id),
         custom_fields_values: [
+          // решение по непринятой работе принято — флаги цикла снимаем
+          ...buildClearCycleFields().filter(
+            (field) => field.field_id !== NOT_ACCEPTED_TEXT_FIELD_ID && field.field_id !== DEFECT_PHOTO_LINK_FIELD_ID
+          ),
           await buildScenarioField(ctx, SCENARIO_TRANSFERRED_TO_DESIGN),
           { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }
         ]
