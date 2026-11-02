@@ -879,15 +879,24 @@ function isCombinedForeman(roleKeys) {
 // обе воронки по очереди (сначала металл, потом дерево), у остальных — текущая.
 // once — действие не зависит от воронки и выполняется один раз. Списки сделок
 // (listContext) от обоих запусков объединяются, чтобы выбор сделки работал.
-async function forEachMenuRole(state, once, task) {
+async function forEachMenuRole(state, once, task, { label = true, ctx = null, directId = null } = {}) {
   const original = state.roleKey;
-  const roles = isCombinedForeman(state.roleKeys) && !once ? FOREMAN_ROLE_KEYS : [original];
+  const combined = isCombinedForeman(state.roleKeys) && !once;
+  const roles = combined ? FOREMAN_ROLE_KEYS : [original];
   let merged = null;
 
   try {
     for (const roleKey of roles) {
       state.roleKey = roleKey;
       delete state.listContext;
+
+      if (combined && label && ctx) {
+        await sendProductionDirectMessage(
+          ctx,
+          directId,
+          roleKey === "metalShopForeman" ? "Воронка: Металл" : "Воронка: Дерево"
+        );
+      }
 
       await task(roleKey);
 
@@ -6096,8 +6105,11 @@ function init(app, ctx) {
 
       if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && isDesignSubmenuInput(state, trimmedText)) {
         try {
-          await forEachMenuRole(state, trimmedText === DESIGN_SUBMENU_BACK, (roleKey) =>
-            handleDesignSubmenu(ctx, directId, userKey, roleKey, trimmedText)
+          await forEachMenuRole(
+            state,
+            trimmedText === DESIGN_SUBMENU_BACK,
+            (roleKey) => handleDesignSubmenu(ctx, directId, userKey, roleKey, trimmedText),
+            { ctx, directId }
           );
         } catch (error) {
           console.error("[Бот производства] Ошибка «Доработка проектным отделом»:", error.stack || error.message);
@@ -6114,8 +6126,11 @@ function init(app, ctx) {
 
       if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && WAITING_DECISION_BUTTONS.includes(trimmedText)) {
         try {
-          await forEachMenuRole(state, trimmedText === WAITING_DECISION_DESIGN, (roleKey) =>
-            handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, trimmedText)
+          await forEachMenuRole(
+            state,
+            trimmedText === WAITING_DECISION_DESIGN,
+            (roleKey) => handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, trimmedText),
+            { ctx, directId }
           );
         } catch (error) {
           console.error("[Бот производства] Ошибка «Ожидание решения»:", error.stack || error.message);
@@ -6175,7 +6190,7 @@ function init(app, ctx) {
           } else {
             await handleMenuPlaceholder(ctx, directId, trimmedText);
           }
-          });
+          }, { ctx, directId });
         } catch (error) {
           console.error("[Бот производства] Ошибка пункта меню:", error.stack || error.message);
 
