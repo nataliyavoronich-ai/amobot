@@ -1413,7 +1413,7 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
     return;
   }
 
-  let available = [];
+  const groups = []; // сделки, сгруппированные по статусам: { statusName, leads }
 
   for (const row of distributionRows) {
     if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
@@ -1432,6 +1432,7 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
     let assignedCount = 0;
+    const rowLeads = [];
 
     for (const lead of leads) {
       if (ctx.getFieldValues(lead, row.executorFieldId).length > 0) {
@@ -1439,7 +1440,19 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
         continue; // уже назначено кому-то
       }
 
-      available.push(lead);
+      rowLeads.push(lead);
+    }
+
+    if (rowLeads.length > 0) {
+      let statusName = "";
+
+      try {
+        statusName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+      } catch (error) {
+        console.error("[Бот производства] Распределение: не получено название статуса:", error.message);
+      }
+
+      groups.push({ statusName: statusName || "", leads: rowLeads });
     }
 
     console.log(
@@ -1448,22 +1461,51 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
     );
   }
 
-  if (available.length === 0) {
+  if (groups.length === 0) {
     await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:\nНет доступных сделок.");
     return;
   }
 
-  available = sortDealsForButtons(ctx, available);
+  // Группировка по статусам: кнопка «<первая буква статуса>. №<договор>».
+  const buttons = [];
+  const legend = [];
 
-  const buttons = available.map((lead) => getContractNumberText(ctx, lead));
+  for (const group of groups) {
+    const letter = distributionStatusLetter(group.statusName);
 
-  await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:", buttons);
+    for (const lead of sortDealsForButtons(ctx, group.leads)) {
+      buttons.push(`${letter}. №${getContractNumberText(ctx, lead)}`);
+    }
+
+    legend.push(`${letter}. — ${group.statusName || "—"} (${group.leads.length})`);
+  }
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Сделки, доступные для распределения:\n${legend.join("\n")}`,
+    buttons
+  );
+}
+
+function distributionStatusLetter(statusName) {
+  const letter = String(statusName || "").trim().charAt(0).toLowerCase();
+
+  return letter || "—";
+}
+
+// «л. №ПД/77» → «ПД/77»; кнопка без префикса остаётся как есть.
+function stripDistributionButtonPrefix(text) {
+  const match = String(text || "").match(/^\S{1,2}\. №(.+)$/);
+
+  return match ? match[1].trim() : text;
 }
 
 // ТЗ T-4.3-4.5: нажатие на кнопку с номером договора из списка выше. Список
 // не храним между шагами (ТЗ — всегда живые данные) — ищем сделку заново
 // среди текущих доступных.
-async function tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText) {
+async function tryHandlePerformerDealSelection(ctx, directId, userName, settings, buttonText) {
+  const trimmedText = stripDistributionButtonPrefix(buttonText);
   const distributionRows = findDistributionRows(settings);
 
   for (const row of distributionRows) {
