@@ -1034,6 +1034,16 @@ async function getPipelineIdByName(ctx, name) {
     }
   }
 
+  // Названия воронок в amoCRM могут отличаться от рабочих — для двух цехов
+  // надёжнее известные id воронок.
+  if (name === PIPELINE_NAME_METAL) {
+    return PIPELINE_ID_METAL;
+  }
+
+  if (name === PIPELINE_NAME_WOOD) {
+    return PIPELINE_ID_WOOD;
+  }
+
   return pipelinesCache[name] || null;
 }
 
@@ -1714,6 +1724,14 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
 let pipelineNamesById = null;
 
 async function getPipelineNameById(ctx, pipelineId) {
+  if (Number(pipelineId) === PIPELINE_ID_METAL) {
+    return PIPELINE_NAME_METAL;
+  }
+
+  if (Number(pipelineId) === PIPELINE_ID_WOOD) {
+    return PIPELINE_NAME_WOOD;
+  }
+
   await getPipelineIdByName(ctx, PIPELINE_NAME_METAL); // прогреваем pipelinesCache при первом обращении
 
   if (!pipelineNamesById) {
