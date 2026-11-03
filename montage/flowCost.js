@@ -1,0 +1,465 @@
+// ============================================================
+// БОТ МОНТАЖНИКОВ — T-11 «Пересмотр стоимости»
+//   бригадир — запрос в течение 24 часов после принятия отчёта;
+//   руководитель — рассмотрение запросов.
+//
+// ВАЖНО: схема T-11 — по материалам ТЗ (раздел 7). Запросы руководителю
+// ищутся по списку запросов в Redis (его пополняет бот при запросе) с
+// проверкой значения поля «[Бот] Согласование стоимости(new)» в сделке.
+// ============================================================
+
+const amo = require("./amo");
+const calc = require("./calc");
+const files = require("./files");
+const messenger = require("./messenger");
+const settingsStore = require("./settings");
+const deals = require("./deals");
+const { BTN, MSG_NOT_NUMBER, MSG_NOT_INTEGER, say, filledKtu, tariffs } = require("./ui");
+const {
+  COST_APPROVAL_REQUESTED,
+  COST_APPROVAL_NOT_NEEDED,
+  SALES_PIPELINE_IDS
+} = require("./constants");
+
+const { mdSafe } = messenger;
+
+const INDEX_KEY = "montage_cost_requests";
+
+// ============================================================
+// Бригадир
+// ============================================================
+
+async function showForemanList(env, state) {
+  const { ctx } = env;
+  const found = await deals.findCostRevisionDeals(ctx, state.foremanName);
+
+  if (found.length === 0) {
+    await say(env, "Сделок, по которым можно пересмотреть стоимость, нет (пересмотр доступен в течение 24 часов после принятия отчета).");
+    return;
+  }
+
+  const leads = deals.sortByTerms(ctx, found).map((item) => item.lead);
+  const lines = [];
+
+  for (let i = 0; i < leads.length; i++) {
+    lines.push(`${i + 1}) ${await deals.dealLine(ctx, leads[i], "accept")}`);
+  }
+
+  const { map, buttons } = deals.buildDealButtons(ctx, leads);
+
+  state.list = { kind: "cost", map };
+  await say(env, `Выберите сделку для пересмотра стоимости:\n${lines.join("\n")}`, buttons, true);
+}
+
+async function selectForForeman(env, state, leadId) {
+  const { ctx } = env;
+  const lead = (await amo.getLeadsByIds(ctx, [leadId]))[0];
+
+  if (!lead) {
+    await say(env, "Сделка не найдена.");
+    return;
+  }
+
+  const slotIndex = amo.findSlotIndex(ctx, lead, state.foremanName);
+
+  if (slotIndex < 0) {
+    await say(env, "В сделке не найдена ваша группа полей. Обратитесь к руководителю.");
+    return;
+  }
+
+  state.flow = { name: "cost", leadId, slotIndex, step: "price", data: { done: {}, files: [] } };
+  await say(env, "Введите желаемую стоимость");
+}
+
+async function handleForeman(env, state, input) {
+  const { ctx } = env;
+  const flow = state.flow;
+  const d = flow.data;
+  const text = input.text;
+
+  if (flow.step === "price") {
+    const value = calc.parseNumber(text);
+
+    if (value === null) {
+      await say(env, MSG_NOT_NUMBER);
+      return true;
+    }
+
+    d.desiredPrice = value;
+    flow.step = "reason";
+    await say(env, "Введите обоснование");
+    return true;
+  }
+
+  if (flow.step === "reason") {
+    if (!text) {
+      await say(env, "Введите обоснование");
+      return true;
+    }
+
+    d.reason = text;
+    flow.step = "files";
+    await say(env, "Прикрепите файлы или нажмите «Продолжить»", [BTN.CONTINUE]);
+    return true;
+  }
+
+  if (flow.step === "files") {
+    if (input.attachments.length > 0) {
+      await say(env, "Файлы получены, загружаю на Яндекс Диск");
+
+      let uploaded = 0;
+
+      for (const attachment of input.attachments) {
+        try {
+          d.files.push(await files.uploadFile(ctx, flow.leadId, "Обоснование пересмотра", attachment));
+          uploaded += 1;
+        } catch (error) {
+          console.error("[Бот монтажников] Ошибка загрузки файла обоснования:", error.message);
+          await say(env, `❌ Не удалось загрузить файл на Яндекс.Диск (${error.message.slice(0, 120)}). Отправьте его ещё раз.`);
+        }
+      }
+
+      if (uploaded > 0) {
+        await say(env, "Файл сохранен на Яндекс.Диске.\nДополните или нажмите «Продолжить».", [BTN.CONTINUE]);
+      }
+
+      return true;
+    }
+
+    if (text !== BTN.CONTINUE) {
+      await say(env, "Прикрепите файлы или нажмите «Продолжить»", [BTN.CONTINUE]);
+      return true;
+    }
+
+    await finishForeman(env, state);
+    return true;
+  }
+
+  return false;
+}
+
+async function finishForeman(env, state) {
+  const { ctx } = env;
+  const flow = state.flow;
+  const d = flow.data;
+  const lead = (await amo.getLeadsByIds(ctx, [flow.leadId]))[0];
+  const slot = amo.readSlot(ctx, lead, flow.slotIndex);
+  const settings = settingsStore.get();
+  const row = settingsStore.findRowByForemanName(settings, state.foremanName);
+  const rates = tariffs(slot, settingsStore.findMotivation(settings, row));
+
+  if (!d.done.fields) {
+    d.links = await files.publicLinks(ctx, d.files);
+
+    const field = await amo.getCostApprovalField(ctx);
+    const noteParts = [
+      slot.note,
+      `Пересмотр стоимости. Желаемая стоимость: ${calc.fmt(d.desiredPrice)}. Обоснование: ${d.reason}` +
+        (d.links.length ? `. Файлы: ${d.links.join(", ")}` : "")
+    ].filter(Boolean);
+
+    await amo.patchLead(ctx, lead.id, {
+      custom_fields_values: [
+        ...amo.slotFieldsPayload(flow.slotIndex, { note: noteParts.join("\n") }),
+        amo.costApprovalPayload(field, true, COST_APPROVAL_REQUESTED, COST_APPROVAL_NOT_NEEDED)
+      ]
+    });
+    await ctx.redisRequest(["SADD", INDEX_KEY, String(lead.id)]);
+    d.done.fields = true;
+  }
+
+  if (!d.done.notify) {
+    await messenger.notify(
+      ctx,
+      row ? [row.managerHandle] : [],
+      "Запрос на пересмотр стоимости\n" +
+        `Монтажник: ${mdSafe(state.foremanName)}\n` +
+        `${deals.contractLabel(ctx, lead)}\n` +
+        `${deals.folderLink(ctx, lead)}\n` +
+        `Текущая цена монтажа: ${calc.fmt(slot.price)}\n` +
+        `Сумма КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
+        `Транспортный: ${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n` +
+        `Доставка: ${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n` +
+        `Желаемая стоимость: ${calc.fmt(d.desiredPrice)}\n` +
+        `Обоснование: ${mdSafe(d.reason)}`,
+      { markdown: true }
+    );
+    d.done.notify = true;
+  }
+
+  state.flow = null;
+  await say(env, "Ваш запрос принят");
+}
+
+// ============================================================
+// Руководитель
+// ============================================================
+
+async function showManagerList(env, state) {
+  const { ctx } = env;
+  const field = await amo.getCostApprovalField(ctx);
+  const members = ((await ctx.redisRequest(["SMEMBERS", INDEX_KEY])).result) || [];
+  const leads = members.length ? await amo.getLeadsByIds(ctx, members) : [];
+  const names = state.managerRows.map((row) => row.foremanName);
+  const mine = [];
+
+  for (const id of members) {
+    const lead = leads.find((item) => String(item.id) === String(id));
+
+    // Запрос уже обработан (или сделка пропала) — убираем из списка.
+    if (!lead || !amo.isCostApprovalRequested(ctx, lead, field, COST_APPROVAL_REQUESTED)) {
+      await ctx.redisRequest(["SREM", INDEX_KEY, String(id)]);
+      continue;
+    }
+
+    if (SALES_PIPELINE_IDS.includes(Number(lead.pipeline_id)) && names.some((name) => deals.belongsToForeman(ctx, lead, name))) {
+      mine.push(lead);
+    }
+  }
+
+  if (mine.length === 0) {
+    await say(env, "Запросов на пересмотр стоимости нет.");
+    return;
+  }
+
+  const lines = [];
+
+  for (let i = 0; i < mine.length; i++) {
+    lines.push(`${i + 1}) ${await deals.dealLine(ctx, mine[i], "accept")}`);
+  }
+
+  const { map, buttons } = deals.buildDealButtons(ctx, mine);
+
+  state.list = { kind: "costMgr", map };
+  await say(env, `Запросы на пересмотр стоимости:\n${lines.join("\n")}`, buttons, true);
+}
+
+async function selectForManager(env, state, leadId) {
+  const { ctx } = env;
+  const lead = (await amo.getLeadsByIds(ctx, [leadId]))[0];
+
+  if (!lead) {
+    await say(env, "Сделка не найдена.");
+    return;
+  }
+
+  const row = state.managerRows.find((item) => deals.belongsToForeman(ctx, lead, item.foremanName));
+  const foremanName = row ? row.foremanName : deals.leadForemanNames(ctx, lead)[0];
+  const slotIndex = amo.findSlotIndex(ctx, lead, foremanName);
+
+  if (slotIndex < 0) {
+    await say(env, `В сделке не найдена группа полей монтажника «${mdSafe(foremanName)}».`);
+    return;
+  }
+
+  state.flow = { name: "costMgr", leadId, foremanName, slotIndex, step: "card", edited: false, data: { done: {} } };
+  await showManagerCard(env, state, lead);
+}
+
+async function loadLead(env, flow) {
+  const lead = (await amo.getLeadsByIds(env.ctx, [flow.leadId]))[0];
+
+  if (!lead) {
+    throw new Error(`Сделка ${flow.leadId} не найдена`);
+  }
+
+  return lead;
+}
+
+const M_PRICE = "Изменить стоимость работ";
+const M_KM = "Изменить КМ";
+const M_TARIFF = "Изменить тариф";
+const M_KTU = "Изменить баллы КТУ";
+const M_REJECT = "ОТКЛОНИТЬ";
+const M_FINISH = "ЗАВЕРШИТЬ ПРАВКИ";
+const B_TRANSPORT = "Транспортный";
+const B_DELIVERY = "Доставка";
+
+async function showManagerCard(env, state, lead) {
+  const { ctx } = env;
+  const flow = state.flow;
+  const slot = amo.readSlot(ctx, lead, flow.slotIndex);
+  const settings = settingsStore.get();
+  const row = settingsStore.findRowByForemanName(settings, flow.foremanName);
+  const rates = tariffs(slot, settingsStore.findMotivation(settings, row));
+
+  flow.step = "card";
+  await say(
+    env,
+    `Монтажник: ${mdSafe(flow.foremanName)}\n` +
+      `${deals.contractLabel(ctx, lead)}\n` +
+      `${deals.folderLink(ctx, lead)}\n` +
+      `Текущая цена монтажа: ${calc.fmt(slot.price)}\n` +
+      `Сумма КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
+      `Транспортный: ${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n` +
+      `Доставка: ${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n` +
+      `Обоснование: ${mdSafe(slot.note || "—")}`,
+    [M_PRICE, M_KM, M_TARIFF, M_KTU, flow.edited ? M_FINISH : M_REJECT],
+    true
+  );
+}
+
+async function setApproval(env, lead, wanted) {
+  const field = await amo.getCostApprovalField(env.ctx);
+
+  await amo.patchLead(env.ctx, lead.id, {
+    custom_fields_values: [amo.costApprovalPayload(field, wanted, COST_APPROVAL_REQUESTED, COST_APPROVAL_NOT_NEEDED)]
+  });
+  await env.ctx.redisRequest(["SREM", INDEX_KEY, String(lead.id)]);
+}
+
+async function handleManager(env, state, input) {
+  const { ctx } = env;
+  const flow = state.flow;
+  const text = input.text;
+  const lead = await loadLead(env, flow);
+  const settings = settingsStore.get();
+  const row = settingsStore.findRowByForemanName(settings, flow.foremanName);
+  const foremanNames = row ? [row.foremanHandle, row.foremanName] : [flow.foremanName];
+  const number = mdSafe(amo.contractNumber(ctx, lead));
+
+  if (flow.step === "card") {
+    if (text === M_PRICE) {
+      flow.step = "price_value";
+      await say(env, "Введите новую стоимость работ (целое число)");
+    } else if (text === M_KM) {
+      flow.step = "km_kind";
+      flow.data.after = "km";
+      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+    } else if (text === M_TARIFF) {
+      flow.step = "km_kind";
+      flow.data.after = "tariff";
+      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+    } else if (text === M_KTU) {
+      const items = filledKtu(amo.readSlot(ctx, lead, flow.slotIndex));
+
+      if (items.length === 0) {
+        await say(env, "Баллы КТУ в сделке не начислены.");
+        await showManagerCard(env, state, lead);
+      } else {
+        flow.step = "ktu_pick";
+        await say(env, "Выберите баллы КТУ для правок", items.map((item) => item.label));
+      }
+    } else if (text === M_REJECT && !flow.edited) {
+      await setApproval(env, lead, false);
+      await messenger.notify(ctx, foremanNames, `Руководитель отклонил пересмотр стоимости ${number}`);
+      state.flow = null;
+      await say(env, "Пересмотр стоимости отклонён.");
+      await showManagerList(env, state);
+    } else if (text === M_FINISH && flow.edited) {
+      await setApproval(env, lead, false);
+
+      const slot = amo.readSlot(ctx, lead, flow.slotIndex);
+      const rates = tariffs(slot, settingsStore.findMotivation(settings, row));
+
+      await messenger.notify(
+        ctx,
+        foremanNames,
+        `Пересмотр стоимости по ${number} завершён\n` +
+          `Стоимость работ: ${calc.fmt(slot.price)}\n` +
+          `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
+          `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n` +
+          `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`
+      );
+      state.flow = null;
+      await say(env, "Правки сохранены, монтажник уведомлён.");
+      await showManagerList(env, state);
+    } else {
+      await showManagerCard(env, state, lead);
+    }
+
+    return true;
+  }
+
+  if (flow.step === "price_value") {
+    const value = calc.parseInteger(text);
+
+    if (value === null) {
+      await say(env, MSG_NOT_INTEGER);
+      return true;
+    }
+
+    await amo.patchLead(ctx, lead.id, { custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { price: value }) });
+    flow.edited = true;
+    await say(env, "Правки внесены");
+    await showManagerCard(env, state, await loadLead(env, flow));
+    return true;
+  }
+
+  if (flow.step === "km_kind") {
+    if (text !== B_TRANSPORT && text !== B_DELIVERY) {
+      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+      return true;
+    }
+
+    flow.data.kind = text === B_TRANSPORT ? "transport" : "delivery";
+    flow.step = "km_value";
+    await say(env, flow.data.after === "km" ? "Введите новое значение км" : "Введите новое значение тарифа");
+    return true;
+  }
+
+  if (flow.step === "km_value") {
+    const value = calc.parseNumber(text);
+
+    if (value === null) {
+      await say(env, MSG_NOT_NUMBER);
+      return true;
+    }
+
+    const slot = amo.readSlot(ctx, lead, flow.slotIndex);
+    const rates = tariffs(slot, settingsStore.findMotivation(settings, row));
+    const transport = flow.data.kind === "transport";
+    let values;
+
+    if (flow.data.after === "km") {
+      values = transport
+        ? { kmFact: value, tariff: rates.transport, kmFactTotal: calc.round2(rates.transport * value) }
+        : { kmDelivery: value, tariffDelivery: rates.delivery, kmDeliveryTotal: calc.round2(rates.delivery * value) };
+    } else {
+      values = transport
+        ? { tariff: value, kmFactTotal: calc.round2(value * slot.kmFact) }
+        : { tariffDelivery: value, kmDeliveryTotal: calc.round2(value * slot.kmDelivery) };
+    }
+
+    await amo.patchLead(ctx, lead.id, { custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, values) });
+    flow.edited = true;
+    await say(env, "Правки внесены");
+    await showManagerCard(env, state, await loadLead(env, flow));
+    return true;
+  }
+
+  if (flow.step === "ktu_pick") {
+    const chosen = filledKtu(amo.readSlot(ctx, lead, flow.slotIndex)).find((item) => item.label === text);
+
+    if (!chosen) {
+      await showManagerCard(env, state, lead);
+      return true;
+    }
+
+    flow.data.ktuKey = chosen.slotKey;
+    flow.step = "ktu_value";
+    await say(env, "Введите новое значение баллов");
+    return true;
+  }
+
+  if (flow.step === "ktu_value") {
+    const value = calc.parseNumber(text);
+
+    if (value === null) {
+      await say(env, MSG_NOT_NUMBER);
+      return true;
+    }
+
+    await amo.patchLead(ctx, lead.id, {
+      custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { [flow.data.ktuKey]: value })
+    });
+    flow.edited = true;
+    await say(env, "Правки внесены");
+    await showManagerCard(env, state, await loadLead(env, flow));
+    return true;
+  }
+
+  return false;
+}
+
+module.exports = { showForemanList, selectForForeman, handleForeman, showManagerList, selectForManager, handleManager };
