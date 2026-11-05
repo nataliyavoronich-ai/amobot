@@ -34,7 +34,7 @@ const UPCOMING_STATUS = {
 // Таблица 3. Типы задач amoCRM.
 const TASK_TYPE = {
   CONTROL: 1874499,
-  ACCEPT_REPORT: 3190645, // «Принять отчет»
+  ACCEPT_REPORT: 1874568, // «Принять отчет»
   FIXES: 3193621, // «Правки в отчет»
   CONFIRM_MONTAGE: 3172977, // «Подт-ть монтаж»
   MONTAGE_REPORT: 3178069 // «Отчет о монтаже»
