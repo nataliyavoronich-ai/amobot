@@ -517,7 +517,8 @@ async function main() {
 
     // канал: текст по шаблону + фото лестницы + видео КТУ (по одному вложению в сообщении)
     assert.strictEqual(channelPosts.length, 3);
-    assert.match(channelPosts[0].text, /\*\*Договор \/ замерный лист:\*\* 1234[\s\S]*\*\*Бюджет:\*\* 100000[\s\S]*Закрытый каркас[\s\S]*Фотоотчет/);
+    assert.match(channelPosts[0].text, /\*\*Договор \/ замерный лист:\*\* 1234[\s\S]*\*\*Бюджет:\*\* 100000[\s\S]*Закрытый каркас$/);
+    assert.ok(!/Фотоотчет|Папка на Яндекс/.test(channelPosts[0].text), "в канале не должно быть ссылки на папку");
     assert.deepStrictEqual(channelPosts[1].attachments, [{ file_id: "file-1" }]);
   });
 

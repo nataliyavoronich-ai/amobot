@@ -1068,14 +1068,11 @@ async function finalize(env, state, result) {
         const paths = ["Установленная лестница", ...KTU_CATEGORIES.map((item) => item.label)].flatMap(
           (category) => d.files[category] || []
         );
-        const folderUrl = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : "";
-
         await channel.publishReport(ctx, {
           text:
             `**Договор / замерный лист:** ${mdSafe(number)}\n` +
             `**Бюджет:** ${mdSafe(calc.fmt(Number(lead.price) || 0))}\n` +
-            `**Продукт:** ${mdSafe(d.productName)}\n` +
-            `**Фотоотчет:** ${folderUrl}`,
+            `**Продукт:** ${mdSafe(d.productName)}`,
           paths,
           done: d.channelDone
         });
