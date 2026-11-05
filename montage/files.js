@@ -1,6 +1,6 @@
 // ============================================================
 // БОТ МОНТАЖНИКОВ — файлы: разбор вложений и загрузка на Яндекс Диск
-// Папка: amoCRM/Сделка (id …)/Монтаж; ссылка — в поле 557522.
+// Папка: amoCRM/Сделка (id …)/Отчеты и проекты/Монтаж; ссылка — в поле 557522.
 // Файлы грузим ТОЛЬКО на Яндекс Диск (дублирования на Selectel нет).
 // ============================================================
 
@@ -11,6 +11,7 @@ const amo = require("./amo");
 const VIDEO_EXTENSIONS = ["mp4", "mov", "avi", "mkv", "webm", "m4v", "3gp", "mpeg", "mpg", "wmv", "flv"];
 const IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff"];
 
+const REPORTS_FOLDER_NAME = "Отчеты и проекты";
 const MONTAGE_FOLDER_NAME = "Монтаж";
 
 // Вложения сообщения: [{url, kind: "video"|"image"|"other", ext}].
@@ -74,15 +75,16 @@ function attachmentFits(attachment, acceptKind) {
 
 function folderPaths(ctx, leadId) {
   const leadPath = `${ctx.YANDEX_DISK_ROOT_FOLDER}/Сделка (id ${leadId})`;
+  const reportsPath = `${leadPath}/${REPORTS_FOLDER_NAME}`;
 
-  return { leadPath, montagePath: `${leadPath}/${MONTAGE_FOLDER_NAME}` };
+  return { leadPath, reportsPath, montagePath: `${reportsPath}/${MONTAGE_FOLDER_NAME}` };
 }
 
 // T-5.1–5.3: папка сделки, папка «Монтаж», ссылка на неё в поле 557522.
 async function ensureMontageFolder(ctx, leadId) {
-  const { leadPath, montagePath } = folderPaths(ctx, leadId);
+  const { reportsPath, montagePath } = folderPaths(ctx, leadId);
 
-  await ctx.ydEnsureFolderPath(leadPath);
+  await ctx.ydEnsureFolderPath(reportsPath);
   await ctx.ydEnsureFolder(montagePath);
 
   return montagePath;

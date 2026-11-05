@@ -488,7 +488,9 @@ async function main() {
     assert.strictEqual(readSlotValue("tempSteps"), 1);
     assert.strictEqual(readSlotValue("fence"), 10);
     assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.ACT));
-    assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.MONTAGE_FOLDER));
+    const folderLink = leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.MONTAGE_FOLDER).values[0].value;
+
+    assert.ok(decodeURIComponent(folderLink).endsWith("Сделка (id 100)/Отчеты и проекты/Монтаж"), folderLink);
     assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK));
     assert.strictEqual(tasks.find((t) => t.id === 900).result, "Монтаж завершен");
     assert.strictEqual(createdTasks.length, 1);
