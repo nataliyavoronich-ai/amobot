@@ -13,6 +13,7 @@ const amo = require("./amo");
 const calc = require("./calc");
 const files = require("./files");
 const channel = require("./channel");
+const sensei = require("./sensei");
 const messenger = require("./messenger");
 const settingsStore = require("./settings");
 const deals = require("./deals");
@@ -359,6 +360,7 @@ const STEPS = {
   // «Доп хотелки»: записываем в «[Бот] Примечание» и возвращаемся к карточке.
   async wishes(env, state, value) {
     await amo.patchLead(env.ctx, state.flow.leadId, { custom_fields_values: [amo.setValue(FIELD.BOT_NOTE, value)] });
+    await sensei.startProcess(sensei.PROCESS.WISHES, state.flow.leadId);
     await say(env, "Информация отправлена");
     await STEPS.montage_card(env, state);
   },
@@ -1007,14 +1009,19 @@ async function finalize(env, state, result) {
     }
 
     // 4) контрольные задачи
+    // «Заказчик отсутствует» — процесс Sensei 78045; если запустить не удалось
+    // (нет токена/ошибка) — создаём задачу «Контроль» для Редькиной Юлии сами.
     if (!done.absentTask && d.customerAbsent) {
-      await amo.createTask(ctx, {
-        leadId: lead.id,
-        responsibleUserId: USER.REDKINA_YULIA,
-        typeId: TASK_TYPE.CONTROL,
-        text: "Заказчик отсутствовал на объекте. Выслать акт электронно.",
-        hours: 1
-      });
+      if (!(await sensei.startProcess(sensei.PROCESS.CUSTOMER_ABSENT, lead.id))) {
+        await amo.createTask(ctx, {
+          leadId: lead.id,
+          responsibleUserId: USER.REDKINA_YULIA,
+          typeId: TASK_TYPE.CONTROL,
+          text: "Заказчик отсутствовал на объекте. Выслать акт электронно.",
+          hours: 1
+        });
+      }
+
       done.absentTask = true;
     }
 

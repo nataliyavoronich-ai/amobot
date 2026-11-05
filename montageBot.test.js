@@ -3,6 +3,7 @@
 // Реальные amoCRM/мессенджер не используются.
 
 process.env.AMOMESSENGER_MONTAGE_ACCESS_TOKEN = "test-token";
+process.env.SENSEI_TOKEN = "sensei-test";
 
 const assert = require("assert");
 const axios = require("axios");
@@ -31,7 +32,14 @@ const sent = []; // сообщения бота: {text, buttons}
 const channelPosts = [];
 let uploads = 0;
 
-axios.post = async (url, body) => {
+const senseiCalls = [];
+
+axios.post = async (url, body, config) => {
+  if (String(url).includes("api.sensei.plus")) {
+    senseiCalls.push({ url, body, token: config.headers["X-Auth-Sensei-Token"] });
+    return { status: 200, data: {} };
+  }
+
   if (String(url).includes("/files/upload")) {
     uploads += 1;
     return { status: 200, data: { file_id: `file-${uploads}` } };
@@ -709,6 +717,7 @@ async function main() {
   await check("T-6: «Заказчик отсутствует» и «Не получил» (Контроль для Юлии, примечание)", async () => {
     tasks.push({ id: 909, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
     const before = createdTasks.length;
+    const senseiBefore = senseiCalls.length;
 
     await say(foreman, "Загрузить отчет");
     await say(foreman, "🔧 1234");
@@ -724,9 +733,30 @@ async function main() {
     await say(foreman, "", photo);
 
     assert.match(await say(foreman, "Завершить отчёт"), /"Монтаж завершен"/);
-    assert.strictEqual(createdTasks.length, before + 1);
-    assert.strictEqual(createdTasks[before].responsible_user_id, F.USER.REDKINA_YULIA);
-    assert.strictEqual(createdTasks[before].text, "Заказчик отсутствовал на объекте. Выслать акт электронно.");
+    // запущен процесс Sensei 78045 — своя задача не создаётся
+    assert.strictEqual(createdTasks.length, before);
+    assert.strictEqual(senseiCalls.length, senseiBefore + 1);
+    assert.strictEqual(senseiCalls[senseiBefore].url, "https://api.sensei.plus/v1/process/start/78045");
+
+    // запасной вариант: без токена Sensei — «Контроль» для Юлии
+    delete process.env.SENSEI_TOKEN;
+    tasks.push({ id: 911, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
+    await say(foreman, "Загрузить отчет");
+    await say(foreman, "🔧 1234");
+    await say(foreman, "Монтаж завершён");
+    await say(foreman, "Заказчик отсутствует");
+    await say(foreman, "Получил");
+    await uploadAndContinue(foreman);
+    await say(foreman, "Пропустить");
+    await say(foreman, "10");
+    await uploadAndContinue(foreman);
+    await say(foreman, "Пропустить");
+    await say(foreman, "Пропустить");
+    await say(foreman, "", photo);
+    await say(foreman, "Завершить отчёт");
+    process.env.SENSEI_TOKEN = "sensei-test";
+    assert.strictEqual(createdTasks.length, before + 2); // + «Получена оплата» + «Контроль» для Юлии
+    assert.ok(createdTasks.some((t) => t.responsible_user_id === F.USER.REDKINA_YULIA && t.text === "Заказчик отсутствовал на объекте. Выслать акт электронно."));
     assert.ok(notes.includes("Заплатит позже"));
     assert.strictEqual(readSlotValue("kmFact"), 10);
   });
@@ -739,6 +769,11 @@ async function main() {
     await say(foreman, "🔧 1234");
     assert.match(await say(foreman, "Доп хотелки"), /Укажите комментарий/);
     assert.match(await say(foreman, "Хочу розетку"), /Информация отправлена[\s\S]*Монтаж проведён\./);
+    const lastCall = senseiCalls[senseiCalls.length - 1];
+
+    assert.strictEqual(lastCall.url, "https://api.sensei.plus/v1/process/start/72111");
+    assert.deepStrictEqual(lastCall.body, { data: [{ entity_id: 100, entity_type: 1 }] });
+    assert.strictEqual(lastCall.token, "sensei-test");
     assert.strictEqual(leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.BOT_NOTE).values[0].value, "Хочу розетку");
 
     assert.match(await say(foreman, "Промежуточный отчёт"), /Часть изделия установлена\?/);
