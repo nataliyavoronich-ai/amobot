@@ -80,11 +80,6 @@ const COST_APPROVAL_NEW_FIELD_NAME = "[Бот] Согласование стои
 const COST_APPROVAL_REQUESTED = "Согласовать стоимость";
 const COST_APPROVAL_NOT_NEEDED = "Согласование не нужно";
 
-// Особые сотрудники amoCRM (ТЗ 4.6, 4.13).
-const USER = {
-  ACCOUNTANT: 6712869 // задача «Контроль» при получении оплаты
-};
-
 // Таблица 2. Группы полей: «1. …», «2. …», «3. …» (слот монтажника).
 const SLOT_FIELDS = [
   {
@@ -131,7 +126,6 @@ module.exports = {
   COST_APPROVAL_NEW_FIELD_NAME,
   COST_APPROVAL_REQUESTED,
   COST_APPROVAL_NOT_NEEDED,
-  USER,
   SLOT_FIELDS,
   KTU_KINDS
 };

@@ -18,7 +18,7 @@ const messenger = require("./messenger");
 const settingsStore = require("./settings");
 const deals = require("./deals");
 const { recalculatePrice } = require("./ui");
-const { FIELD, PIPELINE, RESULT, TASK_TYPE, USER, SLOT_FIELDS } = require("./constants");
+const { FIELD, PIPELINE, RESULT, SLOT_FIELDS } = require("./constants");
 
 const { mdSafe } = messenger;
 
@@ -895,18 +895,6 @@ async function finishCommon(env, state, resultLabel) {
   await say(env, resultLabel, undefined, true);
 }
 
-// Контрольная задача не должна ломать завершение отчёта: при ошибке
-// (например, в amoCRM нет сотрудника с таким ID) отчёт всё равно закрываем,
-// а руководителю сообщаем, какую задачу нужно создать вручную.
-async function safeCreateTask(ctx, warnings, title, params) {
-  try {
-    await amo.createTask(ctx, params);
-  } catch (error) {
-    console.error(`[Бот монтажников] Не удалось создать задачу (${title}):`, error.message);
-    warnings.push(`не удалось создать задачу ${title} — создайте её вручную (проверьте ID сотрудника ${params.responsibleUserId})`);
-  }
-}
-
 async function finalize(env, state, result) {
   const { ctx } = env;
   const flow = state.flow;
@@ -1035,17 +1023,6 @@ async function finalize(env, state, result) {
       }
 
       done.absentTask = true;
-    }
-
-    if (!done.paymentTask && d.paymentReceived) {
-      await safeCreateTask(ctx, warnings, "«Контроль» бухгалтеру: получена оплата на монтаже", {
-        leadId: lead.id,
-        responsibleUserId: USER.ACCOUNTANT,
-        typeId: TASK_TYPE.CONTROL,
-        text: "Получена оплата на монтаже.",
-        hours: 1
-      });
-      done.paymentTask = true;
     }
 
     // 5) закрытие задачи «Отчет о монтаже»

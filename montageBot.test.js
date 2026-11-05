@@ -511,9 +511,7 @@ async function main() {
     assert.ok(decodeURIComponent(folderLink).endsWith("Сделка (id 100)/Отчеты и проекты/Монтаж"), folderLink);
     assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK));
     assert.strictEqual(tasks.find((t) => t.id === 900).result, "Монтаж завершен");
-    assert.strictEqual(createdTasks.length, 1);
-    assert.strictEqual(createdTasks[0].responsible_user_id, F.USER.ACCOUNTANT);
-    assert.strictEqual(createdTasks[0].text, "Получена оплата на монтаже.");
+    assert.strictEqual(createdTasks.length, 0); // бот сам задач в amoCRM не создаёт
 
     // канал: текст по шаблону + фото лестницы + видео КТУ (по одному вложению в сообщении)
     assert.strictEqual(channelPosts.length, 3);
@@ -776,8 +774,7 @@ async function main() {
     await say(foreman, "", photo);
     await say(foreman, "Завершить отчёт");
     process.env.SENSEI_TOKEN = "sensei-test";
-    assert.strictEqual(createdTasks.length, before + 1); // только «Получена оплата»
-    assert.ok(!createdTasks.some((t) => t.responsible_user_id === F.USER.REDKINA_YULIA));
+    assert.strictEqual(createdTasks.length, before);
     assert.match(await say(manager, "Уведомления"), /не удалось запустить процесс Sensei «Заказчик отсутствует»/);
     assert.ok(notes.includes("Заплатит позже"));
     assert.strictEqual(readSlotValue("kmFact"), 10);
@@ -819,36 +816,6 @@ async function main() {
     assert.ok(link && decodeURIComponent(link.values[0].value).includes("Нужны детали"), "ссылки «Нужны детали» должны заменить старую");
     assert.strictEqual(tasks.find((t) => t.id === 908).result, "Промежуточный отчет. Нужны детали");
     assert.match(await say(manager, "Уведомления"), /Монтаж по договору № 1234 не завершен\. Нужны детали\. Монтажник Иванов Иван/);
-  });
-
-  await check("ошибка создания контрольной задачи не мешает завершить отчёт", async () => {
-    const basePost = ctx.amoCrmPost;
-
-    ctx.amoCrmPost = async (url, body) =>
-      url.endsWith("/tasks") ? { status: 400, data: { title: "Bad Request" } } : basePost(url, body);
-
-    tasks.push({ id: 920, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
-    await say(foreman, "Загрузить отчет");
-    await say(foreman, "🔧 1234");
-    await say(foreman, "Монтаж завершён");
-    await say(foreman, "Да");
-    await uploadAndContinue(foreman);
-    await say(foreman, "Получил");
-    await uploadAndContinue(foreman);
-    await say(foreman, "Пропустить");
-    await say(foreman, "10");
-    await uploadAndContinue(foreman);
-    await say(foreman, "Пропустить");
-    await say(foreman, "Пропустить");
-    await say(foreman, "", photo);
-
-    const out = await say(foreman, "Завершить отчёт");
-
-    assert.match(out, /закрыта с результатом "Монтаж завершен"/);
-    assert.strictEqual(tasks.find((t) => t.id === 920).result, "Монтаж завершен");
-    assert.match(await say(manager, "Уведомления"), /не удалось создать задачу «Контроль» бухгалтеру[\s\S]*6712869/);
-
-    ctx.amoCrmPost = basePost;
   });
 
   await check("повторное «Завершить» не плодит задачи и записи", async () => {
