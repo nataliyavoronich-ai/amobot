@@ -54,7 +54,10 @@ function extractAttachments(ctx, message) {
     }
   }
 
-  if (result.length === 0) {
+  // Запасной разбор «любая ссылка в сообщении» — только для сообщений без
+  // текста. Нажатие кнопки («Завершить отчёт») приходит с текстом и может
+  // содержать ссылки на прежние сообщения — файлом это не считаем.
+  if (result.length === 0 && !String((message && message.text) || "").trim()) {
     for (const url of ctx.extractImageUrlsFromMessage(message)) {
       push(url, "");
     }

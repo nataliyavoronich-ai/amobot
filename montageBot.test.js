@@ -369,6 +369,24 @@ async function main() {
     ktu: [{ kind: "Видео общее", points: 5 }]
   };
 
+  console.log("Вложения:");
+  await check("нажатие кнопки со ссылкой на прежнее фото — не файл; фото без текста — файл", () => {
+    const shared = require("./amoSharedUtils");
+    const filesModule = require("./montage/files");
+    const realCtx = { getUrlExtension: shared.getUrlExtension, extractImageUrlsFromMessage: shared.extractImageUrlsFromMessage };
+    const buttonPress = {
+      text: "Завершить отчёт",
+      reply_to: { message: { attachments: [{ type: "photo", photo: { link: "https://api.amo.tm/storage/a.jpg?s=x" } }] } }
+    };
+    const photoMessage = { text: "", attachments: [{ type: "photo", photo: { link: "https://api.amo.tm/storage/b.jpg?s=x" } }] };
+    const videoMessage = { text: "", attachments: [{ type: "video", video: { link: "https://st1.amo.tm/v.mp4?temp_url_sig=1" } }] };
+
+    assert.deepStrictEqual(filesModule.extractAttachments(realCtx, buttonPress), []);
+    assert.strictEqual(filesModule.extractAttachments(realCtx, photoMessage).length, 1);
+    assert.strictEqual(filesModule.extractAttachments(realCtx, photoMessage)[0].kind, "image");
+    assert.strictEqual(filesModule.extractAttachments(realCtx, videoMessage)[0].kind, "video");
+  });
+
   console.log("Настройки виджета:");
   await check("проверка настроек", () => {
     assert.ok(settingsStore.validate(settings).valid);
