@@ -159,7 +159,13 @@ async function showList(env, state) {
   const found = await deals.findReportDeals(ctx, state.foremanName);
 
   if (found.length === 0) {
-    await say(env, "Задачи по загрузке фотоотчёта не найдены.");
+    await say(env, "Задач по загрузке отчета не найдено.");
+
+    // После сообщения «ничего не найдено» показываем главное меню.
+    if (env.sendMenu) {
+      await env.sendMenu(state);
+    }
+
     return;
   }
 

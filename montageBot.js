@@ -196,7 +196,7 @@ async function routeFlow(env, state, input) {
 
 async function processMessage(ctx, incoming) {
   const { directId, userKey, userName, text, attachments } = incoming;
-  const env = { ctx, directId };
+  const env = { ctx, directId, sendMenu: (menuState) => sendMenu(env, menuState) };
 
   await messenger.rememberDirectId(ctx, userName, directId);
 
