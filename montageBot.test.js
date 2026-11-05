@@ -819,6 +819,36 @@ async function main() {
     assert.match(await say(manager, "Уведомления"), /Монтаж по договору № 1234 не завершен\. Нужны детали\. Монтажник Иванов Иван/);
   });
 
+  await check("ошибка создания контрольной задачи не мешает завершить отчёт", async () => {
+    const basePost = ctx.amoCrmPost;
+
+    ctx.amoCrmPost = async (url, body) =>
+      url.endsWith("/tasks") ? { status: 400, data: { title: "Bad Request" } } : basePost(url, body);
+
+    tasks.push({ id: 920, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
+    await say(foreman, "Загрузить отчет");
+    await say(foreman, "🔧 1234");
+    await say(foreman, "Монтаж завершён");
+    await say(foreman, "Да");
+    await uploadAndContinue(foreman);
+    await say(foreman, "Получил");
+    await uploadAndContinue(foreman);
+    await say(foreman, "Пропустить");
+    await say(foreman, "10");
+    await uploadAndContinue(foreman);
+    await say(foreman, "Пропустить");
+    await say(foreman, "Пропустить");
+    await say(foreman, "", photo);
+
+    const out = await say(foreman, "Завершить отчёт");
+
+    assert.match(out, /закрыта с результатом "Монтаж завершен"/);
+    assert.strictEqual(tasks.find((t) => t.id === 920).result, "Монтаж завершен");
+    assert.match(await say(manager, "Уведомления"), /не удалось создать задачу «Контроль» бухгалтеру[\s\S]*6712869/);
+
+    ctx.amoCrmPost = basePost;
+  });
+
   await check("повторное «Завершить» не плодит задачи и записи", async () => {
     const before = createdTasks.length;
 

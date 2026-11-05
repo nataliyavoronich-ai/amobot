@@ -895,6 +895,18 @@ async function finishCommon(env, state, resultLabel) {
   await say(env, resultLabel, undefined, true);
 }
 
+// Контрольная задача не должна ломать завершение отчёта: при ошибке
+// (например, в amoCRM нет сотрудника с таким ID) отчёт всё равно закрываем,
+// а руководителю сообщаем, какую задачу нужно создать вручную.
+async function safeCreateTask(ctx, warnings, title, params) {
+  try {
+    await amo.createTask(ctx, params);
+  } catch (error) {
+    console.error(`[Бот монтажников] Не удалось создать задачу (${title}):`, error.message);
+    warnings.push(`не удалось создать задачу ${title} — создайте её вручную (проверьте ID сотрудника ${params.responsibleUserId})`);
+  }
+}
+
 async function finalize(env, state, result) {
   const { ctx } = env;
   const flow = state.flow;
@@ -1019,7 +1031,7 @@ async function finalize(env, state, result) {
     // (нет токена/ошибка) — создаём задачу «Контроль» для Редькиной Юлии сами.
     if (!done.absentTask && d.customerAbsent) {
       if (!(await sensei.startProcess(sensei.PROCESS.CUSTOMER_ABSENT, lead.id))) {
-        await amo.createTask(ctx, {
+        await safeCreateTask(ctx, warnings, "«Контроль»: заказчик отсутствовал на объекте, выслать акт электронно", {
           leadId: lead.id,
           responsibleUserId: USER.REDKINA_YULIA,
           typeId: TASK_TYPE.CONTROL,
@@ -1032,7 +1044,7 @@ async function finalize(env, state, result) {
     }
 
     if (!done.paymentTask && d.paymentReceived) {
-      await amo.createTask(ctx, {
+      await safeCreateTask(ctx, warnings, "«Контроль» бухгалтеру: получена оплата на монтаже", {
         leadId: lead.id,
         responsibleUserId: USER.ACCOUNTANT,
         typeId: TASK_TYPE.CONTROL,
