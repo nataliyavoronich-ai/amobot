@@ -34,7 +34,7 @@ async function showForemanList(env, state) {
   const found = await deals.findCostRevisionDeals(ctx, state.foremanName);
 
   if (found.length === 0) {
-    await say(env, "Сделок, по которым можно пересмотреть стоимость, нет (пересмотр доступен в течение 24 часов после принятия отчета).");
+    await say(env, "Сделки не найдены.");
     return;
   }
 
@@ -48,7 +48,13 @@ async function showForemanList(env, state) {
   const { map, buttons } = deals.buildDealButtons(ctx, leads);
 
   state.list = { kind: "cost", map };
-  await say(env, `Выберите сделку для пересмотра стоимости:\n${lines.join("\n")}`, buttons, true);
+  await say(
+    env,
+    "Пересмотр стоимости работ доступен в течение 24 часов, по истечении срока стоимость считается принятой.\n\n" +
+      `Пересмотр доступен в сделках:\n${lines.join("\n")}`,
+    buttons,
+    true
+  );
 }
 
 async function selectForForeman(env, state, leadId) {
@@ -67,8 +73,21 @@ async function selectForForeman(env, state, leadId) {
     return;
   }
 
-  state.flow = { name: "cost", leadId, slotIndex, step: "price", data: { done: {}, files: [] } };
-  await say(env, "Введите желаемую стоимость");
+  const slot = amo.readSlot(ctx, lead, slotIndex);
+  const settings = settingsStore.get();
+  const rates = tariffs(slot, settingsStore.findMotivation(settings, settingsStore.findRowByForemanName(settings, state.foremanName)));
+
+  state.flow = { name: "cost", leadId, slotIndex, step: "info", data: { done: {}, files: [] } };
+  await say(
+    env,
+    `Ваш отчёт по договору № ${mdSafe(amo.contractNumber(ctx, lead))} принят руководителем.\n\n` +
+      `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
+      `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
+      `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+      `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`,
+    ["Запросить пересмотр"],
+    true
+  );
 }
 
 async function handleForeman(env, state, input) {
@@ -77,29 +96,26 @@ async function handleForeman(env, state, input) {
   const d = flow.data;
   const text = input.text;
 
-  if (flow.step === "price") {
-    const value = calc.parseNumber(text);
-
-    if (value === null) {
-      await say(env, MSG_NOT_NUMBER);
-      return true;
+  if (flow.step === "info") {
+    if (text === "Запросить пересмотр") {
+      flow.step = "request";
+      await say(env, "Введите желаемую стоимость работы и обоснование для пересмотра.\n\nСтоимость:");
+    } else {
+      await say(env, "Нажмите «Запросить пересмотр».", ["Запросить пересмотр"]);
     }
 
-    d.desiredPrice = value;
-    flow.step = "reason";
-    await say(env, "Введите обоснование");
     return true;
   }
 
-  if (flow.step === "reason") {
+  if (flow.step === "request") {
     if (!text) {
-      await say(env, "Введите обоснование");
+      await say(env, "Введите желаемую стоимость работы и обоснование для пересмотра.\n\nСтоимость:");
       return true;
     }
 
-    d.reason = text;
+    d.request = text;
     flow.step = "files";
-    await say(env, "Прикрепите файлы или нажмите «Продолжить»", [BTN.CONTINUE]);
+    await say(env, "Дополните запрос файлами или воспользуйтесь кнопкой ниже для перехода на следующий шаг.", [BTN.CONTINUE]);
     return true;
   }
 
@@ -120,7 +136,7 @@ async function handleForeman(env, state, input) {
       }
 
       if (uploaded > 0) {
-        await say(env, "Файл сохранен на Яндекс.Диске.\nДополните или нажмите «Продолжить».", [BTN.CONTINUE]);
+        await say(env, "Дополните запрос файлами или воспользуйтесь кнопкой ниже для перехода на следующий шаг.", [BTN.CONTINUE]);
       }
 
       return true;
@@ -152,11 +168,7 @@ async function finishForeman(env, state) {
     d.links = await files.publicLinks(ctx, d.files);
 
     const field = await amo.getCostApprovalField(ctx);
-    const noteParts = [
-      slot.note,
-      `Пересмотр стоимости. Желаемая стоимость: ${calc.fmt(d.desiredPrice)}. Обоснование: ${d.reason}` +
-        (d.links.length ? `. Файлы: ${d.links.join(", ")}` : "")
-    ].filter(Boolean);
+    const noteParts = [d.request + (d.links.length ? `\nФайлы: ${d.links.join(", ")}` : "")];
 
     await amo.patchLead(ctx, lead.id, {
       custom_fields_values: [
@@ -172,16 +184,14 @@ async function finishForeman(env, state) {
     await messenger.notify(
       ctx,
       row ? [row.managerHandle] : [],
-      "Запрос на пересмотр стоимости\n" +
-        `Монтажник: ${mdSafe(state.foremanName)}\n` +
-        `${deals.contractLabel(ctx, lead)}\n` +
-        `${deals.folderLink(ctx, lead)}\n` +
-        `Текущая цена монтажа: ${calc.fmt(slot.price)}\n` +
-        `Сумма КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
-        `Транспортный: ${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n` +
-        `Доставка: ${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n` +
-        `Желаемая стоимость: ${calc.fmt(d.desiredPrice)}\n` +
-        `Обоснование: ${mdSafe(d.reason)}`,
+      `Монтажник ${mdSafe(state.foremanName)} просит пересмотреть стоимость работ.\n\n` +
+        `${deals.contractLabel(ctx, lead)}\n\n` +
+        `${deals.folderLink(ctx, lead)}\n\n` +
+        `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
+        `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
+        `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+        `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
+        `Обоснование для пересмотра: ${mdSafe(d.request)}`,
       { markdown: true }
     );
     d.done.notify = true;
@@ -231,7 +241,7 @@ async function showManagerList(env, state) {
   const { map, buttons } = deals.buildDealButtons(ctx, mine);
 
   state.list = { kind: "costMgr", map };
-  await say(env, `Запросы на пересмотр стоимости:\n${lines.join("\n")}`, buttons, true);
+  await say(env, `Требуется пересмотр стоимости работ в сделках:\n${lines.join("\n")}`, buttons, true);
 }
 
 async function selectForManager(env, state, leadId) {
@@ -267,13 +277,28 @@ async function loadLead(env, flow) {
 }
 
 const M_PRICE = "Изменить стоимость работ";
-const M_KM = "Изменить КМ";
+const M_KM = "Изменить километры";
 const M_TARIFF = "Изменить тариф";
 const M_KTU = "Изменить баллы КТУ";
-const M_REJECT = "ОТКЛОНИТЬ";
-const M_FINISH = "ЗАВЕРШИТЬ ПРАВКИ";
+const M_REJECT = "Отклонить";
+const M_FINISH = "Завершить правки";
 const B_TRANSPORT = "Транспортный";
 const B_DELIVERY = "Доставка";
+const B_SKIP = "Пропустить";
+const B_NEXT = "Далее";
+
+// «КТУ видео общее», «КТУ отзывы» — названия кнопок без технических обозначений.
+function ktuButton(label) {
+  return `КТУ ${label.charAt(0).toLowerCase()}${label.slice(1)}`;
+}
+
+async function showKtuPick(env, flow, items) {
+  flow.step = "ktu_pick";
+  await say(env, "Укажите новое значение баллов КТУ.", [
+    flow.data.ktuTouched ? B_NEXT : B_SKIP,
+    ...items.map((item) => ktuButton(item.label))
+  ]);
+}
 
 async function showManagerCard(env, state, lead) {
   const { ctx } = env;
@@ -286,15 +311,15 @@ async function showManagerCard(env, state, lead) {
   flow.step = "card";
   await say(
     env,
-    `Монтажник: ${mdSafe(flow.foremanName)}\n` +
-      `${deals.contractLabel(ctx, lead)}\n` +
-      `${deals.folderLink(ctx, lead)}\n` +
-      `Текущая цена монтажа: ${calc.fmt(slot.price)}\n` +
-      `Сумма КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
-      `Транспортный: ${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n` +
-      `Доставка: ${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n` +
-      `Обоснование: ${mdSafe(slot.note || "—")}`,
-    [M_PRICE, M_KM, M_TARIFF, M_KTU, flow.edited ? M_FINISH : M_REJECT],
+    `Монтажник ${mdSafe(flow.foremanName)} просит пересмотреть стоимость работ.\n\n` +
+      `${deals.contractLabel(ctx, lead)}\n\n` +
+      `${deals.folderLink(ctx, lead)}\n\n` +
+      `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
+      `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
+      `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+      `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
+      `Обоснование для пересмотра: ${mdSafe(slot.note || "—")}`,
+    [M_PRICE, M_KM, M_KTU, M_TARIFF, flow.edited ? M_FINISH : M_REJECT],
     true
   );
 }
@@ -321,15 +346,15 @@ async function handleManager(env, state, input) {
   if (flow.step === "card") {
     if (text === M_PRICE) {
       flow.step = "price_value";
-      await say(env, "Введите новую стоимость работ (целое число)");
+      await say(env, "Введите новую стоимость работ.");
     } else if (text === M_KM) {
       flow.step = "km_kind";
       flow.data.after = "km";
-      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+      await say(env, "Какой километраж вы хотите изменить?", [B_TRANSPORT, B_DELIVERY]);
     } else if (text === M_TARIFF) {
       flow.step = "km_kind";
       flow.data.after = "tariff";
-      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+      await say(env, "Какой тариф вы хотите изменить?", [B_TRANSPORT, B_DELIVERY]);
     } else if (text === M_KTU) {
       const items = filledKtu(amo.readSlot(ctx, lead, flow.slotIndex));
 
@@ -338,11 +363,11 @@ async function handleManager(env, state, input) {
         await showManagerCard(env, state, lead);
       } else {
         flow.step = "ktu_pick";
-        await say(env, "Выберите баллы КТУ для правок", items.map((item) => item.label));
+        await showKtuPick(env, flow, items);
       }
     } else if (text === M_REJECT && !flow.edited) {
       await setApproval(env, lead, false);
-      await messenger.notify(ctx, foremanNames, `Руководитель отклонил пересмотр стоимости ${number}`);
+      await messenger.notify(ctx, foremanNames, `Руководитель отклонил пересмотр стоимости.\n\nДоговор № ${number}.`);
       state.flow = null;
       await say(env, "Пересмотр стоимости отклонён.");
       await showManagerList(env, state);
@@ -355,11 +380,11 @@ async function handleManager(env, state, input) {
       await messenger.notify(
         ctx,
         foremanNames,
-        `Пересмотр стоимости по ${number} завершён\n` +
-          `Стоимость работ: ${calc.fmt(slot.price)}\n` +
-          `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n` +
-          `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n` +
-          `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`
+        `Стоимость по договору № ${number} пересмотрена.\n\nФинальное значение:\n\n` +
+          `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
+          `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
+          `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+          `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`
       );
       state.flow = null;
       await say(env, "Правки сохранены, монтажник уведомлён.");
@@ -372,23 +397,23 @@ async function handleManager(env, state, input) {
   }
 
   if (flow.step === "price_value") {
-    const value = calc.parseInteger(text);
+    const value = calc.parseNumber(text);
 
     if (value === null) {
-      await say(env, MSG_NOT_INTEGER);
+      await say(env, MSG_NOT_NUMBER);
       return true;
     }
 
     await amo.patchLead(ctx, lead.id, { custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { price: value }) });
     flow.edited = true;
-    await say(env, "Правки внесены");
+    await say(env, `Стоимость работы изменена.\n\nНовая стоимость работ: ${calc.fmt(value)}.`);
     await showManagerCard(env, state, await loadLead(env, flow));
     return true;
   }
 
   if (flow.step === "km_kind") {
     if (text !== B_TRANSPORT && text !== B_DELIVERY) {
-      await say(env, "Что изменить?", [B_TRANSPORT, B_DELIVERY]);
+      await say(env, flow.data.after === "km" ? "Какой километраж вы хотите изменить?" : "Какой тариф вы хотите изменить?", [B_TRANSPORT, B_DELIVERY]);
       return true;
     }
 
@@ -429,24 +454,27 @@ async function handleManager(env, state, input) {
   }
 
   if (flow.step === "ktu_pick") {
-    const chosen = filledKtu(amo.readSlot(ctx, lead, flow.slotIndex)).find((item) => item.label === text);
+    const items = filledKtu(amo.readSlot(ctx, lead, flow.slotIndex));
+    const chosen = items.find((item) => ktuButton(item.label) === text);
 
-    if (!chosen) {
+    if (chosen) {
+      flow.data.ktuKey = chosen.slotKey;
+      flow.step = "ktu_value";
+      await say(env, "Введите новое значение баллов КТУ.");
+    } else if (text === B_SKIP || text === B_NEXT) {
       await showManagerCard(env, state, lead);
-      return true;
+    } else {
+      await showKtuPick(env, flow, items);
     }
 
-    flow.data.ktuKey = chosen.slotKey;
-    flow.step = "ktu_value";
-    await say(env, "Введите новое значение баллов");
     return true;
   }
 
   if (flow.step === "ktu_value") {
-    const value = calc.parseNumber(text);
+    const value = calc.parseInteger(text);
 
     if (value === null) {
-      await say(env, MSG_NOT_NUMBER);
+      await say(env, MSG_NOT_INTEGER);
       return true;
     }
 
@@ -454,8 +482,9 @@ async function handleManager(env, state, input) {
       custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { [flow.data.ktuKey]: value })
     });
     flow.edited = true;
+    flow.data.ktuTouched = true;
     await say(env, "Правки внесены");
-    await showManagerCard(env, state, await loadLead(env, flow));
+    await showKtuPick(env, flow, filledKtu(amo.readSlot(ctx, await loadLead(env, flow), flow.slotIndex)));
     return true;
   }
 

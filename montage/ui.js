@@ -18,8 +18,8 @@ const BTN = {
   BACK: "Назад"
 };
 
-const MSG_NOT_NUMBER = "Не удалось распознать введенное значение. Пожалуйста, введите число";
-const MSG_NOT_INTEGER = "Не удалось распознать введенное значение. Пожалуйста, введите целое число";
+const MSG_NOT_NUMBER = "Не удалось распознать введённое значение, пожалуйста, введите число.";
+const MSG_NOT_INTEGER = "Не удалось распознать введённое значение, пожалуйста, введите целое число.";
 
 function say(env, text, buttons, markdown) {
   return messenger.send(env.ctx, env.directId, text, buttons, markdown ? { markdown: true } : undefined);

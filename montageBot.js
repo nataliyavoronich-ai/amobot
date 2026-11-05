@@ -97,7 +97,7 @@ async function sendMenu(env, state) {
 function dropFlow(state) {
   const flow = state.flow;
 
-  if (flow && flow.name === "report" && flow.idx > 0) {
+  if (flow && flow.name === "report" && flow.cur && flow.data && flow.data.progress) {
     state.drafts = state.drafts || {};
     state.drafts[flow.leadId] = flow;
   }
@@ -115,7 +115,7 @@ async function runMenuButton(env, state, text) {
   } else if (text === "Подтвердить монтаж") {
     await flowConfirm.showList(env, state, { fromButton: true });
   } else if (text === "Загрузить отчет") {
-    await showReportList(env, state);
+    await flowReport.showList(env, state);
   } else if (text === "Внести правки") {
     await flowFixes.showList(env, state);
   } else if (text === "Отчет") {
@@ -132,49 +132,6 @@ async function runMenuButton(env, state, text) {
     await flowAccept.showList(env, state);
   }
 
-}
-
-// T-6.2: список «Монтажи в работе» / «Снятие лекал».
-async function showReportList(env, state) {
-  const { ctx } = env;
-  const found = await deals.findReportDeals(ctx, state.foremanName);
-
-  if (found.length === 0) {
-    await say(env, "Задачи по загрузке фотоотчета не найдены");
-    return;
-  }
-
-  const work = deals.sortByTerms(ctx, found.filter((item) => Number(item.lead.pipeline_id) !== 3797814)).map((item) => item.lead);
-  const lekal = deals.sortByTerms(ctx, found.filter((item) => Number(item.lead.pipeline_id) === 3797814)).map((item) => item.lead);
-  const lines = ["Незавершённые монтажи:"];
-  const ordered = [];
-
-  async function addGroup(title, leads) {
-    if (leads.length === 0) {
-      return;
-    }
-
-    lines.push(title);
-
-    for (let i = 0; i < leads.length; i++) {
-      lines.push(`${i + 1}) ${await deals.dealLine(ctx, leads[i], "report")}`);
-    }
-
-    ordered.push(...leads);
-  }
-
-  await addGroup("Монтажи в работе:", work);
-  await addGroup("Снятие лекал:", lekal);
-
-  const emoji = (lead) => {
-    const id = Number(lead.pipeline_id);
-
-    return id === 3797814 ? "📐 " : id === 4689981 ? "↩️ " : "🛠 ";
-  };
-  const { map, buttons } = deals.buildDealButtons(ctx, ordered, emoji);
-
-  state.list = { kind: "report", map };
-  await say(env, lines.join("\n"), buttons, true);
 }
 
 async function selectFromList(env, state, kind, leadId) {

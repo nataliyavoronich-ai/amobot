@@ -393,6 +393,14 @@ async function main() {
 
   console.log("Сценарии:");
 
+  const video = [{ url: "https://files.test/v.mp4", kind: "video", ext: "mp4" }];
+
+  async function uploadAndContinue(who, label = "Продолжить", files = photo) {
+    assert.match(await say(who, "", files), /Дополните фотоотчёт новыми файлами/);
+
+    return say(who, label);
+  }
+
   await check("T-1: чужого не пускаем, своего — в меню", async () => {
     assert.match(await say(stranger, "старт"), /Пользователь не найден/);
 
@@ -402,64 +410,63 @@ async function main() {
     assert.ok(sent[0].buttons.includes("Загрузить отчет") && sent[0].buttons.includes("Уведомления"));
   });
 
-  await check("T-6: список задач и карточка", async () => {
+  await check("T-6: список («🔧») и карточка «Монтаж проведён»", async () => {
     const list = await say(foreman, "Загрузить отчет");
 
-    assert.match(list, /Монтажи в работе/);
-    assert.match(list, /1234/);
-    assert.deepStrictEqual(sent[0].buttons, ["🛠 1234"]);
+    assert.match(list, /Незавершённые монтажи:\nМонтажи в работе:\n1\) /);
+    assert.deepStrictEqual(sent[0].buttons, ["🔧 1234"]);
 
-    const card = await say(foreman, "🛠 1234");
+    const card = await say(foreman, "🔧 1234");
 
-    assert.match(card, /Закрытый каркас/);
-    assert.match(card, /Монтаж проведен\?/);
+    assert.match(card, /Монтаж проведён\.\nОстаток платежа: 50000\nАдрес объекта: ул\. Тестовая, 16/);
+    assert.deepStrictEqual(sent[0].buttons, ["Перенос монтажа", "Промежуточный отчёт", "Монтаж завершён", "Доп хотелки"]);
   });
 
-  await check("T-6: полный отчёт «Монтаж завершен»", async () => {
-    await say(foreman, "Да");
+  await check("T-6: «Монтаж завершён» — акт, оплата, пробеги, КТУ, доп. работы, лестница, канал", async () => {
+    assert.match(await say(foreman, "Монтаж завершён"), /Акт клиентом подписан\?/);
+    assert.deepStrictEqual(sent[0].buttons, ["Да", "Загрузить акт отказа от подписи", "Заказчик отсутствует"]);
+    assert.match(await say(foreman, "Да"), /фото акта выполненных работ/);
+    assert.match(await uploadAndContinue(foreman), /Оплата от клиента получена\./);
+    assert.match(await say(foreman, "Получил"), /фото чека/);
+    assert.match(await uploadAndContinue(foreman), /пробега доставки/);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить"]);
+    assert.match(await say(foreman, "20"), /транспортного пробега \(без доставки\)/);
+    assert.match(await say(foreman, "abc"), /введите число\./);
+    assert.match(await say(foreman, "100"), /скрин навигатора/);
 
-    const answers = [
-      ["1", /Монтаж врем\.ступеней/], // tempSteps → фото
-      ["Пропустить", /Установлены ограждения\. Введите/],
-      ["10", /фото: «Установлены ограждения»/],
-      ["Пропустить", /Установлена площадка/],
-      ["0", /Установлен навес/],
-      ["0", /Установлены сваи/],
-      ["0", /фальшпола/],
-      ["0", /Чистовая отделка выполнена/],
-      ["Да", /фото: «Чистовая отделка»/],
-      ["Пропустить", /Доп\.работы\. Введите/],
-      ["3", /фото: «Доп\.работы»/],
-      ["Пропустить", /Опишите/],
-      ["Монтаж полок", /фото установленной лестницы/]
-    ];
+    // блок КТУ
+    assert.match(await uploadAndContinue(foreman), /Укажите, что сделано для баллов КТУ\./);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "Видео общее", "Видео таймлапс", "Видео отзыв клиента", "Отзывы"]);
+    assert.match(await say(foreman, "Видео общее"), /Видео общее/);
+    assert.match(await say(foreman, "", photo), /нужно прислать видео/);
+    assert.match(await uploadAndContinue(foreman, "Продолжить", video), /баллов КТУ/);
+    assert.deepStrictEqual(sent[0].buttons, ["Далее", "Видео таймлапс", "Видео отзыв клиента", "Отзывы"]);
 
-    for (const [text, expected] of answers) {
-      const out = await say(foreman, text);
+    // доп. работы (группа 1 — металл)
+    assert.match(await say(foreman, "Далее"), /Укажите доп\. работы\./);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "Монтаж врем. ступеней", "Чистовая отделка", "Установленные ограждения", "Доп. работы"]);
+    assert.match(await say(foreman, "Монтаж врем. ступеней"), /фото дополнительной работы/);
+    await uploadAndContinue(foreman);
+    assert.deepStrictEqual(sent[0].buttons, ["Далее", "Чистовая отделка", "Установленные ограждения", "Доп. работы"]);
+    await say(foreman, "Чистовая отделка");
+    await uploadAndContinue(foreman);
+    assert.match(await say(foreman, "Установленные ограждения"), /м\/п/);
+    assert.match(await say(foreman, "10.5"), /введите целое число\./);
+    await say(foreman, "10");
+    await uploadAndContinue(foreman);
+    assert.match(await say(foreman, "Доп. работы"), /часов/);
+    await say(foreman, "3");
+    await uploadAndContinue(foreman);
+    assert.deepStrictEqual(sent[0].buttons, ["Далее"]);
+    assert.match(await say(foreman, "Далее"), /общий комментарий/);
+    assert.match(await say(foreman, "Монтаж полок"), /фото\/видео установленной лестницы/);
+    assert.match(await say(foreman, "", photo), /Дополните фотоотчёт/);
+    assert.deepStrictEqual(sent[sent.length - 1].buttons, ["Завершить отчёт"]);
 
-      assert.match(out, expected, `после «${text}» ждали ${expected}, получили: ${out}`);
-    }
-
-    assert.match(await say(foreman, "", photo), /Файл сохранен на Яндекс\.Диске/);
-    assert.match(await say(foreman, "Завершить загрузку"), /общее видео/);
-    assert.match(await say(foreman, "Пропустить"), /таймлапс/);
-    assert.match(await say(foreman, "Пропустить"), /транспортный пробег/);
-    assert.match(await say(foreman, "abc"), /введите число/);
-    assert.match(await say(foreman, "100"), /пробег доставки/);
-    assert.match(await say(foreman, "20"), /навигатора/);
-    assert.match(await say(foreman, "Пропустить"), /Остаток платежа: 50000/);
-    assert.match(await say(foreman, "Да"), /чека/);
-    assert.match(await say(foreman, "Пропустить"), /Акт подписан/);
-    assert.match(await say(foreman, "Да"), /акта выполненных работ/);
-    assert.match(await say(foreman, "", photo), /Файл сохранен/);
-    assert.match(await say(foreman, "Завершить загрузку"), /видео-отзыв/);
-    assert.match(await say(foreman, "Пропустить"), /отзыв в отзовике/);
-    assert.match(await say(foreman, "Нет"), /хотелки/);
-    assert.match(await say(foreman, "Хочу розетку у лестницы"), /Проверьте данные/);
-
-    const done = await say(foreman, "Завершить отчет");
+    const done = await say(foreman, "Завершить отчёт");
 
     assert.match(done, /закрыта с результатом "Монтаж завершен"/);
+    assert.match(done, /Задачи по загрузке фотоотчёта не найдены/); // возврат к началу Т6
 
     // Цена: (33800 + 24000*0.01) * 1.02 = 34721
     assert.strictEqual(readSlotValue("price"), 34721);
@@ -467,37 +474,32 @@ async function main() {
     assert.strictEqual(readSlotValue("kmFactTotal"), 2000);
     assert.strictEqual(readSlotValue("kmDeliveryTotal"), 200);
     assert.strictEqual(readSlotValue("tariff"), 20);
+    assert.strictEqual(readSlotValue("ktuVideo"), 5);
     assert.ok(readSlotValue("date") > 0);
     assert.strictEqual(readSlotValue("note"), "Монтаж полок");
-    assert.ok(String(leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.PHOTO_LINK).values[0].value).includes("https://disk.test/"));
+    assert.strictEqual(readSlotValue("tempSteps"), 1);
+    assert.strictEqual(readSlotValue("fence"), 10);
     assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.ACT));
     assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.MONTAGE_FOLDER));
+    assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK));
     assert.strictEqual(tasks.find((t) => t.id === 900).result, "Монтаж завершен");
-    // канал: текст по шаблону + файл «Установленная лестница» (по одному вложению в сообщении)
-    assert.strictEqual(channelPosts.length, 2);
-    assert.match(channelPosts[0].text, /\*\*Договор \/ замерный лист:\*\* 1234[\s\S]*\*\*Бюджет:\*\* 100000[\s\S]*Закрытый каркас[\s\S]*Фотоотчет/);
-    assert.deepStrictEqual(channelPosts[1].attachments, [{ file_id: "file-1" }]);
     assert.strictEqual(createdTasks.length, 1);
     assert.strictEqual(createdTasks[0].responsible_user_id, F.USER.ACCOUNTANT);
     assert.strictEqual(createdTasks[0].text, "Получена оплата на монтаже.");
-  });
 
-  await check("файлы лежат под нужными именами (категория, без перезаписи)", () => {
-    // имена формируются в files.uploadFile: «Установленная лестница.jpg», «Акт выполненных работ.jpg»
-    const link = leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.PHOTO_LINK).values[0].value;
-
-    assert.ok(decodeURIComponent(link).includes("Установленная лестница.jpg"));
-    assert.ok(decodeURIComponent(link).includes("Монтаж/") || decodeURIComponent(link).includes("Монтаж"));
+    // канал: текст по шаблону + фото лестницы + видео КТУ (по одному вложению в сообщении)
+    assert.strictEqual(channelPosts.length, 3);
+    assert.match(channelPosts[0].text, /\*\*Договор \/ замерный лист:\*\* 1234[\s\S]*\*\*Бюджет:\*\* 100000[\s\S]*Закрытый каркас[\s\S]*Фотоотчет/);
+    assert.deepStrictEqual(channelPosts[1].attachments, [{ file_id: "file-1" }]);
   });
 
   await check("T-7: руководитель принимает отчёт", async () => {
     tasks.push({ id: 901, task_type_id: F.TASK_TYPE.ACCEPT_REPORT, is_completed: false, entity_id: 100, updated_at: NOW });
 
-    // руководитель должен хоть раз написать боту, чтобы получить уведомления
     assert.match(await say(manager, "старт"), /Руководитель монтажной бригады/);
     assert.match(await say(manager, "Принять отчет"), /Принять отчет:\n1\)/);
-    assert.match(await say(manager, "1234"), /Отчет принят\?[\s\S]*Стоимость работ: 34721[\s\S]*Сумма баллов КТУ: 0/);
-    assert.match(await say(manager, "Принять отчет"), /Начислены баллы КТУ/);
+    assert.match(await say(manager, "1234"), /Отчет принят\?[\s\S]*Стоимость работ: 34721[\s\S]*Сумма баллов КТУ: 5/);
+    assert.match(await say(manager, "Принять отчет"), /Начислены баллы КТУ[\s\S]*Видео общее: 5/);
     assert.match(await say(manager, "Далее"), /Стоимость работ: 34721[\s\S]*Описание расчета[\s\S]*Базовый тариф/);
     assert.match(await say(manager, "Внести правки стоимость"), /Введите новую стоимость/);
     assert.match(await say(manager, "12 тысяч"), /только из цифр|целое/i);
@@ -507,36 +509,54 @@ async function main() {
     assert.match(await say(manager, "150"), /Правки внесены/);
     assert.strictEqual(readSlotValue("kmFactTotal"), 3000);
 
-    sent.length = 0;
     await say(manager, "Принять");
     assert.strictEqual(tasks.find((t) => t.id === 901).result, "Отчет принят");
-
-    // бригадир получил уведомление, и видит его по кнопке «Уведомления»
     assert.match(await say(foreman, "Уведомления"), /Ваш отчет по 1234 принят руководителем[\s\S]*Стоимость работ: 35000/);
   });
 
-  await check("T-9: правки бригадира (в пределах 24 часов после приёма)", async () => {
+  await check("T-9: правки — пробег, доп. работы, комментарий, КТУ, общее фото, завершение", async () => {
     tasks.push({ id: 902, task_type_id: F.TASK_TYPE.FIXES, is_completed: false, entity_id: 100, updated_at: NOW });
 
     assert.match(await say(foreman, "Внести правки"), /Необходимо дополнить отчет/);
-    assert.match(await say(foreman, "1234"), /Что нужно исправить/);
-    assert.match(await say(foreman, "Пробег"), /Что изменить/);
+    assert.match(await say(foreman, "1234"), /Что нужно исправить\?/);
+    assert.deepStrictEqual(sent[0].buttons, ["Завершить отчёт", "Добавить комментарий", "Загрузить общее фото", "Доп. работы", "Балл КТУ", "Пробег"]);
+
+    assert.match(await say(foreman, "Пробег"), /в какой пробег необходимо внести правки/);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "Доставка", "Транспортный"]);
     await say(foreman, "Доставка");
-    assert.match(await say(foreman, "30"), /Правки сохранены/);
-    assert.strictEqual(readSlotValue("kmDeliveryTotal"), 300);
-    await say(foreman, "Дополнительные работы");
-    assert.match(await say(foreman, "4"), /пересчитана/);
-    await say(foreman, "Добавить комментарий");
-    await say(foreman, "Исправил данные");
-    assert.match(await say(foreman, "Завершить правки"), /Ваши комментарии приняты/);
+    await say(foreman, "30");
+    assert.deepStrictEqual(sent[0].buttons, ["Далее", "Доставка", "Транспортный"]);
+    assert.match(await say(foreman, "Далее"), /Что нужно исправить/);
+
+    assert.match(await say(foreman, "Доп. работы"), /Укажите доп\. работы\./);
+    await say(foreman, "Доп. работы");
+    await say(foreman, "4");
+    await uploadAndContinue(foreman);
+    assert.match(await say(foreman, "Далее"), /общий комментарий/);
+    assert.match(await say(foreman, "Доп. комментарий"), /Что нужно исправить/); // возврат к шагу 5
+
+    assert.match(await say(foreman, "Добавить комментарий"), /Укажите комментарий\./);
+    assert.match(await say(foreman, "Исправлено"), /Ваши комментарии приняты/);
+
+    assert.match(await say(foreman, "Балл КТУ"), /баллов КТУ/);
+    assert.match(await say(foreman, "Пропустить"), /Что нужно исправить/);
+
+    assert.match(await say(foreman, "Загрузить общее фото"), /Загрузите файлы\./);
+    assert.match(await uploadAndContinue(foreman), /Что нужно исправить/);
+
+    const out = await say(foreman, "Завершить отчёт");
+
+    assert.match(out, /закрыта с результатом "Правки внесены"/);
     assert.strictEqual(tasks.find((t) => t.id === 902).result, "Правки внесены");
+    assert.strictEqual(readSlotValue("kmDeliveryTotal"), 300);
+    assert.strictEqual(readSlotValue("extraHours"), 4);
+    // (34800 + 24000*0.01) * 1.02 = 35740.8
+    assert.strictEqual(readSlotValue("price"), 35741);
+    assert.match(await say(manager, "Уведомления"), /внёс правки в отчёт по договору № 1234/);
   });
 
-  await check("T-11: пересмотр стоимости → руководитель завершает", async () => {
-    // для T-11 «Принять отчет» закрыта только что (id 901) — проходит окно 24 часа
-    settingsStore.set({ ...settingsStore.get() });
+  await check("T-11: бригадир запрашивает пересмотр, руководитель правит и завершает", async () => {
     const approvalField = { id: 777, type: "select", enums: [{ id: 1, value: "Согласовать стоимость" }, { id: 2, value: "Согласование не нужно" }] };
-
     const baseGet = ctx.amoCrmGet;
 
     ctx.amoCrmGet = async (url, params) =>
@@ -544,23 +564,35 @@ async function main() {
         ? { status: 200, data: { _embedded: { custom_fields: [{ name: "[Бот] Согласование стоимости(new)", ...approvalField }] } } }
         : baseGet(url, params);
 
-    assert.match(await say(foreman, "Пересмотр стоимости"), /Выберите сделку/);
-    assert.match(await say(foreman, "1234"), /желаемую стоимость/);
-    assert.match(await say(foreman, "50000"), /обоснование/);
-    assert.match(await say(foreman, "Сложный подъём"), /Прикрепите файлы/);
+    assert.match(await say(foreman, "Пересмотр стоимости"), /доступен в течение 24 часов[\s\S]*Пересмотр доступен в сделках/);
+    assert.match(await say(foreman, "1234"), /Ваш отчёт по договору № 1234 принят руководителем\.[\s\S]*Стоимость работ: 35741/);
+    assert.deepStrictEqual(sent[0].buttons, ["Запросить пересмотр"]);
+    assert.match(await say(foreman, "Запросить пересмотр"), /желаемую стоимость работы и обоснование[\s\S]*Стоимость:/);
+    assert.match(await say(foreman, "50000. Сложный подъём"), /Дополните запрос файлами/);
     assert.match(await say(foreman, "Продолжить"), /Ваш запрос принят/);
     assert.strictEqual(leads[100].custom_fields_values.find((f) => f.field_id === 777).values[0].value, "Согласовать стоимость");
+    assert.strictEqual(readSlotValue("note"), "50000. Сложный подъём");
 
-    assert.match(await say(manager, "Пересмотр стоимости"), /Запросы на пересмотр стоимости/);
-    assert.match(await say(manager, "1234"), /Текущая цена монтажа/);
-    assert.deepStrictEqual(sent[0].buttons.slice(-1), ["ОТКЛОНИТЬ"]);
+    assert.match(await say(manager, "Уведомления"), /Монтажник Иванов Иван просит пересмотреть стоимость работ\.[\s\S]*Обоснование для пересмотра: 50000/);
+    assert.match(await say(manager, "Пересмотр стоимости"), /Требуется пересмотр стоимости работ в сделках/);
+    assert.match(await say(manager, "1234"), /Обоснование для пересмотра/);
+    assert.deepStrictEqual(sent[0].buttons, ["Изменить стоимость работ", "Изменить километры", "Изменить баллы КТУ", "Изменить тариф", "Отклонить"]);
     await say(manager, "Изменить стоимость работ");
-    await say(manager, "40000");
-    assert.deepStrictEqual(sent[sent.length - 1].buttons.slice(-1), ["ЗАВЕРШИТЬ ПРАВКИ"]);
-    await say(manager, "ЗАВЕРШИТЬ ПРАВКИ");
+    assert.match(await say(manager, "40000"), /Стоимость работы изменена\.\n\nНовая стоимость работ: 40000\./);
+    assert.strictEqual(sent[sent.length - 1].buttons.slice(-1)[0], "Завершить правки");
+
+    assert.match(await say(manager, "Изменить баллы КТУ"), /новое значение баллов КТУ/);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "КТУ видео общее"]);
+    await say(manager, "КТУ видео общее");
+    assert.match(await say(manager, "7"), /Правки внесены/);
+    assert.strictEqual(readSlotValue("ktuVideo"), 7);
+    assert.deepStrictEqual(sent[sent.length - 1].buttons, ["Далее", "КТУ видео общее"]);
+    await say(manager, "Далее");
+
+    await say(manager, "Завершить правки");
     assert.strictEqual(readSlotValue("price"), 40000);
     assert.strictEqual(leads[100].custom_fields_values.find((f) => f.field_id === 777).values[0].value, "Согласование не нужно");
-    assert.match(await say(foreman, "Уведомления"), /Пересмотр стоимости по 1234 завершён[\s\S]*40000/);
+    assert.match(await say(foreman, "Уведомления"), /Стоимость по договору № 1234 пересмотрена\.[\s\S]*Финальное значение[\s\S]*Стоимость работ: 40000/);
 
     ctx.amoCrmGet = baseGet;
   });
@@ -598,14 +630,14 @@ async function main() {
   await check("T-3: предстоящие монтажи (бригадир и руководитель)", async () => {
     const out = await say(foreman, "Предстоящие монтажи");
 
-    assert.match(out, /Предстоящие монтажи:\n1\. 15\.12\.2026, 1234, Закрытый каркас, Кол-во этажей: 2\./);
-    assert.match(out, /2\. 15\.12\.2026, 777, Деревянная лестница/);
+    assert.match(out, /15\.12\.2026, 1234, Закрытый каркас, Кол-во этажей: 2\./);
+    assert.match(out, /15\.12\.2026, 777, Деревянная лестница/);
     assert.match(await say(manager, "Предстоящие монтажи"), /Иванов Иван\n1\. [^\n]*1234/);
   });
 
   await check("T-4: подтвердить монтаж — перенос выезда и дефект", async () => {
     tasks.push({ id: 904, task_type_id: F.TASK_TYPE.CONFIRM_MONTAGE, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
-    tasks.push({ id: 910, task_type_id: F.TASK_TYPE.CONFIRM_MONTAGE, is_completed: false, entity_id: 100, complete_till: NOW - 5 * 86400, updated_at: NOW }); // не на сегодня
+    tasks.push({ id: 910, task_type_id: F.TASK_TYPE.CONFIRM_MONTAGE, is_completed: false, entity_id: 100, complete_till: NOW - 5 * 86400, updated_at: NOW });
 
     assert.match(await say(foreman, "Подтвердить монтаж"), /Подтвердите выезд:\n1\) 15\.12\.2026/);
     assert.match(await say(foreman, "1234"), /Уточнить у Заказчика/);
@@ -630,77 +662,104 @@ async function main() {
     assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK));
   });
 
-  await check("T-6: перенос выезда, заказчик отсутствовал → задача «Контроль» Юлии", async () => {
+  await check("T-6 лекала: «Перенос выезда» (комментарий → примечание → список)", async () => {
     tasks.push({ id: 906, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 101, complete_till: NOW, updated_at: NOW });
 
     const list = await say(foreman, "Загрузить отчет");
 
     assert.match(list, /Снятие лекал:\n1\) 15\.12\.2026/);
-    assert.deepStrictEqual(sent[0].buttons.includes("📐 777"), true);
-    assert.match(await say(foreman, "📐 777"), /Лекалы сняты\?/);
+    assert.ok(sent[0].buttons.includes("📐 777"));
+
+    const card = await say(foreman, "📐 777");
+
+    assert.match(card, /Лекала сняты[\s\S]*Монтаж каркаса[\s\S]*ул\. Ленина, 32[\s\S]*Договор № 777/);
+    assert.deepStrictEqual(sent[0].buttons, ["Лекала сняты", "Перенос выезда"]);
     assert.match(await say(foreman, "Перенос выезда"), /Укажите комментарий/);
-    assert.match(await say(foreman, "Нет доступа в дом"), /Заказчик отсутствовал/);
 
-    const before = createdTasks.length;
+    const out = await say(foreman, "Нет доступа в дом");
 
-    assert.match(await say(foreman, "Да"), /закрыта с результатом "Перенос выезда"/);
+    assert.match(out, /закрыта с результатом "Перенос выезда"/);
     assert.strictEqual(tasks.find((t) => t.id === 906).result, "Перенос выезда");
-    assert.strictEqual(createdTasks.length, before + 1);
-    assert.strictEqual(createdTasks[before].responsible_user_id, F.USER.REDKINA_YULIA);
-    assert.strictEqual(createdTasks[before].task_type_id, F.TASK_TYPE.CONTROL);
-    assert.strictEqual(createdTasks[before].text, "Заказчик отсутствовал на объекте. Выслать акт электронно.");
     assert.ok(notes.includes("Нет доступа в дом"));
   });
 
-  await check("T-6: снятие лекал (Дерево производство) — расчёт «Бюджет/100*A»", async () => {
+  await check("T-6 лекала: «Лекала сняты» — пробег, скрин, фото лекал, фото лестницы, цена «Бюджет/100*A»", async () => {
     tasks.push({ id: 907, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 101, complete_till: NOW, updated_at: NOW });
 
     await say(foreman, "Загрузить отчет");
     await say(foreman, "📐 777");
-    assert.match(await say(foreman, "Да"), /Доп\.работы\. Введите/);
-    assert.match(await say(foreman, "3"), /фото: «Доп\.работы»/);
-    await say(foreman, "Пропустить");
-    assert.match(await say(foreman, "Подставка"), /фото лекал/);
-    await say(foreman, "", photo);
-    assert.match(await say(foreman, "Завершить загрузку"), /транспортный пробег/);
-    await say(foreman, "50");
-    await say(foreman, "0");
+    assert.match(await say(foreman, "Лекала сняты"), /числовое значение пробега/);
+    assert.match(await say(foreman, "xx"), /введите число\./);
+    assert.match(await say(foreman, "50"), /скрин навигатора/);
+    assert.match(await uploadAndContinue(foreman), /фото лекал/);
+    assert.match(await uploadAndContinue(foreman), /фото лестницы/);
+    assert.match(await say(foreman, "", photo), /Дополните фотоотчёт/);
+    assert.deepStrictEqual(sent[sent.length - 1].buttons, ["Завершить отчёт"]);
 
-    const out = await say(foreman, "Завершить отчет");
+    const out = await say(foreman, "Завершить отчёт");
 
     assert.match(out, /результатом "Лекалы сняты"/);
-    // (200000/100*1.5 + (3-2)*1000 + 3000*0.01) * 1.02 = 4110.6 → 4111
-    assert.strictEqual(readSlotValue("price", 0, 101), 4111);
+    // (200000/100*1.5 + 3000*0.01) * 1.02 = 3090.6 → 3091
+    assert.strictEqual(readSlotValue("price", 0, 101), 3091);
+    assert.strictEqual(readSlotValue("kmFact", 0, 101), 50);
     assert.strictEqual(tasks.find((t) => t.id === 907).result, "Лекалы сняты");
-    assert.strictEqual(readSlotValue("date", 0, 101), undefined); // дата монтажа — только при «Монтаж завершен»
+    assert.strictEqual(readSlotValue("date", 0, 101), undefined);
   });
 
-  await check("T-6: «Частично» — примечание, очистка ссылки на фото, уведомление руководителю", async () => {
+  await check("T-6: «Заказчик отсутствует» и «Не получил» (Контроль для Юлии, примечание)", async () => {
+    tasks.push({ id: 909, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
+    const before = createdTasks.length;
+
+    await say(foreman, "Загрузить отчет");
+    await say(foreman, "🔧 1234");
+    await say(foreman, "Монтаж завершён");
+    assert.match(await say(foreman, "Заказчик отсутствует"), /Оплата от клиента получена\./);
+    assert.match(await say(foreman, "Не получил"), /Укажите комментарий/);
+    assert.match(await say(foreman, "Заплатит позже"), /пробега доставки/);
+    assert.match(await say(foreman, "Пропустить"), /транспортного пробега/);
+    await say(foreman, "10");
+    await uploadAndContinue(foreman);
+    assert.match(await say(foreman, "Пропустить"), /Укажите доп\. работы\./);
+    assert.match(await say(foreman, "Пропустить"), /фото\/видео установленной лестницы/);
+    await say(foreman, "", photo);
+
+    assert.match(await say(foreman, "Завершить отчёт"), /"Монтаж завершен"/);
+    assert.strictEqual(createdTasks.length, before + 1);
+    assert.strictEqual(createdTasks[before].responsible_user_id, F.USER.REDKINA_YULIA);
+    assert.strictEqual(createdTasks[before].text, "Заказчик отсутствовал на объекте. Выслать акт электронно.");
+    assert.ok(notes.includes("Заплатит позже"));
+    assert.strictEqual(readSlotValue("kmFact"), 10);
+  });
+
+  await check("T-6: «Доп хотелки» и «Промежуточный отчёт» (частично, нужны детали, фото)", async () => {
     tasks.push({ id: 908, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
     leads[100].custom_fields_values.push(field(F.FIELD.PHOTO_LINK, "https://old"));
 
     await say(foreman, "Загрузить отчет");
-    await say(foreman, "🛠 1234");
-    await say(foreman, "Частично");
+    await say(foreman, "🔧 1234");
+    assert.match(await say(foreman, "Доп хотелки"), /Укажите комментарий/);
+    assert.match(await say(foreman, "Хочу розетку"), /Информация отправлена[\s\S]*Монтаж проведён\./);
+    assert.strictEqual(leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.BOT_NOTE).values[0].value, "Хочу розетку");
 
-    // вопросы формулы: временные ступени, ограждения, площадка, навес, сваи, фальшпол — числами, чистовая — «Нет», доп. работы — число
-    const answers = ["0", "0", "0", "0", "0", "0", "Нет", "0"];
+    assert.match(await say(foreman, "Промежуточный отчёт"), /Часть изделия установлена\?/);
+    assert.deepStrictEqual(sent[0].buttons, ["Частично", "Не установлено"]);
+    assert.match(await say(foreman, "Частично"), /Нужны ли детали\?/);
+    assert.match(await say(foreman, "Да"), /Укажите комментарий/);
+    assert.match(await say(foreman, "Нужны кронштейны"), /Добавить фото\?/);
+    assert.match(await say(foreman, "Да"), /Загрузите фото/);
+    assert.match(await uploadAndContinue(foreman), /числовое значение пробега/);
+    assert.match(await say(foreman, "10"), /скрин навигатора/);
+    assert.match(await uploadAndContinue(foreman), /фото\/видео установленной лестницы/);
+    assert.match(await say(foreman, "", photo), /Дополните фотоотчёт/);
 
-    for (const answer of answers) {
-      await say(foreman, answer);
-    }
-
-    await say(foreman, "", photo);
-    await say(foreman, "Завершить загрузку");
-    await say(foreman, "10");
-    await say(foreman, "0");
-    await say(foreman, "Пропустить"); // навигатор
-
-    const out = await say(foreman, "Промежуточный отчет. Нужны детали");
+    const out = await say(foreman, "Завершить отчёт");
 
     assert.match(out, /результатом "Промежуточный отчет\. Нужны детали"/);
     assert.ok(notes.includes("Изделие частично установлено"));
-    assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK), "ссылка на фото должна быть очищена");
+    assert.ok(notes.includes("Нужны кронштейны"));
+    const link = leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.PHOTO_LINK);
+
+    assert.ok(link && decodeURIComponent(link.values[0].value).includes("Нужны детали"), "ссылки «Нужны детали» должны заменить старую");
     assert.strictEqual(tasks.find((t) => t.id === 908).result, "Промежуточный отчет. Нужны детали");
     assert.match(await say(manager, "Уведомления"), /Монтаж по договору № 1234 не завершен\. Нужны детали\. Монтажник Иванов Иван/);
   });
@@ -708,8 +767,17 @@ async function main() {
   await check("повторное «Завершить» не плодит задачи и записи", async () => {
     const before = createdTasks.length;
 
-    await say(foreman, "Завершить отчет");
+    await say(foreman, "Завершить отчёт");
     assert.strictEqual(createdTasks.length, before);
+  });
+
+  await check("группы доп. работ: дерево, уличные, ограждения, фальшпол", () => {
+    assert.strictEqual(calc.getExtrasGroup("Деревянная лестница"), "g2");
+    assert.strictEqual(calc.getExtrasGroup("Лестница ДПК"), "g3");
+    assert.strictEqual(calc.getExtrasGroup("Терраса"), "g4");
+    assert.strictEqual(calc.getExtrasGroup("Подоконники"), "g5");
+    assert.strictEqual(calc.getExtrasGroup("Фальшпол (1-м2)"), "g6");
+    assert.strictEqual(calc.getExtrasGroup("Нестандарт"), null);
   });
 
   console.log(`\nПройдено проверок: ${passed}${process.exitCode ? " — ЕСТЬ ОШИБКИ" : " — всё хорошо"}`);

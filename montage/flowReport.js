@@ -1,12 +1,12 @@
 // ============================================================
-// БОТ МОНТАЖНИКОВ — T-6 «Загрузить отчет» (+ расчёт стоимости T-8)
+// БОТ МОНТАЖНИКОВ — T-6 «Загрузить отчет» и T-9 «Внести правки»
+// (общий движок шагов; расчёт стоимости — T-8, calc.js)
 //
-// ВАЖНО: ТЗ не содержит полной схемы переходов T-6 (она в Miro/CSV) и
-// матрицы «продукт → вопросы». Вопросы по продуктам здесь выведены из
-// формул T-8: спрашиваем ровно то, что входит в формулу стоимости
-// продукта (calc.QUESTIONS_BY_GROUP), плюс фото/видео/пробег/оплата/акт/
-// отзывы/хотелки из разделов ТЗ 4.5–4.14. Порядок и тексты вопросов —
-// в таблице шагов ниже, их легко поправить в одном месте.
+// Сценарий реализован по описанию Т6/Т9 (уточнённая версия). Каждый шаг —
+// один из четырёх блоков: выбор кнопкой (choice), число (number), текст
+// (text), загрузка файлов (upload). Текущий блок хранится в flow.cur, а
+// «что дальше» — именем шага (строкой), поэтому незавершённый отчёт
+// целиком сохраняется в Redis и продолжается после перезапуска.
 // ============================================================
 
 const amo = require("./amo");
@@ -16,641 +16,787 @@ const channel = require("./channel");
 const messenger = require("./messenger");
 const settingsStore = require("./settings");
 const deals = require("./deals");
+const { recalculatePrice } = require("./ui");
 const { FIELD, PIPELINE, RESULT, TASK_TYPE, USER, SLOT_FIELDS } = require("./constants");
 
 const { mdSafe } = messenger;
 
-const SKIP = "Пропустить";
-const FINISH_UPLOAD = "Завершить загрузку";
-const FINISH_REPORT = "Завершить отчет";
-const YES = "Да";
-const NO = "Нет";
-const MOVE = "Перенос выезда";
-
-const MSG_NOT_NUMBER = "Не удалось распознать введенное значение. Пожалуйста, введите число";
-
-// Вопросы с числом/выбором и фото к ним.
-const QUESTIONS = {
-  tempSteps: {
-    prompt: "Монтаж/демонтаж временных ступеней (на 1 этаж). Введите число (0 — не выполнялось).",
-    photo: "Монтаж врем.ступеней"
-  },
-  fence: { prompt: "Установлены ограждения. Введите длину, м/п (0 — нет).", photo: "Установлены ограждения" },
-  platform: { prompt: "Установлена площадка. Введите площадь, м² (0 — нет).", photo: "Установлена площадка" },
-  canopy: { prompt: "Установлен навес. Введите площадь, м² (0 — нет).", photo: "Установлен навес" },
-  piles: { prompt: "Установлены сваи. Введите количество, шт (0 — нет).", photo: "Установлены сваи" },
-  falsefloor: {
-    prompt: "Монтаж и изготовление по месту фальшпола. Введите площадь, м² (0 — не было).",
-    photo: "Монтаж и изготовление по месту фальшпола"
-  },
-  finish: { prompt: "Чистовая отделка выполнена?", choice: true, photo: "Чистовая отделка" },
-  extraHours: { prompt: "Доп.работы. Введите количество часов (0 — не было).", photo: "Доп.работы", describe: true },
-  amount: { prompt: "Монтаж изделия. Введите объём монтажа, м/п или м² (в зависимости от продукта)." }
+const B = {
+  CONTINUE: "Продолжить",
+  FINISH_REPORT: "Завершить отчёт",
+  SKIP: "Пропустить",
+  NEXT: "Далее",
+  YES: "Да",
+  NO: "Нет"
 };
 
-// Загрузки: id шага → категория (имя файла на Диске) и тип файла.
-const UPLOADS = {
-  photo_main: { cat: "Установленная лестница", kind: "image", required: true, prompt: "Прикрепите фото установленной лестницы." },
-  photo_lekal: { cat: "Фото лекал", kind: "image", required: true, prompt: "Прикрепите фото лекал." },
-  video_general: { cat: "Видео общее", kind: "video", prompt: "Прикрепите общее видео монтажа (или нажмите «Пропустить»).", ktu: "ktuVideo", ktuLabel: "Видео общее" },
-  video_timelapse: { cat: "Видео таймлапс", kind: "video", prompt: "Прикрепите видео-таймлапс (или нажмите «Пропустить»).", ktu: "ktuTimelapse", ktuLabel: "Видео таймлапс" },
-  navigator: { cat: "Скрин навигатора", kind: "image", prompt: "Прикрепите скриншот навигатора с пробегом (или нажмите «Пропустить»)." },
-  receipt: { cat: "Фото чека", kind: "image", prompt: "Прикрепите фото чека (или нажмите «Пропустить»)." },
-  review_video: { cat: "Видео-отзыв клиента", kind: "video", prompt: "Прикрепите видео-отзыв клиента (или нажмите «Пропустить»).", ktu: "ktuReviewVideo", ktuLabel: "Видео-отзыв клиента" }
-};
+const MSG_NOT_NUMBER = "Не удалось распознать введённое значение, пожалуйста, введите число.";
+const MSG_NOT_INTEGER = "Не удалось распознать введённое значение, пожалуйста, введите целое число.";
+const MSG_ADD_FILES = "Дополните фотоотчёт новыми файлами или воспользуйтесь кнопкой ниже для перехода на следующий шаг.";
 
 // ------------------------------------------------------------
-// Вспомогательное
+// Справочники блоков
+// ------------------------------------------------------------
+
+// Доп. работы по группам продуктов: type "flag" — в поле 1; "int" — целое число.
+const HOURS = { id: "hours", label: "Доп. работы", key: "extraHours", type: "int", prompt: "Укажите количество часов." };
+
+const EXTRA_OPTIONS = {
+  g1: [
+    { id: "temp", label: "Монтаж врем. ступеней", key: "tempSteps", type: "flag" },
+    { id: "finish", label: "Чистовая отделка", key: "finish", type: "flag" },
+    { id: "fence", label: "Установленные ограждения", key: "fence", type: "int", prompt: "Укажите количество, м/п." },
+    HOURS
+  ],
+  g2: [{ id: "untemp", label: "Демонтаж временных ступеней", key: "tempSteps", type: "flag" }],
+  g3: [
+    { id: "platform", label: "Установлена площадка", key: "platform", type: "int", prompt: "Укажите количество, м²." },
+    { id: "canopy", label: "Установлен навес", key: "canopy", type: "int", prompt: "Укажите количество, м²." },
+    { id: "piles", label: "Установлены сваи", key: "piles", type: "int", prompt: "Укажите количество, шт." },
+    { id: "fence", label: "Установлены ограждения", key: "fence", type: "int", prompt: "Укажите количество, м/п." },
+    HOURS
+  ],
+  g4: [HOURS],
+  g5: [HOURS],
+  g6: [
+    { id: "falsefloor", label: "Монтаж и Изгот-е по месту", key: "falsefloor", type: "int", prompt: "Укажите количество, м²." },
+    HOURS
+  ]
+};
+
+// Категории КТУ: подпись кнопки/папки → поле слота и название в настройках «Баллы КТУ».
+const KTU_CATEGORIES = [
+  { label: "Видео общее", slotKey: "ktuVideo", settingsLabel: "Видео общее" },
+  { label: "Видео таймлапс", slotKey: "ktuTimelapse", settingsLabel: "Видео таймлапс" },
+  { label: "Видео отзыв клиента", slotKey: "ktuReviewVideo", settingsLabel: "Видео-отзыв клиента" },
+  { label: "Отзывы", slotKey: "ktuReviewSite", settingsLabel: "Отзыв в отзовике или Яндексе" }
+];
+
+// ------------------------------------------------------------
+// Отправка и блоки
 // ------------------------------------------------------------
 
 function say(env, text, buttons, markdown) {
   return messenger.send(env.ctx, env.directId, text, buttons, markdown ? { markdown: true } : undefined);
 }
 
-function stepKind(stepId) {
-  return stepId.split(":")[0];
+function data(state) {
+  return state.flow.data;
 }
 
-function stepArg(stepId) {
-  return stepId.split(":")[1];
-}
+// Показать текущий блок пользователю (и при повторном вопросе после ошибки/перезапуска).
+async function present(env, state) {
+  const cur = state.flow.cur;
 
-function currentStep(flow) {
-  return flow.steps[flow.idx];
-}
+  if (cur.type === "upload") {
+    const buttons = [];
 
-function insertAfterCurrent(flow, stepId) {
-  if (flow.steps[flow.idx + 1] !== stepId) {
-    flow.steps.splice(flow.idx + 1, 0, stepId);
-  }
-}
+    if (cur.files.length > 0) {
+      buttons.push(cur.finishLabel || B.CONTINUE);
+    } else if (cur.skipLabel) {
+      buttons.push(cur.skipLabel);
+    }
 
-function uploadDefinition(flow, stepId) {
-  if (UPLOADS[stepId]) {
-    return UPLOADS[stepId];
+    await say(env, cur.prompt, buttons.length ? buttons : undefined);
+    return;
   }
 
-  if (stepKind(stepId) === "p") {
-    return { cat: QUESTIONS[stepArg(stepId)].photo, kind: "image", prompt: `Прикрепите фото: «${QUESTIONS[stepArg(stepId)].photo}» (или нажмите «Пропустить»).` };
+  if (cur.type === "number" || cur.type === "text") {
+    await say(env, cur.prompt, cur.skipLabel ? [cur.skipLabel] : undefined);
+    return;
   }
 
-  if (stepId === "act_upload") {
-    const signed = flow.data.actKind === "signed";
-
-    return {
-      cat: signed ? "Акт выполненных работ" : "Акт отказа от подписи",
-      kind: "image",
-      required: true,
-      prompt: signed ? "Прикрепите фото акта выполненных работ." : "Прикрепите фото акта отказа от подписи."
-    };
-  }
-
-  return null;
+  await say(env, cur.prompt, cur.buttons, cur.markdown);
 }
 
-function isSkippable(def) {
-  return !def.required;
+async function setCur(env, state, cur) {
+  state.flow.cur = cur;
+  await present(env, state);
+}
+
+function choice(env, state, prompt, buttons, next, extra) {
+  return setCur(env, state, { type: "choice", prompt, buttons, next, ...(extra || {}) });
+}
+
+function number(env, state, prompt, next, { integer = false, skipLabel = null } = {}) {
+  return setCur(env, state, { type: "number", prompt, next, integer, skipLabel });
+}
+
+function text(env, state, prompt, next) {
+  return setCur(env, state, { type: "text", prompt, next });
+}
+
+// kind: "image" | "video" | "any"
+function upload(env, state, { prompt, cat, kind = "image", next, finishLabel = B.CONTINUE, skipLabel = null }) {
+  return setCur(env, state, { type: "upload", prompt, cat, kind, next, finishLabel, skipLabel, files: [] });
+}
+
+function fits(attachment, kind) {
+  if (kind === "any") {
+    return attachment.kind === "image" || attachment.kind === "video" || attachment.kind === "other";
+  }
+
+  return files.attachmentFits(attachment, kind);
+}
+
+async function advance(env, state, next, value) {
+  const step = STEPS[next];
+
+  if (!step) {
+    throw new Error(`Неизвестный шаг сценария: ${next}`);
+  }
+
+  await step(env, state, value);
 }
 
 // ------------------------------------------------------------
-// Старт
+// Список сделок (T-6.1–6.2) и старт
 // ------------------------------------------------------------
+
+async function showList(env, state) {
+  const { ctx } = env;
+  const found = await deals.findReportDeals(ctx, state.foremanName);
+
+  if (found.length === 0) {
+    await say(env, "Задачи по загрузке фотоотчёта не найдены.");
+    return;
+  }
+
+  const isLekal = (item) => Number(item.lead.pipeline_id) === PIPELINE.WOOD_PRODUCTION;
+  const work = deals.sortByTerms(ctx, found.filter((item) => !isLekal(item))).map((item) => item.lead);
+  const lekal = deals.sortByTerms(ctx, found.filter(isLekal)).map((item) => item.lead);
+  const lines = ["Незавершённые монтажи:"];
+  const ordered = [];
+
+  async function addGroup(title, leads) {
+    if (leads.length === 0) {
+      return;
+    }
+
+    lines.push(title);
+
+    for (let i = 0; i < leads.length; i++) {
+      lines.push(`${i + 1}) ${await deals.dealLine(ctx, leads[i], "report")}`);
+    }
+
+    ordered.push(...leads);
+  }
+
+  await addGroup("Монтажи в работе:", work);
+  await addGroup("Снятие лекал:", lekal);
+
+  const emoji = (lead) => {
+    const id = Number(lead.pipeline_id);
+
+    return id === PIPELINE.WOOD_PRODUCTION ? "📐 " : id === PIPELINE.RECLAMATION ? "↩️ " : "🔧 ";
+  };
+  const { map, buttons } = deals.buildDealButtons(ctx, ordered, emoji);
+
+  state.list = { kind: "report", map };
+  await say(env, lines.join("\n"), buttons, true);
+}
 
 async function start(env, state, lead, task) {
   const { ctx } = env;
   const pipelineId = Number(lead.pipeline_id);
-  const kind = pipelineId === PIPELINE.WOOD_PRODUCTION ? "lekal" : "montage";
-  const productName = deals.productText(ctx, lead);
-  const group = calc.getProductGroup(productName, pipelineId, PIPELINE.WOOD_PRODUCTION);
-
-  // Незавершённый отчёт по этой сделке — продолжаем с того же места.
   const draft = state.drafts && state.drafts[lead.id];
 
-  if (draft) {
+  // Незавершённый отчёт по этой сделке — продолжаем с того же места.
+  if (draft && draft.cur) {
     state.flow = draft;
     delete state.drafts[lead.id];
     await say(env, `Продолжаем незавершённый отчёт по договору № ${mdSafe(amo.contractNumber(ctx, lead))}.`);
-    await ask(env, state);
+    await present(env, state);
     return;
   }
 
-  const flow = {
+  const productName = deals.productText(ctx, lead);
+
+  state.flow = {
     name: "report",
-    kind,
+    mode: "report",
+    kind: pipelineId === PIPELINE.WOOD_PRODUCTION ? "lekal" : "montage",
     leadId: lead.id,
     taskId: task ? task.id : null,
-    group,
-    steps: ["main"],
-    idx: 0,
-    data: { productName, pipelineId, values: {}, files: {}, ktu: {}, done: {} }
+    group: calc.getProductGroup(productName, pipelineId, PIPELINE.WOOD_PRODUCTION),
+    extrasGroup: calc.getExtrasGroup(productName),
+    cur: null,
+    data: {
+      productName,
+      pipelineId,
+      remainder: amo.fieldNumber(ctx, lead, FIELD.PAYMENT_REMAINDER),
+      values: {},
+      files: {},
+      ktuDone: [],
+      usedExtras: [],
+      done: {}
+    }
   };
 
-  state.flow = flow;
+  if (state.flow.kind === "lekal") {
+    await STEPS.lekal_card(env, state);
+  } else {
+    await STEPS.montage_card(env, state);
+  }
+}
 
-  const contact = await amo.getContactInfo(ctx, lead);
-  const card =
-    `Договор № ${mdSafe(amo.contractNumber(ctx, lead))}\n` +
-    `Сроки монтажа: ${mdSafe(deals.dateText(ctx, lead))}\n` +
-    `Адрес: ${mdSafe(amo.fieldText(ctx, lead, FIELD.ADDRESS) || "—")}\n` +
-    `Продукт: ${mdSafe(productName)}\n` +
-    `Кол-во этажей: ${mdSafe(deals.floorsText(ctx, lead))}\n` +
-    `Контакт: ${mdSafe(contact.name)} ${mdSafe(contact.phones.join(", "))}`;
+async function contactLines(env, lead) {
+  const contact = await amo.getContactInfo(env.ctx, lead);
 
-  await say(env, card, undefined, true);
-  await ask(env, state);
+  return { name: mdSafe(contact.name), phone: mdSafe(contact.phones.join(", ")) };
 }
 
 // ------------------------------------------------------------
-// Вопросы
+// Шаги
 // ------------------------------------------------------------
 
-async function ask(env, state) {
-  const flow = state.flow;
-  const stepId = currentStep(flow);
-  const kind = stepKind(stepId);
+const STEPS = {
+  // ---------- Дерево производства: снятие лекал ----------
+  async lekal_card(env, state) {
+    const { ctx } = env;
+    const lead = (await amo.getLeadsByIds(ctx, [state.flow.leadId]))[0];
+    const contact = await contactLines(env, lead);
 
-  if (stepId === "main") {
-    if (flow.kind === "lekal") {
-      await say(env, "Лекалы сняты?", [YES, MOVE]);
+    await choice(
+      env,
+      state,
+      `Лекала сняты\n` +
+        `Монтаж каркаса: ${deals.folderLink(ctx, lead, "Папка на Яндекс Диске")}\n` +
+        `Адрес объекта: ${mdSafe(amo.fieldText(ctx, lead, FIELD.ADDRESS) || "—")}\n` +
+        `${deals.contractLabel(ctx, lead)}\n` +
+        `Продукт: ${mdSafe(deals.productText(ctx, lead))}\n` +
+        `Контакт: ${contact.name}\n` +
+        `Телефон: ${contact.phone}`,
+      ["Лекала сняты", "Перенос выезда"],
+      "lekal_choice",
+      { markdown: true }
+    );
+  },
+
+  async lekal_choice(env, state, value) {
+    data(state).progress = true;
+
+    if (value === "Перенос выезда") {
+      await text(env, state, "Укажите комментарий", "move_comment");
     } else {
-      await say(env, "Монтаж проведен?", [YES, "Частично", NO, MOVE]);
+      await number(env, state, "Укажите числовое значение пробега.", "lekal_km");
+    }
+  },
+
+  async lekal_km(env, state, value) {
+    data(state).values.km = value;
+    await upload(env, state, { prompt: "Загрузите скрин навигатора.", cat: "Скрин навигатора", next: "lekal_nav" });
+  },
+
+  async lekal_nav(env, state) {
+    await upload(env, state, { prompt: "Загрузите фото лекал.", cat: "Фото лекал", next: "lekal_templates" });
+  },
+
+  async lekal_templates(env, state) {
+    await upload(env, state, {
+      prompt: "Загрузите фото лестницы.",
+      cat: "Фото лестницы",
+      next: "lekal_finish",
+      finishLabel: B.FINISH_REPORT
+    });
+  },
+
+  async lekal_finish(env, state) {
+    await finalize(env, state, RESULT.LEKALS_DONE);
+  },
+
+  // ---------- Перенос выезда (общий) ----------
+  async move_comment(env, state, value) {
+    data(state).comment = value;
+    await finalize(env, state, RESULT.MOVED);
+  },
+
+  // ---------- Обычный монтаж ----------
+  async montage_card(env, state) {
+    const { ctx } = env;
+    const lead = (await amo.getLeadsByIds(ctx, [state.flow.leadId]))[0];
+    const contact = await contactLines(env, lead);
+    const remainder = amo.fieldNumber(ctx, lead, FIELD.PAYMENT_REMAINDER);
+
+    await choice(
+      env,
+      state,
+      "Монтаж проведён.\n" +
+        (remainder > 0 ? `Остаток платежа: ${calc.fmt(remainder)}\n` : "") +
+        `Адрес объекта: ${mdSafe(amo.fieldText(ctx, lead, FIELD.ADDRESS) || "—")}\n` +
+        `${deals.contractLabel(ctx, lead)}\n` +
+        `Продукт: ${mdSafe(deals.productText(ctx, lead))}\n` +
+        `Имя контакта: ${contact.name}\n` +
+        `Телефон: ${contact.phone}`,
+      ["Перенос монтажа", "Промежуточный отчёт", "Монтаж завершён", "Доп хотелки"],
+      "montage_choice",
+      { markdown: true }
+    );
+  },
+
+  async montage_choice(env, state, value) {
+    if (value === "Перенос монтажа") {
+      data(state).progress = true;
+      await text(env, state, "Укажите комментарий", "move_comment");
+    } else if (value === "Доп хотелки") {
+      await text(env, state, "Укажите комментарий", "wishes");
+    } else if (value === "Промежуточный отчёт") {
+      data(state).progress = true;
+      data(state).intermediate = true;
+      await choice(env, state, "Часть изделия установлена?", ["Частично", "Не установлено"], "part");
+    } else {
+      data(state).progress = true;
+      await choice(
+        env,
+        state,
+        "Акт клиентом подписан?",
+        ["Да", "Загрузить акт отказа от подписи", "Заказчик отсутствует"],
+        "act_choice"
+      );
+    }
+  },
+
+  // «Доп хотелки»: записываем в «[Бот] Примечание» и возвращаемся к карточке.
+  async wishes(env, state, value) {
+    await amo.patchLead(env.ctx, state.flow.leadId, { custom_fields_values: [amo.setValue(FIELD.BOT_NOTE, value)] });
+    await say(env, "Информация отправлена");
+    await STEPS.montage_card(env, state);
+  },
+
+  // ---------- Промежуточный отчёт ----------
+  async part(env, state, value) {
+    data(state).partial = value;
+    await choice(env, state, "Нужны ли детали?", [B.YES, B.NO], "need_details");
+  },
+
+  async need_details(env, state, value) {
+    data(state).needDetails = value === B.YES;
+
+    if (value === B.YES) {
+      await text(env, state, "Укажите комментарий", "details_comment");
+    } else {
+      await STEPS.inter_km(env, state);
+    }
+  },
+
+  async details_comment(env, state, value) {
+    data(state).detailsComment = value;
+    await choice(env, state, "Добавить фото?", [B.YES, B.NO], "details_photo_q");
+  },
+
+  async details_photo_q(env, state, value) {
+    if (value === B.YES) {
+      await upload(env, state, { prompt: "Загрузите фото.", cat: "Нужны детали", next: "inter_km_after_photo" });
+    } else {
+      await STEPS.inter_km(env, state);
+    }
+  },
+
+  async inter_km_after_photo(env, state) {
+    await STEPS.inter_km(env, state);
+  },
+
+  async inter_km(env, state) {
+    await number(env, state, "Укажите числовое значение пробега.", "inter_km_val");
+  },
+
+  async inter_km_val(env, state, value) {
+    data(state).values.km = value;
+    await upload(env, state, { prompt: "Загрузите скрин навигатора.", cat: "Скрин навигатора", next: "inter_ladder" });
+  },
+
+  async inter_ladder(env, state) {
+    await upload(env, state, {
+      prompt: "Загрузите фото/видео установленной лестницы.",
+      cat: "Установленная лестница",
+      kind: "any",
+      next: "inter_finish",
+      finishLabel: B.FINISH_REPORT
+    });
+  },
+
+  async inter_finish(env, state) {
+    await finalize(env, state, data(state).needDetails ? RESULT.INTERMEDIATE_DETAILS : RESULT.INTERMEDIATE);
+  },
+
+  // ---------- Монтаж завершён: акт → оплата → пробеги → КТУ → доп. работы ----------
+  async act_choice(env, state, value) {
+    const d = data(state);
+
+    if (value === B.YES) {
+      d.actKind = "signed";
+      await upload(env, state, { prompt: "Загрузите фото акта выполненных работ.", cat: "Акт выполненных работ", next: "pay_check" });
+    } else if (value === "Загрузить акт отказа от подписи") {
+      d.actKind = "refused";
+      await upload(env, state, { prompt: "Загрузите фото акта отказа от подписи.", cat: "Акт отказа от подписи", next: "pay_check" });
+    } else {
+      d.customerAbsent = true;
+      await STEPS.pay_check(env, state);
+    }
+  },
+
+  async pay_check(env, state) {
+    if (data(state).remainder > 0) {
+      await choice(env, state, "Оплата от клиента получена.", ["Получил", "Не получил"], "pay_choice");
+    } else {
+      await STEPS.delivery(env, state);
+    }
+  },
+
+  async pay_choice(env, state, value) {
+    if (value === "Получил") {
+      data(state).paymentReceived = true;
+      await upload(env, state, { prompt: "Загрузите фото чека.", cat: "Фото чека", next: "delivery" });
+    } else {
+      await text(env, state, "Укажите комментарий", "pay_comment");
+    }
+  },
+
+  async pay_comment(env, state, value) {
+    data(state).paymentComment = value;
+    await STEPS.delivery(env, state);
+  },
+
+  async delivery(env, state) {
+    await number(env, state, "Укажите числовое значение пробега доставки.", "delivery_val", { skipLabel: B.SKIP });
+  },
+
+  async delivery_val(env, state, value) {
+    if (value !== null) {
+      data(state).values.kmDelivery = value;
     }
 
-    return;
-  }
+    await number(env, state, "Укажите числовое значение транспортного пробега (без доставки).", "km_val");
+  },
 
-  if (stepId === "move_comment") {
-    await say(env, "Укажите комментарий");
-    return;
-  }
+  async km_val(env, state, value) {
+    data(state).values.km = value;
+    await upload(env, state, { prompt: "Загрузите скрин навигатора.", cat: "Скрин навигатора", next: "ktu_menu" });
+  },
 
-  if (stepId === "move_absent") {
-    await say(env, "Заказчик отсутствовал на объекте?", [YES, NO]);
-    return;
-  }
+  // ---------- Блок КТУ (T-6 после пробегов; T-9 «Балл КТУ») ----------
+  async ktu_menu(env, state) {
+    const d = data(state);
+    const rest = KTU_CATEGORIES.filter((item) => !d.ktuDone.includes(item.label));
 
-  if (stepId === "problem_comment") {
-    await say(env, "Опишите, что сделано и что мешает завершить монтаж.");
-    return;
-  }
+    await choice(
+      env,
+      state,
+      "Укажите, что сделано для баллов КТУ.",
+      [d.ktuDone.length ? B.NEXT : B.SKIP, ...rest.map((item) => item.label)],
+      "ktu_pick"
+    );
+  },
 
-  if (kind === "q") {
-    const question = QUESTIONS[stepArg(stepId)];
+  async ktu_pick(env, state, value) {
+    const category = KTU_CATEGORIES.find((item) => item.label === value);
 
-    if (question.choice) {
-      await say(env, question.prompt, [YES, NO]);
+    if (!category) {
+      // «Пропустить» / «Далее»
+      if (state.flow.mode === "fixes") {
+        await STEPS.fixes_menu(env, state);
+      } else {
+        await STEPS.extras_start(env, state);
+      }
+
       return;
     }
 
-    const buttons = [SKIP];
+    data(state).tmp = category.label;
+    await upload(env, state, {
+      prompt: `Загрузите файл или файлы: «${category.label}».`,
+      cat: category.label,
+      kind: category.label === "Отзывы" ? "any" : "video",
+      next: "ktu_done"
+    });
+  },
 
-    if (stepArg(stepId) === "amount" && flow.data.existingAmount > 0) {
-      buttons.unshift(`Оставить ${calc.fmt(flow.data.existingAmount)}`);
+  async ktu_done(env, state) {
+    const d = data(state);
+
+    d.ktuDone.push(d.tmp);
+    await STEPS.ktu_menu(env, state);
+  },
+
+  // ---------- Доп. работы по группам продуктов ----------
+  async extras_start(env, state) {
+    const group = state.flow.extrasGroup;
+
+    if (!group) {
+      await STEPS.extras_done(env, state);
+    } else if (group === "g4") {
+      await number(env, state, "Укажите объём проделанной работы.", "extras_amount");
+    } else {
+      await STEPS.extras_menu(env, state);
     }
+  },
 
-    await say(env, question.prompt, buttons);
-    return;
-  }
+  async extras_amount(env, state, value) {
+    data(state).values.amount = value;
+    await STEPS.extras_menu(env, state);
+  },
 
-  if (stepId === "desc") {
-    await say(env, "Опишите выполненные дополнительные работы.");
-    return;
-  }
+  async extras_menu(env, state) {
+    const d = data(state);
+    const options = (EXTRA_OPTIONS[state.flow.extrasGroup] || []).filter((item) => !d.usedExtras.includes(item.id));
 
-  const upload = uploadDefinition(flow, stepId);
-
-  if (upload) {
-    const uploaded = (flow.data.files[stepId] || []).length;
-    const buttons = [];
-
-    if (uploaded > 0) {
-      buttons.push(FINISH_UPLOAD);
-    } else if (isSkippable(upload)) {
-      buttons.push(SKIP);
-    }
-
-    await say(env, upload.prompt, buttons.length ? buttons : undefined);
-    return;
-  }
-
-  if (stepId === "km") {
-    await say(env, "Введите транспортный пробег (км, без доставки).");
-    return;
-  }
-
-  if (stepId === "kmDelivery") {
-    await say(env, "Введите пробег доставки (км). Если доставки не было — 0.");
-    return;
-  }
-
-  if (stepId === "payment") {
-    await say(
+    await choice(
       env,
-      `Остаток платежа: ${calc.fmt(flow.data.remainder)} руб. Получена ли оплата на монтаже?`,
-      [YES, NO]
+      state,
+      "Укажите доп. работы.",
+      [d.usedExtras.length ? B.NEXT : B.SKIP, ...options.map((item) => item.label)],
+      "extras_pick"
     );
-    return;
-  }
+  },
 
-  if (stepId === "act_signed") {
-    await say(env, "Акт подписан заказчиком?", [YES, NO]);
-    return;
-  }
+  async extras_pick(env, state, value) {
+    const d = data(state);
+    const option = (EXTRA_OPTIONS[state.flow.extrasGroup] || []).find((item) => item.label === value);
 
-  if (stepId === "review_site") {
-    await say(env, "Оставил ли клиент отзыв в отзовике или на Яндексе?", [YES, NO]);
-    return;
-  }
+    if (value === B.SKIP) {
+      await STEPS.extras_done(env, state);
+    } else if (value === B.NEXT) {
+      await text(env, state, "Укажите общий комментарий к дополнительным работам.", "extras_comment");
+    } else if (option) {
+      d.tmp = option.id;
 
-  if (stepId === "wishes") {
-    await say(env, "Доп. хотелки клиента: напишите текстом или нажмите «Пропустить».", [SKIP]);
-    return;
-  }
-
-  if (stepId === "confirm") {
-    await askConfirm(env, state);
-  }
-}
-
-function summaryLines(flow) {
-  const d = flow.data;
-  const lines = [];
-  const labels = {
-    tempSteps: "Монтаж/демонтаж врем. ступеней",
-    fence: "Ограждения (м/п)",
-    platform: "Площадка (м²)",
-    canopy: "Навес (м²)",
-    piles: "Сваи (шт)",
-    falsefloor: "Фальшпол (м²)",
-    finish: "Чистовая отделка",
-    extraHours: "Доп.работы (ч)",
-    amount: "Монтаж изделия (м/п или м²)"
-  };
-
-  for (const key of Object.keys(labels)) {
-    if (d.values[key] !== undefined && d.values[key] !== 0) {
-      lines.push(`${labels[key]}: ${key === "finish" ? "да" : calc.fmt(d.values[key])}`);
+      if (option.type === "flag") {
+        d.values[option.key] = 1;
+        await STEPS.extras_photo(env, state);
+      } else {
+        await number(env, state, option.prompt, "extras_value", { integer: true });
+      }
+    } else {
+      await STEPS.extras_menu(env, state);
     }
-  }
+  },
 
-  if (d.km !== undefined) {
-    lines.push(`Транспортный пробег: ${calc.fmt(d.km)} км`);
-  }
+  async extras_value(env, state, value) {
+    const d = data(state);
+    const option = EXTRA_OPTIONS[state.flow.extrasGroup].find((item) => item.id === d.tmp);
 
-  if (d.kmDelivery) {
-    lines.push(`Пробег доставки: ${calc.fmt(d.kmDelivery)} км`);
-  }
+    d.values[option.key] = value;
+    await STEPS.extras_photo(env, state);
+  },
 
-  const fileCount = Object.values(d.files).reduce((sum, list) => sum + list.length, 0);
+  async extras_photo(env, state) {
+    const d = data(state);
+    const option = EXTRA_OPTIONS[state.flow.extrasGroup].find((item) => item.id === d.tmp);
 
-  lines.push(`Файлов загружено: ${fileCount}`);
+    await upload(env, state, {
+      prompt: "Загрузите фото дополнительной работы.",
+      cat: option.label,
+      next: "extras_photo_done"
+    });
+  },
 
-  return lines;
-}
+  async extras_photo_done(env, state) {
+    const d = data(state);
 
-async function askConfirm(env, state) {
-  const flow = state.flow;
-  const d = flow.data;
-  let buttons;
-  let head;
+    d.usedExtras.push(d.tmp);
+    await STEPS.extras_menu(env, state);
+  },
 
-  if (flow.kind === "lekal") {
-    buttons = [FINISH_REPORT];
-    head = "Проверьте данные и завершите отчет (результат: «Лекалы сняты»).";
-  } else if (d.answer === "yes") {
-    buttons = [FINISH_REPORT];
-    head = "Проверьте данные и завершите отчет (результат: «Монтаж завершен»).";
-  } else {
-    buttons = [RESULT.INTERMEDIATE, RESULT.INTERMEDIATE_DETAILS];
-    head = "Выберите результат отчета. «Промежуточный отчет. Нужны детали» — руководитель получит запрос на уточнение.";
-  }
+  async extras_comment(env, state, value) {
+    data(state).extraDescription = value;
+    await STEPS.extras_done(env, state);
+  },
 
-  await say(env, `${head}\n${summaryLines(flow).join("\n")}`, buttons);
-}
-
-// ------------------------------------------------------------
-// Переходы
-// ------------------------------------------------------------
-
-function buildStepsAfterMain(flow, answer, lead, ctx) {
-  const d = flow.data;
-  const steps = ["main"];
-  const questions = (calc.QUESTIONS_BY_GROUP[flow.group] || []).map((q) => `q:${q}`);
-
-  if (flow.kind === "lekal") {
-    steps.push(...questions, "photo_lekal", "km", "kmDelivery", "confirm");
-  } else if (answer === "yes") {
-    steps.push(...questions, "photo_main", "video_general", "video_timelapse", "km", "kmDelivery", "navigator");
-
-    if (d.remainder > 0) {
-      steps.push("payment");
+  async extras_done(env, state) {
+    if (state.flow.mode === "fixes") {
+      await STEPS.fixes_menu(env, state);
+      return;
     }
 
-    steps.push("act_signed", "review_video", "review_site", "wishes", "confirm");
-  } else if (answer === "partial") {
-    steps.push(...questions, "photo_main", "km", "kmDelivery", "navigator", "confirm");
-  } else {
-    steps.push("problem_comment", "km", "kmDelivery", "confirm");
+    // Шаг 179: фото/видео установленной лестницы → «Завершить отчёт».
+    await upload(env, state, {
+      prompt: "Загрузите фото/видео установленной лестницы.",
+      cat: "Установленная лестница",
+      kind: "any",
+      next: "montage_finish",
+      finishLabel: B.FINISH_REPORT
+    });
+  },
+
+  async montage_finish(env, state) {
+    await finalize(env, state, RESULT.MONTAGE_DONE);
+  },
+
+  // ---------- T-9 «Внести правки» ----------
+  async fixes_menu(env, state) {
+    await choice(
+      env,
+      state,
+      "Что нужно исправить?",
+      ["Завершить отчёт", "Добавить комментарий", "Загрузить общее фото", "Доп. работы", "Балл КТУ", "Пробег"],
+      "fixes_pick"
+    );
+  },
+
+  async fixes_pick(env, state, value) {
+    const d = data(state);
+
+    if (value === "Завершить отчёт") {
+      await finalizeFixes(env, state);
+    } else if (value === "Добавить комментарий") {
+      await text(env, state, "Укажите комментарий.", "fixes_comment");
+    } else if (value === "Загрузить общее фото") {
+      await upload(env, state, { prompt: "Загрузите файлы.", cat: "Фото общее", next: "fixes_menu" });
+    } else if (value === "Доп. работы") {
+      d.usedExtras = [];
+      await STEPS.extras_start(env, state);
+    } else if (value === "Балл КТУ") {
+      d.ktuDone = [];
+      await STEPS.ktu_menu(env, state);
+    } else {
+      d.mileageDone = false;
+      await STEPS.fixes_mileage(env, state);
+    }
+  },
+
+  async fixes_comment(env, state, value) {
+    const flow = state.flow;
+
+    await amo.patchLead(env.ctx, flow.leadId, {
+      custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { note: value })
+    });
+    await say(env, "Ваши комментарии приняты");
+    await STEPS.fixes_menu(env, state);
+  },
+
+  async fixes_mileage(env, state) {
+    const d = data(state);
+
+    await choice(
+      env,
+      state,
+      "Укажите, в какой пробег необходимо внести правки.",
+      [d.mileageDone ? B.NEXT : B.SKIP, "Доставка", "Транспортный"],
+      "fixes_mileage_pick"
+    );
+  },
+
+  async fixes_mileage_pick(env, state, value) {
+    if (value === "Доставка" || value === "Транспортный") {
+      data(state).tmp = value;
+      await number(env, state, "Введите новое значение пробега.", "fixes_mileage_val");
+    } else {
+      await STEPS.fixes_menu(env, state);
+    }
+  },
+
+  async fixes_mileage_val(env, state, value) {
+    const d = data(state);
+
+    d.values[d.tmp === "Доставка" ? "kmDelivery" : "km"] = value;
+    d.mileageDone = true;
+    await STEPS.fixes_mileage(env, state);
   }
+};
 
-  return steps;
-}
-
-async function advance(env, state) {
-  const flow = state.flow;
-
-  flow.idx += 1;
-  await ask(env, state);
-}
+// ------------------------------------------------------------
+// Обработка ответа пользователя на текущий блок
+// ------------------------------------------------------------
 
 async function handle(env, state, input) {
   const { ctx } = env;
   const flow = state.flow;
-  const d = flow.data;
-  const stepId = currentStep(flow);
-  const kind = stepKind(stepId);
-  const text = input.text;
+  const cur = flow.cur;
 
-  // --- первый вопрос ---
-  if (stepId === "main") {
-    const lead = await ctx.getLead(flow.leadId);
+  if (!cur) {
+    return false;
+  }
 
-    if (flow.kind === "lekal" && text === YES) {
-      d.answer = "yes";
-    } else if (flow.kind === "montage" && text === YES) {
-      d.answer = "yes";
-    } else if (flow.kind === "montage" && text === "Частично") {
-      d.answer = "partial";
-    } else if (flow.kind === "montage" && text === NO) {
-      d.answer = "no";
-    } else if (text === MOVE) {
-      d.answer = "move";
+  const txt = input.text;
+
+  if (cur.type === "choice") {
+    if (cur.buttons.includes(txt)) {
+      await advance(env, state, cur.next, txt);
     } else {
-      await ask(env, state);
-      return true;
+      await present(env, state);
     }
 
-    d.remainder = lead ? amo.fieldNumber(ctx, lead, FIELD.PAYMENT_REMAINDER) : 0;
-    d.existingAmount = lead ? amo.fieldNumber(ctx, lead, FIELD.MONTAGE_AMOUNT) : 0;
+    return true;
+  }
 
-    if (d.answer === "move") {
-      flow.steps = ["main", "move_comment", "move_absent"];
+  if (cur.type === "text") {
+    if (!txt) {
+      await present(env, state);
     } else {
-      flow.steps = buildStepsAfterMain(flow, d.answer, lead, ctx);
+      await advance(env, state, cur.next, txt);
     }
 
-    return advance(env, state).then(() => true);
+    return true;
   }
 
-  // --- перенос выезда ---
-  if (stepId === "move_comment") {
-    if (!text) {
-      await ask(env, state);
+  if (cur.type === "number") {
+    if (cur.skipLabel && txt === cur.skipLabel) {
+      await advance(env, state, cur.next, null);
       return true;
     }
 
-    d.comment = text;
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "move_absent") {
-    if (text !== YES && text !== NO) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.customerAbsent = text === YES;
-    await finalize(env, state, RESULT.MOVED);
-    return true;
-  }
-
-  if (stepId === "problem_comment") {
-    if (!text) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.comment = text;
-    await advance(env, state);
-    return true;
-  }
-
-  // --- числа и выбор ---
-  if (kind === "q") {
-    const key = stepArg(stepId);
-    const question = QUESTIONS[key];
-    let value;
-
-    if (question.choice) {
-      if (text !== YES && text !== NO) {
-        await ask(env, state);
-        return true;
-      }
-
-      value = text === YES ? 1 : 0;
-    } else if (text === SKIP) {
-      value = 0;
-    } else if (/^Оставить /.test(text || "") && key === "amount") {
-      value = d.existingAmount;
-    } else {
-      value = calc.parseNumber(text);
-
-      if (value === null) {
-        await say(env, MSG_NOT_NUMBER);
-        return true;
-      }
-    }
-
-    d.values[key] = value;
-
-    // Сначала фото к ответу, потом описание доп. работ.
-    if (value > 0 && question.photo) {
-      insertAfterCurrent(flow, `p:${key}`);
-    }
-
-    if (value > 1 && question.describe) {
-      const photoOffset = flow.steps[flow.idx + 1] === `p:${key}` ? 2 : 1;
-
-      if (flow.steps[flow.idx + photoOffset] !== "desc") {
-        flow.steps.splice(flow.idx + photoOffset, 0, "desc");
-      }
-    }
-
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "desc") {
-    if (!text) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.extraDescription = text;
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "km" || stepId === "kmDelivery") {
-    const value = calc.parseNumber(text);
+    const value = cur.integer ? calc.parseInteger(txt) : calc.parseNumber(txt);
 
     if (value === null) {
-      await say(env, MSG_NOT_NUMBER);
+      await say(env, cur.integer ? MSG_NOT_INTEGER : MSG_NOT_NUMBER);
       return true;
     }
 
-    if (stepId === "km") {
-      d.km = value;
+    await advance(env, state, cur.next, value);
+    return true;
+  }
+
+  if (cur.type === "upload") {
+    if (input.attachments.length > 0) {
+      const fitting = input.attachments.filter((item) => fits(item, cur.kind));
+
+      if (fitting.length === 0) {
+        await say(env, cur.kind === "video" ? "На этом шаге нужно прислать видео." : "На этом шаге нужно прислать фото.");
+        return true;
+      }
+
+      await say(env, "Файлы получены, загружаю на Яндекс Диск");
+
+      const d = flow.data;
+      let uploaded = 0;
+
+      for (const attachment of fitting) {
+        try {
+          const path = await files.uploadFile(ctx, flow.leadId, cur.cat, attachment);
+
+          cur.files.push(path);
+          (d.files[cur.cat] = d.files[cur.cat] || []).push(path);
+          uploaded += 1;
+        } catch (error) {
+          console.error("[Бот монтажников] Ошибка загрузки файла на Яндекс.Диск:", error.message);
+          await say(env, `❌ Не удалось загрузить файл на Яндекс.Диск (${error.message.slice(0, 120)}). Отправьте его ещё раз.`);
+        }
+      }
+
+      if (uploaded > 0) {
+        await say(env, MSG_ADD_FILES, [cur.finishLabel || B.CONTINUE]);
+      }
+
+      return true;
+    }
+
+    if (txt === (cur.finishLabel || B.CONTINUE) && cur.files.length > 0) {
+      await advance(env, state, cur.next, cur.files);
+    } else if (cur.skipLabel && txt === cur.skipLabel && cur.files.length === 0) {
+      await advance(env, state, cur.next, []);
     } else {
-      d.kmDelivery = value;
+      await present(env, state);
     }
 
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "payment") {
-    if (text !== YES && text !== NO) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.paymentReceived = text === YES;
-
-    if (d.paymentReceived) {
-      insertAfterCurrent(flow, "receipt");
-    }
-
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "act_signed") {
-    if (text !== YES && text !== NO) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.actKind = text === YES ? "signed" : "refused";
-    insertAfterCurrent(flow, "act_upload");
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "review_site") {
-    if (text !== YES && text !== NO) {
-      await ask(env, state);
-      return true;
-    }
-
-    d.reviewSite = text === YES;
-    await advance(env, state);
-    return true;
-  }
-
-  if (stepId === "wishes") {
-    if (!text) {
-      await ask(env, state);
-      return true;
-    }
-
-    if (text !== SKIP) {
-      d.wishes = text;
-    }
-
-    await advance(env, state);
-    return true;
-  }
-
-  // --- загрузки ---
-  const upload = uploadDefinition(flow, stepId);
-
-  if (upload) {
-    return handleUpload(env, state, stepId, upload, input);
-  }
-
-  // --- подтверждение ---
-  if (stepId === "confirm") {
-    let result = null;
-
-    if (flow.kind === "lekal" && text === FINISH_REPORT) {
-      result = RESULT.LEKALS_DONE;
-    } else if (flow.kind === "montage" && d.answer === "yes" && text === FINISH_REPORT) {
-      result = RESULT.MONTAGE_DONE;
-    } else if (flow.kind === "montage" && d.answer !== "yes" && (text === RESULT.INTERMEDIATE || text === RESULT.INTERMEDIATE_DETAILS)) {
-      result = text;
-    }
-
-    if (!result) {
-      await askConfirm(env, state);
-      return true;
-    }
-
-    await finalize(env, state, result);
     return true;
   }
 
   return false;
 }
 
-async function handleUpload(env, state, stepId, upload, input) {
-  const { ctx } = env;
-  const flow = state.flow;
-  const list = (flow.data.files[stepId] = flow.data.files[stepId] || []);
-
-  if (input.attachments.length > 0) {
-    const fitting = input.attachments.filter((item) => files.attachmentFits(item, upload.kind));
-
-    if (fitting.length === 0) {
-      await say(env, upload.kind === "video" ? "На этом шаге нужно прислать видео." : "На этом шаге нужно прислать фото.");
-      return true;
-    }
-
-    await say(env, "Файлы получены, загружаю на Яндекс Диск");
-
-    let uploadedNow = 0;
-
-    for (const attachment of fitting) {
-      try {
-        list.push(await files.uploadFile(ctx, flow.leadId, upload.cat, attachment));
-        uploadedNow += 1;
-      } catch (error) {
-        console.error("[Бот монтажников] Ошибка загрузки файла на Яндекс.Диск:", error.message);
-        await say(env, `❌ Не удалось загрузить файл на Яндекс.Диск (${error.message.slice(0, 120)}). Отправьте его ещё раз.`);
-      }
-    }
-
-    if (uploadedNow > 0) {
-      await say(env, "Файл сохранен на Яндекс.Диске.\nДополните или завершите загрузку.", [FINISH_UPLOAD]);
-    }
-
-    return true;
-  }
-
-  if (input.text === FINISH_UPLOAD) {
-    if (list.length === 0 && !isSkippable(upload)) {
-      await say(env, "Вы ещё не прикрепили ни одного файла.");
-      return true;
-    }
-  } else if (input.text === SKIP && list.length === 0 && isSkippable(upload)) {
-    // пропуск шага
-  } else {
-    await ask(env, state);
-    return true;
-  }
-
-  await advance(env, state);
-  return true;
-}
-
 // ------------------------------------------------------------
-// Завершение отчёта (идемпотентно: что уже сделано — не повторяем)
+// Завершение (идемпотентно: что уже сделано — повторно не делаем)
 // ------------------------------------------------------------
-
-function todayStartUnix(ctx) {
-  return ctx.todayMoscowStartUnix();
-}
 
 async function resolveSlot(ctx, lead, foremanName, d) {
   let index = amo.findSlotIndex(ctx, lead, foremanName);
@@ -659,8 +805,7 @@ async function resolveSlot(ctx, lead, foremanName, d) {
     return index;
   }
 
-  // Монтажник ещё не записан ни в одну группу полей — берём первую свободную
-  // и записываем его туда (если в списке поля есть такое значение).
+  // Монтажник ещё не записан ни в одну группу полей — берём первую свободную.
   index = SLOT_FIELDS.findIndex((slot) => !amo.fieldText(ctx, lead, slot.master));
 
   if (index < 0) {
@@ -671,8 +816,9 @@ async function resolveSlot(ctx, lead, foremanName, d) {
     `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields/${SLOT_FIELDS[index].master}`,
     {}
   );
-  const options = (response.status === 200 && response.data && response.data.enums) || [];
-  const option = options.find((item) => calc.sameName(item.value, foremanName));
+  const option = ((response.status === 200 && response.data && response.data.enums) || []).find((item) =>
+    calc.sameName(item.value, foremanName)
+  );
 
   if (option) {
     d.slotMasterPayload = { field_id: SLOT_FIELDS[index].master, values: [{ value: option.value, enum_id: option.id }] };
@@ -681,6 +827,64 @@ async function resolveSlot(ctx, lead, foremanName, d) {
   }
 
   return index;
+}
+
+// Значения слота из накопленных ответов (пробеги + тарифы + КТУ).
+function buildSlotValues(d, motivation, settings, ktuEnabled) {
+  const out = {};
+
+  for (const key of Object.keys(d.values)) {
+    if (key === "km" || key === "kmDelivery" || key === "amount") {
+      continue;
+    }
+
+    out[key] = d.values[key];
+  }
+
+  if (d.values.km !== undefined) {
+    out.kmFact = d.values.km;
+
+    if (motivation) {
+      out.tariff = calc.num(motivation.transportTariff);
+      out.kmFactTotal = calc.round2(calc.num(motivation.transportTariff) * d.values.km);
+    }
+  }
+
+  if (d.values.kmDelivery !== undefined) {
+    out.kmDelivery = d.values.kmDelivery;
+
+    if (motivation) {
+      out.tariffDelivery = calc.num(motivation.deliveryTariff);
+      out.kmDeliveryTotal = calc.round2(calc.num(motivation.deliveryTariff) * d.values.kmDelivery);
+    }
+  }
+
+  if (ktuEnabled) {
+    for (const label of d.ktuDone) {
+      const category = KTU_CATEGORIES.find((item) => item.label === label);
+
+      out[category.slotKey] = settingsStore.ktuPoints(settings, category.settingsLabel);
+    }
+  }
+
+  if (d.extraDescription) {
+    out.note = d.extraDescription;
+  }
+
+  return out;
+}
+
+async function finishCommon(env, state, resultLabel) {
+  const flow = state.flow;
+  const leadId = flow.leadId;
+
+  state.flow = null;
+
+  if (state.drafts) {
+    delete state.drafts[leadId];
+  }
+
+  await say(env, resultLabel, undefined, true);
 }
 
 async function finalize(env, state, result) {
@@ -699,93 +903,45 @@ async function finalize(env, state, result) {
   const number = amo.contractNumber(ctx, lead);
   const managerRow = settingsStore.findRowByForemanName(settings, foremanName);
   const motivation = settingsStore.findMotivation(settings, managerRow);
+  const managerNames = managerRow ? [managerRow.managerHandle] : [];
   const warnings = [];
+  const isMove = result === RESULT.MOVED;
 
   try {
-    // 1) ссылки на загруженные файлы (публикуем один раз)
+    // 1) ссылки на файлы и папка (публикуем один раз)
     if (!done.links) {
-      const imageSteps = Object.keys(d.files).filter(
-        (id) => id === "photo_main" || id === "photo_lekal" || stepKind(id) === "p"
-      );
-      const photoPaths = imageSteps.flatMap((id) => d.files[id]);
-      const actPaths = d.files.act_upload || [];
-
-      d.photoLinks = await files.publicLinks(ctx, photoPaths);
-      d.actLinks = await files.publicLinks(ctx, actPaths);
-      d.allLinks = await files.publicLinks(ctx, Object.values(d.files).flat());
       d.folderUrl = await files.ensureFolderLink(ctx, lead);
+      d.actLinks = d.actKind === "signed" ? await files.publicLinks(ctx, d.files["Акт выполненных работ"] || []) : [];
+      d.detailsLinks = await files.publicLinks(ctx, d.files["Нужны детали"] || []);
       done.links = true;
     }
 
-    // 2) запись в сделку (одним запросом)
-    if (!done.fields && result !== RESULT.MOVED) {
+    // 2) запись в сделку одним запросом
+    if (!done.fields && !isMove) {
       const payload = [];
       const slotIndex = await resolveSlot(ctx, lead, foremanName, d);
-      const slotValues = {};
+      const slotValues = buildSlotValues(d, motivation, settings, result === RESULT.MONTAGE_DONE);
 
-      for (const key of Object.keys(d.values)) {
-        if (key !== "amount") {
-          slotValues[key] = d.values[key];
-        }
-      }
-
-      if (d.km !== undefined) {
-        slotValues.kmFact = d.km;
-      }
-
-      if (d.kmDelivery !== undefined) {
-        slotValues.kmDelivery = d.kmDelivery;
-      }
-
-      if (motivation) {
-        if (d.km !== undefined) {
-          slotValues.tariff = calc.num(motivation.transportTariff);
-          slotValues.kmFactTotal = calc.round2(calc.num(motivation.transportTariff) * d.km);
-        }
-
-        if (d.kmDelivery !== undefined) {
-          slotValues.tariffDelivery = calc.num(motivation.deliveryTariff);
-          slotValues.kmDeliveryTotal = calc.round2(calc.num(motivation.deliveryTariff) * d.kmDelivery);
-        }
-      } else {
+      if (!motivation) {
         warnings.push("для бригадира не выбрана «Мотивация роли» — тарифы не записаны");
       }
 
       if (result === RESULT.MONTAGE_DONE) {
-        slotValues.date = todayStartUnix(ctx);
+        slotValues.date = ctx.todayMoscowStartUnix();
       }
 
-      // КТУ: баллы из настроек за загруженные видео и отзыв.
-      const ktuAwards = [];
-
-      for (const stepId of ["video_general", "video_timelapse", "review_video"]) {
-        if ((d.files[stepId] || []).length > 0) {
-          ktuAwards.push(UPLOADS[stepId]);
-        }
-      }
-
-      for (const award of ktuAwards) {
-        slotValues[award.ktu] = settingsStore.ktuPoints(settings, award.ktuLabel);
-      }
-
-      if (d.reviewSite) {
-        slotValues.ktuReviewSite = settingsStore.ktuPoints(settings, "Отзыв в отзовике или Яндексе");
-      }
-
-      if (d.extraDescription) {
-        slotValues.note = d.extraDescription;
-      }
-
-      // Цена монтажа (T-8).
-      const priceFields = {
-        floors: amo.fieldNumber(ctx, lead, FIELD.FLOORS),
-        budget: Number(lead.price) || 0,
-        ...d.values
-      };
-
+      // Цена монтажа (T-8) — только по итогам монтажа/снятия лекал.
       if (result === RESULT.MONTAGE_DONE || result === RESULT.LEKALS_DONE) {
         const pricingRow = settingsStore.findPricingRow(settings, amo.fieldEnumId(lead, FIELD.PRODUCT), d.productName);
-        const calculated = flow.group && pricingRow ? calc.calcMontagePrice(flow.group, pricingRow, priceFields, motivation) : null;
+        const calculated =
+          flow.group && pricingRow
+            ? calc.calcMontagePrice(
+                flow.group,
+                pricingRow,
+                { floors: amo.fieldNumber(ctx, lead, FIELD.FLOORS), budget: Number(lead.price) || 0, ...d.values },
+                motivation
+              )
+            : null;
 
         if (calculated) {
           slotValues.price = calculated.price;
@@ -800,23 +956,20 @@ async function finalize(env, state, result) {
         payload.push(d.slotMasterPayload);
       }
 
-      if (d.values.amount !== undefined && flow.group === "meter") {
+      if (d.values.amount !== undefined) {
         payload.push(amo.setValue(FIELD.MONTAGE_AMOUNT, d.values.amount));
       }
 
-      // [Бот] Ссылка на фото: сначала очищаем, затем пишем ссылки через «, ».
-      if (result === RESULT.MONTAGE_DONE) {
-        payload.push(d.photoLinks.length ? amo.setValue(FIELD.PHOTO_LINK, d.photoLinks.join(", ")) : amo.clearField(FIELD.PHOTO_LINK));
-      } else if (flow.kind === "montage" && (d.answer === "partial" || d.answer === "no")) {
-        payload.push(amo.clearField(FIELD.PHOTO_LINK));
+      // «[Бот] Ссылка на фото»: при незавершённом монтаже сначала очищаем,
+      // затем (если были фото «Нужны детали») пишем ссылки через «, ».
+      if (d.intermediate) {
+        payload.push(
+          d.detailsLinks.length ? amo.setValue(FIELD.PHOTO_LINK, d.detailsLinks.join(", ")) : amo.clearField(FIELD.PHOTO_LINK)
+        );
       }
 
       if (d.actLinks && d.actLinks.length > 0) {
         payload.push(amo.setValue(FIELD.ACT, d.actLinks.join(", ")));
-      }
-
-      if (d.wishes) {
-        payload.push(amo.setValue(FIELD.BOT_NOTE, d.wishes));
       }
 
       if (payload.length > 0) {
@@ -826,27 +979,35 @@ async function finalize(env, state, result) {
       done.fields = true;
     }
 
-    // 3) примечание в сделке
+    // 3) примечания в сделке
     if (!done.note) {
-      let noteText = null;
+      const notes = [];
 
-      if (result === RESULT.MOVED) {
-        noteText = d.comment;
-      } else if (flow.kind === "montage" && d.answer === "partial") {
-        noteText = "Изделие частично установлено" + (d.comment ? `\n${d.comment}` : "");
-      } else if (flow.kind === "montage" && d.answer === "no") {
-        noteText = "Изделие не установлено" + (d.comment ? `\n${d.comment}` : "");
+      if (isMove) {
+        notes.push(d.comment);
       }
 
-      if (noteText) {
-        await amo.addNote(ctx, lead.id, noteText);
+      if (d.intermediate) {
+        notes.push(d.partial === "Частично" ? "Изделие частично установлено" : "Изделие не установлено");
+
+        if (d.detailsComment) {
+          notes.push(d.detailsComment);
+        }
+      }
+
+      if (d.paymentComment) {
+        notes.push(d.paymentComment);
+      }
+
+      for (const note of notes) {
+        await amo.addNote(ctx, lead.id, note);
       }
 
       done.note = true;
     }
 
     // 4) контрольные задачи
-    if (!done.absentTask && result === RESULT.MOVED && d.customerAbsent) {
+    if (!done.absentTask && d.customerAbsent) {
       await amo.createTask(ctx, {
         leadId: lead.id,
         responsibleUserId: USER.REDKINA_YULIA,
@@ -878,32 +1039,31 @@ async function finalize(env, state, result) {
 
       done.task = true;
     }
-    // 5а) публикация в канал amoMessenger (вместо Telegram). Сбой не мешает
-    // отчёту: уже отправленное повторно не уходит.
+
+    // 5а) файлы и информация в канал amoMessenger (вместо Telegram): фото/видео
+    // установленной лестницы и файлы блока КТУ. Сбой не мешает отчёту.
     if (!done.channel && result === RESULT.MONTAGE_DONE) {
       d.channelDone = d.channelDone || {};
 
       try {
-        const channelPaths = ["photo_main", "video_general", "video_timelapse", "review_video"].flatMap((id) => d.files[id] || []);
+        const paths = ["Установленная лестница", ...KTU_CATEGORIES.map((item) => item.label)].flatMap(
+          (category) => d.files[category] || []
+        );
         const folderUrl = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : "";
 
-        d.channelSkipped = await channel.publishReport(ctx, {
+        await channel.publishReport(ctx, {
           text:
-            `**Договор / замерный лист:** ${mdSafe(number)}
-` +
-            `**Бюджет:** ${mdSafe(calc.fmt(Number(lead.price) || 0))}
-` +
-            `**Продукт:** ${mdSafe(d.productName)}
-` +
+            `**Договор / замерный лист:** ${mdSafe(number)}\n` +
+            `**Бюджет:** ${mdSafe(calc.fmt(Number(lead.price) || 0))}\n` +
+            `**Продукт:** ${mdSafe(d.productName)}\n` +
             `**Фотоотчет:** ${folderUrl}`,
-          paths: channelPaths,
+          paths,
           done: d.channelDone
         });
         done.channel = true;
       } catch (error) {
         console.error("[Бот монтажников] Ошибка публикации в канал:", error.message);
         warnings.push("файлы не удалось отправить в канал amoMessenger");
-        d.channelFailed = true;
       }
     }
   } catch (error) {
@@ -916,19 +1076,13 @@ async function finalize(env, state, result) {
     return;
   }
 
-  // 6) уведомление руководителю
+  // 6) уведомления руководителю
   if (!done.notify) {
-    const managerNames = managerRow ? [managerRow.managerHandle] : [];
-    const folderText = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : deals.folderLink(ctx, lead);
     const who = mdSafe(foremanName);
+    const folderText = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : deals.folderLink(ctx, lead);
 
     if (result === RESULT.INTERMEDIATE) {
-      await messenger.notify(
-        ctx,
-        managerNames,
-        `Монтаж по договору № ${mdSafe(number)} не завершен. Монтажник ${who}. ${folderText}`,
-        { markdown: true }
-      );
+      await messenger.notify(ctx, managerNames, `Монтаж по договору № ${mdSafe(number)} не завершен. Монтажник ${who}. ${folderText}`, { markdown: true });
     } else if (result === RESULT.INTERMEDIATE_DETAILS) {
       await messenger.notify(
         ctx,
@@ -955,21 +1109,96 @@ async function finalize(env, state, result) {
     done.notify = true;
   }
 
-  // 7) ответ пользователю, отчёт завершён
-  const leadId = flow.leadId;
-
-  state.flow = null;
-
-  if (state.drafts) {
-    delete state.drafts[leadId];
-  }
-
-  await say(
-    env,
-    `Задача amoCRM "Отчет о монтаже" закрыта с результатом "${result}".\nДоговор № ${mdSafe(number)}.`,
-    undefined,
-    true
-  );
+  // 7) ответ пользователю и возврат к началу T-6 (поиск сделок)
+  await finishCommon(env, state, `Задача amoCRM "Отчет о монтаже" закрыта с результатом "${result}".\nДоговор № ${mdSafe(number)}.`);
+  await showList(env, state);
 }
 
-module.exports = { start, handle, ask, FINISH_REPORT };
+// T-9: «Завершить отчёт» — запись правок, перерасчёт цены (T-8), закрытие задачи, уведомление.
+async function finalizeFixes(env, state) {
+  const { ctx } = env;
+  const flow = state.flow;
+  const d = flow.data;
+  const done = d.done;
+  const settings = settingsStore.get();
+  const foremanName = state.foremanName;
+  const managerRow = settingsStore.findRowByForemanName(settings, foremanName);
+  const motivation = settingsStore.findMotivation(settings, managerRow);
+
+  try {
+    if (!done.fields) {
+      const slotValues = buildSlotValues(d, motivation, settings, true);
+      const payload = amo.slotFieldsPayload(flow.slotIndex, slotValues);
+
+      if (d.values.amount !== undefined) {
+        payload.push(amo.setValue(FIELD.MONTAGE_AMOUNT, d.values.amount));
+      }
+
+      if (payload.length > 0) {
+        await amo.patchLead(ctx, flow.leadId, { custom_fields_values: payload });
+      }
+
+      done.fields = true;
+    }
+
+    // Перерасчёт цены монтажа (T-8) по данным, уже лежащим в сделке.
+    if (!done.price) {
+      const lead = (await amo.getLeadsByIds(ctx, [flow.leadId]))[0];
+      const { calculated } = recalculatePrice(ctx, lead, flow.slotIndex, foremanName);
+
+      if (calculated) {
+        await amo.patchLead(ctx, flow.leadId, {
+          custom_fields_values: amo.slotFieldsPayload(flow.slotIndex, { price: calculated.price })
+        });
+      }
+
+      done.price = true;
+    }
+
+    if (!done.task) {
+      await amo.closeTask(ctx, flow.taskId, RESULT.FIXES_DONE);
+      done.task = true;
+    }
+  } catch (error) {
+    console.error("[Бот монтажников] Ошибка завершения правок:", error.stack || error.message);
+    await say(env, "❌ Не удалось сохранить правки. Уже записанное повторно записываться не будет — нажмите «Завершить отчёт» ещё раз.");
+    return;
+  }
+
+  if (!done.notify) {
+    const lead = await ctx.getLead(flow.leadId);
+
+    await messenger.notify(
+      ctx,
+      managerRow ? [managerRow.managerHandle] : [],
+      `Монтажник ${mdSafe(foremanName)} внёс правки в отчёт по договору № ${mdSafe(amo.contractNumber(ctx, lead))}.`
+    );
+    done.notify = true;
+  }
+
+  await finishCommon(env, state, `Задача "Правки в отчёт" закрыта с результатом "${RESULT.FIXES_DONE}".`);
+}
+
+// Запуск T-9 из flowFixes (после выбора сделки).
+async function startFixes(env, state, { leadId, taskId, slotIndex }) {
+  state.flow = {
+    name: "fixes",
+    mode: "fixes",
+    kind: "montage",
+    leadId,
+    taskId,
+    slotIndex,
+    cur: null,
+    data: { values: {}, files: {}, ktuDone: [], usedExtras: [], done: {}, productName: "" }
+  };
+
+  const lead = (await amo.getLeadsByIds(env.ctx, [leadId]))[0];
+  const productName = deals.productText(env.ctx, lead);
+
+  state.flow.data.productName = productName;
+  state.flow.extrasGroup = calc.getExtrasGroup(productName);
+
+  await STEPS.fixes_menu(env, state);
+}
+
+module.exports = { start, startFixes, handle, showList, B };
