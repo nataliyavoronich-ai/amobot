@@ -758,7 +758,7 @@ async function main() {
     assert.strictEqual(senseiCalls.length, senseiBefore + 1);
     assert.strictEqual(senseiCalls[senseiBefore].url, "https://api.sensei.plus/v1/process/start/78045");
 
-    // запасной вариант: без токена Sensei — «Контроль» для Юлии
+    // без токена Sensei задача для Юлии НЕ создаётся, руководитель получает сообщение
     delete process.env.SENSEI_TOKEN;
     tasks.push({ id: 911, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 100, complete_till: NOW, updated_at: NOW });
     await say(foreman, "Загрузить отчет");
@@ -775,8 +775,9 @@ async function main() {
     await say(foreman, "", photo);
     await say(foreman, "Завершить отчёт");
     process.env.SENSEI_TOKEN = "sensei-test";
-    assert.strictEqual(createdTasks.length, before + 2); // + «Получена оплата» + «Контроль» для Юлии
-    assert.ok(createdTasks.some((t) => t.responsible_user_id === F.USER.REDKINA_YULIA && t.text === "Заказчик отсутствовал на объекте. Выслать акт электронно."));
+    assert.strictEqual(createdTasks.length, before + 1); // только «Получена оплата»
+    assert.ok(!createdTasks.some((t) => t.responsible_user_id === F.USER.REDKINA_YULIA));
+    assert.match(await say(manager, "Уведомления"), /не удалось запустить процесс Sensei «Заказчик отсутствует»/);
     assert.ok(notes.includes("Заплатит позже"));
     assert.strictEqual(readSlotValue("kmFact"), 10);
   });

@@ -1027,17 +1027,11 @@ async function finalize(env, state, result) {
     }
 
     // 4) контрольные задачи
-    // «Заказчик отсутствует» — процесс Sensei 78045; если запустить не удалось
-    // (нет токена/ошибка) — создаём задачу «Контроль» для Редькиной Юлии сами.
+    // «Заказчик отсутствует» — только процесс Sensei 78045 (своих задач бот
+    // не создаёт). Если запустить не удалось — сообщаем руководителю.
     if (!done.absentTask && d.customerAbsent) {
       if (!(await sensei.startProcess(sensei.PROCESS.CUSTOMER_ABSENT, lead.id))) {
-        await safeCreateTask(ctx, warnings, "«Контроль»: заказчик отсутствовал на объекте, выслать акт электронно", {
-          leadId: lead.id,
-          responsibleUserId: USER.REDKINA_YULIA,
-          typeId: TASK_TYPE.CONTROL,
-          text: "Заказчик отсутствовал на объекте. Выслать акт электронно.",
-          hours: 1
-        });
+        warnings.push("не удалось запустить процесс Sensei «Заказчик отсутствует» — запустите его вручную");
       }
 
       done.absentTask = true;
