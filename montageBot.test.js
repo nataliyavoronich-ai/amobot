@@ -619,7 +619,18 @@ async function main() {
     await say(manager, "Завершить правки");
     assert.strictEqual(readSlotValue("price"), 40000);
     assert.strictEqual(leads[100].custom_fields_values.find((f) => f.field_id === 777).values[0].value, "Согласование не нужно");
-    assert.match(await say(foreman, "Уведомления"), /Стоимость по договору № 1234 пересмотрена\.[\s\S]*Финальное значение[\s\S]*Стоимость работ: 40000/);
+    const finalText = [
+      "Стоимость по договору № 1234 пересмотрена.",
+      "",
+      "Финальные значения:",
+      "- Стоимость работ: 40000",
+      "- Баллы КТУ: 7",
+      "- 150 км * 20 тариф = 3000",
+      "30 км * 10 = 300",
+      "#уведомление"
+    ].join("\n");
+
+    assert.ok((await say(foreman, "Уведомления")).includes(finalText));
 
     ctx.amoCrmGet = baseGet;
   });

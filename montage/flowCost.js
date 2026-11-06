@@ -83,8 +83,8 @@ async function selectForForeman(env, state, leadId) {
     `Ваш отчёт по договору № ${mdSafe(amo.contractNumber(ctx, lead))} принят руководителем.\n\n` +
       `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
       `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
-      `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
-      `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`,
+      `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+      `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`,
     ["Запросить пересмотр"],
     true
   );
@@ -189,8 +189,8 @@ async function finishForeman(env, state) {
         `${deals.folderLink(ctx, lead)}\n\n` +
         `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
         `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
-        `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
-        `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
+        `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+        `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
         `Обоснование для пересмотра: ${mdSafe(d.request)}`,
       { markdown: true }
     );
@@ -316,8 +316,8 @@ async function showManagerCard(env, state, lead) {
       `${deals.folderLink(ctx, lead)}\n\n` +
       `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
       `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
-      `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
-      `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
+      `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n\n` +
+      `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}\n\n` +
       `Обоснование для пересмотра: ${mdSafe(slot.note || "—")}`,
     [M_PRICE, M_KM, M_KTU, M_TARIFF, flow.edited ? M_FINISH : M_REJECT],
     true
@@ -380,11 +380,16 @@ async function handleManager(env, state, input) {
       await messenger.notify(
         ctx,
         foremanNames,
-        `Стоимость по договору № ${number} пересмотрена.\n\nФинальное значение:\n\n` +
-          `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
-          `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
-          `${calc.fmt(slot.kmFact)} × ${calc.fmt(rates.transport)} = ${calc.fmt(slot.kmFactTotal)}\n\n` +
-          `${calc.fmt(slot.kmDelivery)} × ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`
+        [
+          `Стоимость по договору № ${number} пересмотрена.`,
+          "",
+          "Финальные значения:",
+          `- Стоимость работ: ${calc.fmt(slot.price)}`,
+          `- Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}`,
+          `- ${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}`,
+          `${calc.fmt(slot.kmDelivery)} км * ${calc.fmt(rates.delivery)} = ${calc.fmt(slot.kmDeliveryTotal)}`,
+          "#уведомление"
+        ].join("\n")
       );
       state.flow = null;
       await say(env, "Правки сохранены, монтажник уведомлён.");
