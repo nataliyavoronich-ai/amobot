@@ -5244,6 +5244,7 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
     }
 
     const rowStats = { withFact: 0, leftStage: 0, withExecutor: 0 };
+    let statusName = null;
 
     for (const lead of await getLeadsByFieldDateRange(ctx, REPORT_PIPELINE_IDS, row.factDateFieldId, period)) {
       rowStats.withFact += 1;
@@ -5264,10 +5265,16 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
 
       const key = target ? userName : names.join(", ");
       const price = row.priceFieldId ? Number(ctx.getFieldValues(lead, row.priceFieldId)[0]) || 0 : 0;
-      const entry = result.get(key) || { count: 0, sum: 0 };
+      const entry = result.get(key) || { count: 0, sum: 0, details: [] };
 
       entry.count += 1;
       entry.sum += price;
+
+      if (statusName === null) {
+        statusName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+      }
+
+      entry.details.push({ contractNumber: getContractNumberText(ctx, lead), statusName, price });
       result.set(key, entry);
     }
 
@@ -5283,13 +5290,27 @@ async function collectCompletedOperations(ctx, settings, period, { pipelineId = 
 async function buildPerformerReport(ctx, settings, userName, period) {
   const operations = (await collectCompletedOperations(ctx, settings, period, { userName })).get(userName) || {
     count: 0,
-    sum: 0
+    sum: 0,
+    details: []
   };
 
-  return (
-    `Отчет за ${period.label}\nКол-во выполненных операций: ${operations.count}\n` +
+  const lines = [
+    `Отчет за ${period.label}`,
+    `Кол-во выполненных операций: ${operations.count}`,
     `Стоимость выполненных операций: ${formatReportMoney(operations.sum)}, руб`
-  );
+  ];
+
+  if (operations.details.length > 0) {
+    lines.push("", "Вошло в отчет:");
+
+    operations.details.forEach((detail, i) => {
+      lines.push(
+        `${i + 1}. № ${detail.contractNumber}, статус «${detail.statusName}», цена ${formatReportMoney(detail.price)} руб`
+      );
+    });
+  }
+
+  return lines.join("\n");
 }
 
 async function buildForemanReport(ctx, settings, pipelineId, period) {
