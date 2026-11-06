@@ -819,13 +819,13 @@ async function main() {
 
     const out = await say(foreman, "Завершить отчёт");
 
-    assert.match(out, /результатом "Промежуточный отчет\. Нужны детали"/);
+    assert.match(out, /результатом "Промежуточный отчет нужны детали"/);
     assert.ok(notes.includes("Изделие частично установлено"));
     assert.ok(notes.includes("Нужны кронштейны"));
     const link = leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.PHOTO_LINK);
 
     assert.ok(link && decodeURIComponent(link.values[0].value).includes("Нужны детали"), "ссылки «Нужны детали» должны заменить старую");
-    assert.strictEqual(tasks.find((t) => t.id === 908).result, "Промежуточный отчет. Нужны детали");
+    assert.strictEqual(tasks.find((t) => t.id === 908).result, "Промежуточный отчет нужны детали");
     assert.match(await say(manager, "Уведомления"), /Монтаж по договору № 1234 не завершен\. Нужны детали\. Монтажник Иванов Иван/);
   });
 

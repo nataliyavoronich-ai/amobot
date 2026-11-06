@@ -46,7 +46,7 @@ const RESULT = {
   LEKALS_DONE: "Лекалы сняты",
   MOVED: "Перенос выезда",
   INTERMEDIATE: "Промежуточный отчет",
-  INTERMEDIATE_DETAILS: "Промежуточный отчет. Нужны детали",
+  INTERMEDIATE_DETAILS: "Промежуточный отчет нужны детали",
   CONFIRMED: "Выезд подтвержден",
   TRIP_MOVED: "Выезд перенесен",
   DEFECT: "Дефект изделия",
