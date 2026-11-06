@@ -200,7 +200,7 @@ async function dealLine(ctx, lead, mode) {
   const floors = mdSafe(floorsText(ctx, lead));
 
   if (mode === "upcoming") {
-    return `${mdSafe(dateText(ctx, lead))}, ${number}, ${product}, Кол-во этажей: ${floors}.`;
+    return `${mdSafe(dateText(ctx, lead))}, ${contractLabel(ctx, lead)}, ${product}, Кол-во этажей: ${floors}.`;
   }
 
   const contact = await amo.getContactInfo(ctx, lead);

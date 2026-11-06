@@ -165,6 +165,7 @@ const leads = {
       field(F.FIELD.MONTAGER, "Иванов Иван", 11),
       field(F.FIELD.PRODUCT, "Закрытый каркас", 1),
       field(F.FIELD.CONTRACT_NUMBER, "1234"),
+      field(F.FIELD.CONTRACT_LINK, "https://pdf.test/1234.pdf"),
       field(F.FIELD.FLOORS, "2"),
       field(F.FIELD.ADDRESS, "ул. Тестовая, 16"),
       field(F.FIELD.TERMS, NOW),
@@ -668,8 +669,9 @@ async function main() {
   await check("T-3: предстоящие монтажи (бригадир и руководитель)", async () => {
     const out = await say(foreman, "Предстоящие монтажи");
 
-    assert.match(out, /15\.12\.2026, 1234, Закрытый каркас, Кол-во этажей: 2\./);
-    assert.match(out, /15\.12\.2026, 777, Деревянная лестница/);
+    // договор — текст со ссылкой на PDF проекта (если ссылка есть)
+    assert.ok(out.includes("15.12.2026, [Договор № 1234](https://pdf.test/1234.pdf), Закрытый каркас, Кол-во этажей: 2."), out);
+    assert.ok(out.includes("15.12.2026, Договор № 777, Деревянная лестница"), out); // ссылки нет — просто текст
     assert.match(await say(manager, "Предстоящие монтажи"), /Иванов Иван\n1\. [^\n]*1234/);
   });
 
