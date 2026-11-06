@@ -5214,10 +5214,58 @@ function scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt) {
   return promise;
 }
 
+// Защита от зависшей/очень медленной воронки: amoCrmGet сам повторяет
+// запрос при сетевом сбое (до 3 попыток), и если это совпало с нескольким
+// страницами подряд, просмотр одной воронки мог занимать существенно
+// дольше REPORT_SCAN_MAX_MS — а без внешнего предела Promise.all ниже ждал
+// бы её бесконечно, и отчёт не приходил вообще ни по одной воронке.
+// Жёсткий таймаут гарантирует, что отчёт всё равно досчитается по тем
+// воронкам, что успели ответить — пропавшую воронку считаем пустой и
+// явно логируем (сам скан, если он всё же досчитается позже, спокойно
+// попадёт в reportScanCache для следующего запроса).
+function withHardTimeout(promise, ms, fallbackValue, label) {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        console.error(`[Бот производства] Отчёт: ${label} не успела за ${ms} мс — считаю пустой для этого отчёта.`);
+        resolve(fallbackValue);
+      }
+    }, ms);
+
+    promise.then(
+      (value) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        }
+      },
+      (error) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          console.error(`[Бот производства] Отчёт: ${label} завершилась с ошибкой (${error.message}) — считаю пустой.`);
+          resolve(fallbackValue);
+        }
+      }
+    );
+  });
+}
+
 async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
   // Воронки грузим параллельно (amoCRM допускает до ~7 запросов в секунду).
   const scanned = await Promise.all(
-    pipelineIds.map((pipelineId) => scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt))
+    pipelineIds.map((pipelineId) =>
+      withHardTimeout(
+        scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt),
+        REPORT_SCAN_MAX_MS + 15000,
+        [],
+        `воронка ${pipelineId}`
+      )
+    )
   );
 
   return filterLeadsByDateField(ctx, scanned.flat(), fieldId, period);
