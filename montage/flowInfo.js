@@ -182,7 +182,7 @@ function foremanReportText(ctx, period, entries) {
       `Стоимость работ: ${calc.fmt(entry.slot.price)}`,
       `Баллов КТУ: ${calc.fmt(amo.ktuTotal(entry.slot))}`,
       `${calc.fmt(entry.slot.kmFact)} км * ${calc.fmt(entry.slot.tariff)} тариф = ${calc.fmt(entry.slot.kmFactTotal)}`,
-      `${calc.fmt(entry.slot.kmDelivery)} км * ${calc.fmt(entry.slot.tariffDelivery)} = ${calc.fmt(entry.slot.kmDeliveryTotal)}`
+      `${calc.fmt(entry.slot.kmDelivery)} км * ${calc.fmt(entry.slot.tariffDelivery)} тариф = ${calc.fmt(entry.slot.kmDeliveryTotal)}`
     );
   }
 
