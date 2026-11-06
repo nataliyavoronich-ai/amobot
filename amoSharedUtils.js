@@ -463,10 +463,57 @@ async function ydUploadFromUrlAndWait(path, fileUrl) {
   const completed = await ydWaitForUploadOperation(result && result.href);
 
   if (!completed) {
-    throw new Error(`Яндекс.Диск: загрузка файла в "${path}" не завершилась успехом за отведённое время.`);
+    // Яндекс.Диск не смог сам скачать файл по ссылке (или завис) — скачиваем
+    // файл сами и отправляем на Диск напрямую.
+    console.warn(`[Яндекс.Диск] Загрузка по ссылке не удалась, пробую напрямую: ${path}`);
+
+    try {
+      await ydUploadFromUrlDirect(path, fileUrl);
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Яндекс.Диск: загрузка файла в "${path}" не завершилась успехом ` +
+          `(по ссылке — не удалась; напрямую — ${error.message}).`
+      );
+    }
   }
 
   return result;
+}
+
+async function ydUploadFromUrlDirect(path, fileUrl) {
+  const download = await axios.get(fileUrl, {
+    responseType: "arraybuffer",
+    timeout: 60000,
+    maxContentLength: 100 * 1024 * 1024,
+    validateStatus: () => true
+  });
+
+  if (download.status !== 200) {
+    throw new Error(`не удалось скачать файл-источник, HTTP ${download.status}`);
+  }
+
+  const linkResponse = await axios.get("https://cloud-api.yandex.net/v1/disk/resources/upload", {
+    params: { path, overwrite: true },
+    headers: yandexDiskHeaders(),
+    timeout: 30000,
+    validateStatus: () => true
+  });
+
+  if (linkResponse.status !== 200 || !linkResponse.data || !linkResponse.data.href) {
+    throw new Error(`не удалось получить адрес загрузки, HTTP ${linkResponse.status}`);
+  }
+
+  const put = await axios.put(linkResponse.data.href, download.data, {
+    headers: { "Content-Type": "application/octet-stream" },
+    timeout: 120000,
+    maxBodyLength: 100 * 1024 * 1024,
+    validateStatus: () => true
+  });
+
+  if (put.status !== 201 && put.status !== 202 && put.status !== 200) {
+    throw new Error(`Диск не принял файл, HTTP ${put.status}`);
+  }
 }
 
 // ------------------------------------------------------------

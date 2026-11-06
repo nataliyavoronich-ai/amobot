@@ -78,6 +78,10 @@ define(["jquery"], function ($) {
     var settingsState = null; // текущее состояние формы (объект схемы настроек)
     var $root = null; // корневой контейнер расширенных настроек
     var activeTab = "roles";
+    var $cancelButton = null; // «Отменить» — возврат к последней сохранённой версии
+    var $saveButton = null; // кнопка «Сохранить» (подсвечивается, если есть несохранённые правки)
+    var settingsSource = "server"; // откуда загружены настройки: "server" | "native" | "empty"
+    var savedSnapshot = null; // JSON настроек на момент загрузки/последнего сохранения
 
     // ------------------------------------------------------------
     // ЗАГРУЗКА ЖИВЫХ ДАННЫХ AMOCRM (напрямую из браузера админа)
@@ -112,7 +116,7 @@ define(["jquery"], function ($) {
             id: p.id,
             name: p.name,
             statuses: statuses.map(function (s) {
-              return { id: s.id, name: s.name, pipeline_id: p.id };
+              return { id: s.id, name: s.name, pipeline_id: p.id, color: s.color || "" };
             })
           };
         });
@@ -126,7 +130,13 @@ define(["jquery"], function ($) {
 
       liveData.pipelines.forEach(function (p) {
         p.statuses.forEach(function (s) {
-          result.push({ id: s.id, name: s.name, pipelineName: p.name });
+          result.push({
+            id: s.id,
+            name: s.name,
+            pipelineName: p.name,
+            pipelineId: p.id,
+            color: s.color || ""
+          });
         });
       });
 
@@ -213,7 +223,9 @@ define(["jquery"], function ($) {
         headers: { "X-Widget-Secret": WIDGET_SECRET },
         contentType: "application/json",
         data: body ? JSON.stringify(body) : undefined,
-        dataType: "json"
+        dataType: "json",
+        // Без кэша браузера: иначе после сохранения можно увидеть старую версию.
+        cache: false
       });
     }
 
@@ -237,9 +249,21 @@ define(["jquery"], function ($) {
       // .catch() — используем универсальную форму .then(успех, ошибка).
       return backendRequest("GET").then(
         function (data) {
-          return data || parseNativeSettings() || emptySettings();
+          if (data) {
+            settingsSource = "server";
+            return data;
+          }
+
+          var nativeSettings = parseNativeSettings();
+
+          settingsSource = nativeSettings ? "native" : "empty";
+          console.warn("[Виджет Производство] На сервере нет сохранённых настроек, источник:", settingsSource);
+
+          return nativeSettings || emptySettings();
         },
-        function () {
+        function (xhr) {
+          settingsSource = "native";
+          console.warn("[Виджет Производство] Ошибка загрузки с сервера:", xhr && xhr.status, xhr && xhr.statusText);
           console.warn(
             "[Виджет Производство] Не удалось получить настройки с backend — " +
               "использую встроенное хранилище amoCRM как запасной вариант."
@@ -272,20 +296,35 @@ define(["jquery"], function ($) {
     // (productionBot.js: validateProductionWidgetSettings) — именно её
     // результат блокирует реальное сохранение.
     function validateClientSide(settings) {
+      // Совмещать можно директора и мастеров обоих цехов; остальное — нельзя.
+      var combinable = ["productionDirector", "metalShopForeman", "woodShopForeman"];
       var activeHandles = {};
 
       for (var i = 0; i < ROLE_DEFS.length; i++) {
-        var entries = settings.roles[ROLE_DEFS[i].key] || [];
+        var roleKey = ROLE_DEFS[i].key;
+        var entries = settings.roles[roleKey] || [];
 
         for (var j = 0; j < entries.length; j++) {
           var handle = (entries[j].handle || "").trim();
 
           if (entries[j].active && handle) {
-            if (activeHandles[handle]) {
-              return "Один пользователь не может одновременно состоять в двух активных ролях.";
+            var previous = activeHandles[handle] || [];
+            var all = previous.concat([roleKey]);
+
+            if (
+              previous.indexOf(roleKey) !== -1 ||
+              (all.length > 1 &&
+                all.some(function (key) {
+                  return combinable.indexOf(key) === -1;
+                }))
+            ) {
+              return (
+                "Один пользователь может совмещать только роли директора и мастеров; " +
+                "в других сочетаниях (например, с ОТК) и дважды в одной роли — нельзя."
+              );
             }
 
-            activeHandles[handle] = true;
+            activeHandles[handle] = all;
           }
         }
       }
@@ -338,11 +377,15 @@ define(["jquery"], function ($) {
       }
 
       // 1) Встроенное хранилище amoCRM — для нативного UX при переоткрытии.
-      syncNativeSettingsField(JSON.stringify(settingsState));
+      var snapshotToSave = JSON.stringify(settingsState);
+
+      syncNativeSettingsField(snapshotToSave);
 
       // 2) Backend / Redis — источник истины для бота в рантайме.
       backendRequest("POST", settingsState).then(
         function () {
+          savedSnapshot = snapshotToSave;
+          refreshSaveButton();
           showSaveMessage("Настройки сохранены.", false);
         },
         function (xhr) {
@@ -353,6 +396,142 @@ define(["jquery"], function ($) {
           showSaveMessage(message, true);
         }
       );
+    }
+
+    // «Сохранить» синяя, пока в форме есть правки, которых нет в сохранённом.
+    function refreshSaveButton() {
+      if (!$saveButton || !settingsState) {
+        return;
+      }
+
+      var dirty = JSON.stringify(settingsState) !== savedSnapshot;
+
+      if ($cancelButton) {
+        $cancelButton.prop("disabled", !dirty).css("cursor", dirty ? "pointer" : "default");
+      }
+
+      $saveButton
+        .css({
+          background: dirty ? "#2d7ff9" : "#f0f0f0",
+          color: dirty ? "#fff" : "#666",
+          border: dirty ? "1px solid #2d7ff9" : "1px solid #ccc",
+          "border-radius": "4px",
+          cursor: "pointer"
+        })
+        .attr("title", dirty ? "Есть несохранённые изменения" : "Изменений нет");
+    }
+
+    // Контейнер настроек в amoCRM может быть ниже окна и сам прокручиваться:
+    // тогда добавленные строки прячутся внутри него, а свободное место снизу
+    // не используется. Такие родители (ниже окна и с обрезанным содержимым)
+    // растягиваем по содержимому. Высокий «основной» скроллер страницы не трогаем.
+    function unclipAncestors() {
+      var node = $root && $root[0] && $root[0].parentNode;
+
+      while (node && node !== document.body && node !== document.documentElement) {
+        var style = window.getComputedStyle(node);
+        var clipped = /(auto|scroll|hidden)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 1;
+
+        if (clipped && node.clientHeight < window.innerHeight - 100) {
+          node.style.setProperty("height", "auto", "important");
+          node.style.setProperty("max-height", "none", "important");
+          node.style.setProperty("overflow-y", "visible", "important");
+          console.log("[Виджет Производство] Контейнер растянут по содержимому:", node.className || node.id || node.tagName);
+        }
+
+        node = node.parentNode;
+      }
+    }
+
+    // Блок настроек в amoCRM низкий (64px), а виджет в нём высокий. Если
+    // родитель выравнивает содержимое по ЦЕНТРУ (flex/grid/table-cell), высокий
+    // виджет вылезает и вверх, и вниз: верх оказывается за краем экрана, а при
+    // каждой новой строке всё «уезжает» вверх ещё на полстроки. Выравниваем по
+    // верху всех родителей виджета.
+    function alignAncestorsToTop() {
+      var node = $root && $root[0];
+
+      while (node && node.parentNode && node !== document.body) {
+        var parent = node.parentNode;
+        var style = parent.nodeType === 1 ? window.getComputedStyle(parent) : null;
+
+        if (style) {
+          if (/flex/.test(style.display)) {
+            node.style.setProperty("align-self", "flex-start", "important");
+            parent.style.setProperty("align-items", "flex-start", "important");
+
+            if (/column/.test(style.flexDirection)) {
+              parent.style.setProperty("justify-content", "flex-start", "important");
+            }
+          } else if (/grid/.test(style.display)) {
+            node.style.setProperty("align-self", "start", "important");
+            parent.style.setProperty("align-items", "start", "important");
+          }
+
+          if (/table-cell/.test(window.getComputedStyle(node).display)) {
+            node.style.setProperty("vertical-align", "top", "important");
+          }
+        }
+
+        node = parent;
+      }
+    }
+
+    // Браузерная «привязка прокрутки» (scroll anchoring) берёт якорем элемент
+    // ВНЕ виджета (ниже него) и при росте таблицы сдвигает прокрутку, чтобы
+    // якорь остался на месте — отсюда «уезжание» вверх. Запрещаем её на всех
+    // родителях, включая страницу.
+    function disableScrollAnchoring() {
+      var node = $root && $root[0];
+
+      while (node) {
+        if (node.style) {
+          node.style.setProperty("overflow-anchor", "none");
+        }
+
+        node = node.parentNode;
+      }
+
+      document.documentElement.style.setProperty("overflow-anchor", "none");
+      document.body.style.setProperty("overflow-anchor", "none");
+    }
+
+    // Перерисовка таблицы на мгновение сжимает страницу и сбрасывает/сдвигает
+    // прокрутку — запоминаем её у окна и всех родителей и возвращаем.
+    function preserveScroll(action) {
+      var saved = [];
+      var node = $root && $root[0];
+
+      while (node) {
+        if (node.scrollTop) {
+          saved.push([node, node.scrollTop]);
+        }
+
+        node = node.parentNode;
+      }
+
+      var scroller = document.scrollingElement;
+      var pageTop = scroller ? scroller.scrollTop : window.pageYOffset;
+
+      action();
+
+      unclipAncestors();
+      alignAncestorsToTop();
+      disableScrollAnchoring();
+
+      var restore = function () {
+        saved.forEach(function (item) {
+          item[0].scrollTop = item[1];
+        });
+
+        if (scroller) {
+          scroller.scrollTop = pageTop;
+        }
+      };
+
+      restore();
+      setTimeout(restore, 30);
+      setTimeout(restore, 150);
     }
 
     function showSaveMessage(text, isError) {
@@ -387,21 +566,48 @@ define(["jquery"], function ($) {
       return html;
     }
 
-    function statusOptionsHtml(selectedId, excludeIds) {
+    // «Успешно реализовано» / «Закрыто и не реализовано» имеют ОДИН И ТОТ ЖЕ id
+    // (142 / 143) во всех воронках, поэтому значение пункта списка — пара
+    // «воронка:статус». Выбранный статус ищем по обоим числам.
+    function statusKey(pipelineId, statusId) {
+      return pipelineId + ":" + statusId;
+    }
+
+    function parseStatusValue(value) {
+      var parts = String(value || "").split(":");
+
+      return parts.length === 2
+        ? { pipelineId: Number(parts[0]), statusId: Number(parts[1]) }
+        : { pipelineId: null, statusId: value ? Number(value) : null };
+    }
+
+    // selectedPipelineId необязателен: у старых записей воронка не сохранена,
+    // тогда выбирается первый статус с таким id.
+    function statusOptionsHtml(selectedId, excludeIds, selectedPipelineId) {
       var html = '<option value="">— выбрать статус —</option>';
+      var selectedDone = false;
 
       allLiveStatuses().forEach(function (s) {
-        if (excludeIds && excludeIds.indexOf(s.id) !== -1 && String(s.id) !== String(selectedId)) {
+        var key = statusKey(s.pipelineId, s.id);
+        var isSelected =
+          !selectedDone &&
+          String(s.id) === String(selectedId) &&
+          (!selectedPipelineId || String(s.pipelineId) === String(selectedPipelineId));
+
+        if (isSelected) {
+          selectedDone = true;
+        }
+
+        if (excludeIds && (excludeIds.indexOf(s.id) !== -1 || excludeIds.indexOf(key) !== -1) && !isSelected) {
           return;
         }
 
-        var selected = String(s.id) === String(selectedId) ? " selected" : "";
-
         html +=
           '<option value="' +
-          s.id +
+          key +
           '"' +
-          selected +
+          (s.color ? ' data-color="' + s.color + '" style="background:' + s.color + ';color:#333;"' : "") +
+          (isSelected ? " selected" : "") +
           ">" +
           escapeHtml(s.name) +
           " (" +
@@ -410,6 +616,22 @@ define(["jquery"], function ($) {
       });
 
       return html;
+    }
+
+    // Фон списка статуса = цвет выбранного статуса в amoCRM.
+    function paintStatusSelects() {
+      if (!$root) {
+        return;
+      }
+
+      $root.find("select").each(function () {
+        var color = $(this).find("option:selected").attr("data-color");
+        var hasColored = $(this).find("option[data-color]").length > 0;
+
+        if (hasColored) {
+          $(this).css({ background: color || "#fff", color: "#333" });
+        }
+      });
     }
 
     function escapeHtml(text) {
@@ -621,10 +843,7 @@ define(["jquery"], function ($) {
     // строку"), а не автоматически по всем живым статусам — статус для
     // строки выбирается из выпадающего списка, как и в "Сценариях".
     function renderStatusFieldMapTab() {
-      var $tab = $('<div class="production-widget__status-map"></div>').css({
-        "overflow-x": "auto",
-        "max-width": "100%"
-      });
+      var $tab = $('<div class="production-widget__status-map"></div>');
       var $table = $("<table></table>").css({ width: "100%", minWidth: "1100px", borderCollapse: "collapse" });
 
       var headers = [
@@ -661,7 +880,7 @@ define(["jquery"], function ($) {
             return r !== excludeRow && r.amoStatusId;
           })
           .map(function (r) {
-            return r.amoStatusId;
+            return statusKey(r.amoPipelineId, r.amoStatusId);
           });
       }
 
@@ -670,17 +889,14 @@ define(["jquery"], function ($) {
 
         var $statusTd = $('<td style="padding:6px;"></td>');
         var $statusSelect = $("<select></select>").html(
-          statusOptionsHtml(row.amoStatusId, usedStatusIds(row))
+          statusOptionsHtml(row.amoStatusId, usedStatusIds(row), row.amoPipelineId)
         );
 
         $statusSelect.on("change", function () {
-          var value = $(this).val();
+          var chosen = parseStatusValue($(this).val());
 
-          row.amoStatusId = value ? Number(value) : null;
-          row.amoPipelineId =
-            row.amoStatusId && liveData.statusesById[row.amoStatusId]
-              ? liveData.statusesById[row.amoStatusId].pipeline_id
-              : null;
+          row.amoStatusId = chosen.statusId;
+          row.amoPipelineId = chosen.pipelineId;
         });
 
         $statusTd.append($statusSelect);
@@ -721,11 +937,15 @@ define(["jquery"], function ($) {
         });
 
         var $nextStatusTd = $('<td style="padding:6px;"></td>');
-        var $nextStatusSelect = $("<select></select>").html(statusOptionsHtml(row.nextAmoStatusId));
+        var $nextStatusSelect = $("<select></select>").html(
+          statusOptionsHtml(row.nextAmoStatusId, null, row.nextAmoPipelineId)
+        );
 
         $nextStatusSelect.on("change", function () {
-          var value = $(this).val();
-          row.nextAmoStatusId = value ? Number(value) : null;
+          var chosen = parseStatusValue($(this).val());
+
+          row.nextAmoStatusId = chosen.statusId;
+          row.nextAmoPipelineId = chosen.pipelineId;
         });
 
         $nextStatusTd.append($nextStatusSelect);
@@ -747,24 +967,48 @@ define(["jquery"], function ($) {
           }
         );
 
-        $deleteTd.append($delete);
+        var arrowStyle = "cursor:pointer;color:#2d7ff9;margin-right:6px;user-select:none;";
+        var $up = $('<span style="' + arrowStyle + '" title="Выше">▲</span>').on("click", function () {
+          moveRow(row, -1);
+        });
+        var $down = $('<span style="' + arrowStyle + '" title="Ниже">▼</span>').on("click", function () {
+          moveRow(row, 1);
+        });
+
+        $deleteTd.css("white-space", "nowrap").append($up).append($down).append($delete);
         $tr.append($deleteTd);
 
         return $tr;
       }
 
       function rerenderTable() {
-        $tbody.empty();
+        preserveScroll(function () {
+          $tbody.empty();
 
-        settingsState.statusFieldMap.forEach(function (row) {
-          $tbody.append(renderRow(row));
+          settingsState.statusFieldMap.forEach(function (row) {
+            $tbody.append(renderRow(row));
+          });
         });
+      }
+
+      function moveRow(row, delta) {
+        var rows = settingsState.statusFieldMap;
+        var idx = rows.indexOf(row);
+        var target = idx + delta;
+
+        if (idx === -1 || target < 0 || target >= rows.length) {
+          return;
+        }
+
+        rows.splice(idx, 1);
+        rows.splice(target, 0, row);
+        rerenderTable();
       }
 
       rerenderTable();
 
       $table.append($tbody);
-      $tab.append($table);
+      $tab.append($('<div class="production-widget__scroll"></div>').append($table));
 
       var $addBtn = $(
         '<div style="margin-top:12px;cursor:pointer;color:#2d7ff9;">Добавить группу</div>'
@@ -777,7 +1021,8 @@ define(["jquery"], function ($) {
           planDateFieldId: null,
           factDateFieldId: null,
           priceFieldId: null,
-          nextAmoStatusId: null
+          nextAmoStatusId: null,
+          nextAmoPipelineId: null
         });
 
         rerenderTable();
@@ -812,8 +1057,10 @@ define(["jquery"], function ($) {
         var $select = $("<select></select>").html(statusOptionsHtml(entry.amoStatusId));
 
         $select.on("change", function () {
-          var value = $(this).val();
-          entry.amoStatusId = value ? Number(value) : null;
+          var chosen = parseStatusValue($(this).val());
+
+          entry.amoStatusId = chosen.statusId;
+          entry.amoPipelineId = chosen.pipelineId;
         });
 
         $row.append($select);
@@ -847,6 +1094,8 @@ define(["jquery"], function ($) {
       return html;
     }
 
+    var PRODUCT_FIELD_ID = 172572;
+
     function renderReadinessTab() {
       var $tab = $('<div class="production-widget__readiness"></div>');
       var matrix = settingsState.readinessMatrix;
@@ -855,25 +1104,8 @@ define(["jquery"], function ($) {
       matrix.statusIds = matrix.statusIds || [];
       matrix.cells = matrix.cells || {};
 
-      var $productFieldRow = $('<div style="margin-bottom:12px;"></div>');
-      $productFieldRow.append(
-        '<div style="font-weight:600;margin-bottom:4px;color:#333;">Поле «Продукт»</div>'
-      );
-
-      var $productFieldSelect = $("<select></select>").html(
-        fieldOptionsHtml(matrix.productFieldId, ["select", "multiselect"])
-      );
-
-      $productFieldSelect.on("change", function () {
-        var value = $(this).val();
-
-        matrix.productFieldId = value ? Number(value) : null;
-        matrix.products = [];
-        renderReadinessMatrixTable();
-      });
-
-      $productFieldRow.append($productFieldSelect);
-      $tab.append($productFieldRow);
+      // Поле всегда «Продукт» (id 172572), выбирать его не нужно.
+      matrix.productFieldId = PRODUCT_FIELD_ID;
 
       var $matrixContainer = $('<div class="production-widget__readiness-matrix"></div>').css({
         "overflow-x": "auto",
@@ -895,13 +1127,17 @@ define(["jquery"], function ($) {
       }
 
       function renderReadinessMatrixTable() {
+        preserveScroll(renderReadinessMatrixTableInner);
+      }
+
+      function renderReadinessMatrixTableInner() {
         $matrixContainer.empty();
 
         var productField = currentProductField();
 
         if (!productField) {
           $matrixContainer.append(
-            '<div style="color:#999;">Выберите поле «Продукт», чтобы добавлять строки.</div>'
+            '<div style="color:#c0392b;">Поле «Продукт» (id ' + PRODUCT_FIELD_ID + ') не найдено в amoCRM.</div>'
           );
           $addProductBtn.hide();
           return;
@@ -917,7 +1153,7 @@ define(["jquery"], function ($) {
 
         var usedStatusIds = matrix.statusIds.filter(Boolean);
 
-        var $table = $("<table></table>").css({ width: "100%", minWidth: "900px", borderCollapse: "collapse" });
+        var $table = $("<table></table>").css({ borderCollapse: "collapse" });
         var $headRow = $(
           '<tr><th style="padding:6px;"></th>' +
             '<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;">Готовность изделия</th></tr>'
@@ -925,19 +1161,19 @@ define(["jquery"], function ($) {
 
         matrix.statusIds.forEach(function (statusId, colIdx) {
           var $th = $('<th style="border-bottom:1px solid #ccc;padding:6px;text-align:left;"></th>');
-          var $select = $("<select></select>").html(
-            statusOptionsHtml(
-              statusId,
-              usedStatusIds.filter(function (id) {
-                return id !== statusId;
-              })
-            )
-          );
+          var $select = $("<select></select>")
+            .css({ width: "110px", "max-width": "110px" })
+            .html(
+              statusOptionsHtml(
+                statusId,
+                usedStatusIds.filter(function (id) {
+                  return id !== statusId;
+                })
+              )
+            );
 
           $select.on("change", function () {
-            var value = $(this).val();
-
-            matrix.statusIds[colIdx] = value ? Number(value) : null;
+            matrix.statusIds[colIdx] = parseStatusValue($(this).val()).statusId;
             renderReadinessMatrixTable();
           });
 
@@ -998,7 +1234,28 @@ define(["jquery"], function ($) {
             });
           });
 
-          $labelTd.append($productSelect).append($deleteRow);
+          var arrowStyle = "cursor:pointer;color:#2d7ff9;margin-right:6px;user-select:none;";
+          var moveProduct = function (delta) {
+            var target = rowIdx + delta;
+
+            if (target < 0 || target >= matrix.products.length) {
+              return;
+            }
+
+            var moved = matrix.products.splice(rowIdx, 1)[0];
+
+            matrix.products.splice(target, 0, moved);
+            renderReadinessMatrixTable();
+          };
+          var $upProduct = $('<span style="' + arrowStyle + '" title="Выше">▲</span>').on("click", function () {
+            moveProduct(-1);
+          });
+          var $downProduct = $('<span style="' + arrowStyle + '" title="Ниже">▼</span>').on("click", function () {
+            moveProduct(1);
+          });
+
+          $labelTd.css("white-space", "nowrap");
+          $labelTd.append($upProduct).append($downProduct).append($productSelect).append($deleteRow);
           $tr.append($labelTd);
 
           var $readinessTd = $('<td style="padding:6px;"></td>');
@@ -1024,6 +1281,7 @@ define(["jquery"], function ($) {
 
             var $td = $('<td style="padding:6px;"></td>');
             var $input = $('<input type="number" min="0" step="0.01" />')
+              .css({ width: "110px" })
               .val(value)
               .prop("disabled", !product.enumId || !statusId);
 
@@ -1042,7 +1300,7 @@ define(["jquery"], function ($) {
         });
 
         $table.append($tbody);
-        $matrixContainer.append($table);
+        $matrixContainer.append($('<div class="production-widget__scroll"></div>').append($table));
       }
 
       renderReadinessMatrixTable();
@@ -1077,7 +1335,7 @@ define(["jquery"], function ($) {
       // когда вкладки визуально "пропадали" при переходе на разделы с
       // большими таблицами).
       var $header = $(
-        '<div style="position:sticky;top:0;background:#fff;z-index:10;padding-top:4px;"></div>'
+        '<div style="background:#fff;padding-top:4px;padding-bottom:12px;"></div>'
       );
 
       var $botsRow = $(
@@ -1096,7 +1354,7 @@ define(["jquery"], function ($) {
 
       var $tabsBar = $(
         '<div style="display:flex;flex-wrap:wrap;row-gap:8px;column-gap:20px;' +
-          'border-bottom:2px solid #ddd;margin-bottom:20px;padding-bottom:4px;font-size:15px;"></div>'
+          'border-bottom:2px solid #ddd;margin-bottom:0;padding-bottom:4px;font-size:15px;"></div>'
       );
       var $tabBody = $('<div class="production-widget__tab-body"></div>').css({ "padding-top": "12px" });
 
@@ -1117,7 +1375,28 @@ define(["jquery"], function ($) {
 
       $header.append($tabsBar);
 
-      $root.append($header).append($tabBody);
+      $root.append($header);
+
+      if (settingsSource !== "server") {
+        $root.append(
+          '<div style="margin:8px 0;padding:8px 12px;background:#fdecea;color:#c0392b;border:1px solid #f5c6cb;">' +
+            "Настройки не загружены с сервера (источник: " +
+            (settingsSource === "native" ? "резервная копия в amoCRM, может быть устаревшей" : "пусто") +
+            "). Сохранение отключено, чтобы не затереть серверные настройки. Обновите страницу (Ctrl+F5); " +
+            "если сообщение повторяется — сообщите администратору." +
+            "</div>"
+        );
+      }
+
+      $root.append($tabBody);
+
+      // Высота закреплённой верхней части — на неё сдвигаем шапку таблицы.
+      var applyHeaderHeight = function () {
+        $root[0].style.setProperty("--pw-head-h", $header.outerHeight() + "px");
+      };
+
+      applyHeaderHeight();
+      setTimeout(applyHeaderHeight, 0);
 
       var currentTab = TABS.filter(function (t) {
         return t.key === activeTab;
@@ -1126,15 +1405,38 @@ define(["jquery"], function ($) {
       $tabBody.append(currentTab.render());
 
       var $footer = $('<div style="margin-top:20px;display:flex;align-items:center;gap:12px;"></div>');
-      var $saveBtn = $('<button type="button" style="padding:8px 16px;">Сохранить</button>').on(
+      $saveButton = $('<button type="button" style="padding:8px 16px;">Сохранить</button>').on(
         "click",
         saveSettings
       );
 
-      $footer.append($saveBtn);
+      if (settingsSource !== "server") {
+        $saveButton.prop("disabled", true);
+      }
+
+      $cancelButton = $('<button type="button" style="padding:8px 16px;">Отменить</button>').on(
+        "click",
+        function () {
+          if (!savedSnapshot) {
+            return;
+          }
+
+          settingsState = JSON.parse(savedSnapshot);
+          renderShell();
+          showSaveMessage("Изменения отменены.", false);
+        }
+      );
+
+      $footer.append($saveButton);
+      $footer.append($cancelButton);
       $footer.append('<span class="production-widget__save-message"></span>');
 
       $root.append($footer);
+      refreshSaveButton();
+      unclipAncestors();
+      alignAncestorsToTop();
+      disableScrollAnchoring();
+      setTimeout(unclipAncestors, 0);
     }
 
     // ------------------------------------------------------------
@@ -1213,13 +1515,27 @@ define(["jquery"], function ($) {
           // собственного явного color, из-за чего заголовки/подписи
           // пропадали визуально, хотя реально присутствовали в DOM.
           $root = $('<div class="production-widget"></div>').css({
-            "margin-top": "120px",
+            "margin-top": "16px",
             "padding-top": "8px",
             color: "#333",
             "font-size": "13px"
           });
 
           $root.append('<div style="padding:16px;color:#999;">Загрузка…</div>');
+
+          // Любая правка в форме — перепроверяем, есть ли несохранённое
+          // (после обработчика самого элемента, поэтому через setTimeout).
+          $root.on("change input click keyup", function () {
+            setTimeout(refreshSaveButton, 0);
+          });
+
+          if (window.MutationObserver) {
+            new MutationObserver(function () {
+              paintStatusSelects();
+            }).observe($root[0], { childList: true, subtree: true });
+          }
+
+          $root.on("change", "select", paintStatusSelects);
 
           // Общая разметка таблиц виджета (сетка ячеек) — общий <style>,
           // вынесенный ЗА пределы $root, т.к. renderShell() делает
@@ -1230,6 +1546,15 @@ define(["jquery"], function ($) {
               ".production-widget table { border-collapse: collapse; }" +
               ".production-widget table th, .production-widget table td {" +
               " border: 1px solid #ccc; color: #333; }" +
+              // Браузер сам «прокручивает следом» за сдвинувшимся содержимым при
+              // добавлении строки и уводит старые строки под шапку — отключаем.
+              ".production-widget, .production-widget * { overflow-anchor: none; }" +
+              // Шапка таблицы остаётся видимой под закреплённой строкой вкладок.
+              ".production-widget table thead th {" +
+              " position: sticky; top: 0; z-index: 5; background: #f7f7f7; }" +
+              // Таблицы листаются внутри собственной области на всю высоту окна.
+              ".production-widget .production-widget__scroll {" +
+              " max-height: calc(100vh - 330px); min-height: 220px; overflow: auto; }" +
               "</style>"
           );
 
@@ -1246,6 +1571,8 @@ define(["jquery"], function ($) {
               settingsState.readinessMatrix.statusIds = settingsState.readinessMatrix.statusIds || [];
               settingsState.readinessMatrix.cells = settingsState.readinessMatrix.cells || {};
               settingsState.scenarios = settingsState.scenarios || {};
+
+              savedSnapshot = JSON.stringify(settingsState);
 
               renderShell();
             },

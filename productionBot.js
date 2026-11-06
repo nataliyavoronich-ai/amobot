@@ -141,10 +141,153 @@ async function refreshProductionMessengerToken(ctx) {
 // 3. amoMessenger API (бот производства)
 // ============================================================
 
+// Служебные кнопки вида «Да (35562322)», «Да (cost:35562322:74635057)»,
+// «Вернуть на Сварка (35562322:90)» показываем пользователю как
+// «Да (№ ПД/77)». Исходный текст кнопки запоминаем в Redis (по получателю и
+// новому тексту), а при нажатии подставляем обратно (см. restoreTaggedButtonText),
+// поэтому остальной код продолжает работать со служебным текстом.
+const TAGGED_BUTTON_PATTERN = /^(.+?) \(((?:[a-z]+:)?(\d+)(?::\d+)?)\)$/;
+
+function taggedButtonRedisKey(directId, buttonText) {
+  return `production_btn:${directId}:${normalizeHandleName(buttonText)}`;
+}
+
+async function humanizeTaggedButtons(ctx, directId, buttons) {
+  if (!buttons || buttons.length === 0 || !ctx.getLead) {
+    return buttons;
+  }
+
+  const numbersByLeadId = new Map();
+  const result = [];
+
+  for (const button of buttons) {
+    const match = TAGGED_BUTTON_PATTERN.exec(String(button));
+
+    if (!match) {
+      result.push(button);
+      continue;
+    }
+
+    const leadId = match[3];
+
+    if (!numbersByLeadId.has(leadId)) {
+      let contractNumber = "";
+
+      try {
+        const lead = await ctx.getLead(leadId);
+
+        contractNumber = lead ? getContractNumberText(ctx, lead) : "";
+      } catch (error) {
+        console.error("[Бот производства] Не удалось получить номер договора для кнопки:", error.message);
+      }
+
+      numbersByLeadId.set(leadId, contractNumber);
+    }
+
+    const contractNumber = numbersByLeadId.get(leadId);
+
+    if (!contractNumber) {
+      result.push(button);
+      continue;
+    }
+
+    const shownText = `${match[1]} (№ ${contractNumber})`;
+
+    try {
+      await ctx.redisRequest(["SET", taggedButtonRedisKey(directId, shownText), String(button), "EX", 2592000]);
+      result.push(shownText);
+    } catch (error) {
+      console.error("[Бот производства] Не удалось сохранить кнопку:", error.message);
+      result.push(button);
+    }
+  }
+
+  return result;
+}
+
+// Обратная подстановка: «Да (№ ПД/77)» → исходный служебный текст кнопки.
+async function restoreTaggedButtonText(ctx, directId, text) {
+  if (!/\(№ .+\)$/.test(text)) {
+    return text;
+  }
+
+  try {
+    const response = await ctx.redisRequest(["GET", taggedButtonRedisKey(directId, text)]);
+
+    return response && response.result ? String(response.result) : text;
+  } catch (error) {
+    return text;
+  }
+}
+
+const MAX_MESSAGE_LENGTH = 3500;
+
+// Режем длинный текст по строкам: amoMessenger отвечает ошибкой на слишком
+// большие сообщения. Кнопки уходят с последней частью.
+function splitLongMessage(text) {
+  const parts = [];
+  let current = "";
+
+  for (const line of String(text).split("\n")) {
+    if (current && current.length + line.length + 1 > MAX_MESSAGE_LENGTH) {
+      parts.push(current);
+      current = "";
+    }
+
+    current = current ? `${current}\n${line}` : line;
+
+    while (current.length > MAX_MESSAGE_LENGTH) {
+      parts.push(current.slice(0, MAX_MESSAGE_LENGTH));
+      current = current.slice(MAX_MESSAGE_LENGTH);
+    }
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+const MAX_BUTTONS_PER_MESSAGE = 20;
+
 async function sendProductionDirectMessage(ctx, directId, text, buttons, options) {
   if (!productionAccessToken) {
     throw new Error("Токен amoMessenger бота производства не найден");
   }
+
+  if (String(text).length > MAX_MESSAGE_LENGTH) {
+    const parts = splitLongMessage(text);
+    let last = null;
+
+    for (let i = 0; i < parts.length; i++) {
+      const isLast = i === parts.length - 1;
+
+      last = await sendProductionDirectMessage(ctx, directId, parts[i], isLast ? buttons : undefined, options);
+    }
+
+    return last;
+  }
+
+  // amoMessenger принимает не более 20 кнопок в сообщении: остальные
+  // отправляем следующими сообщениями («Назад» и т.п. остаётся в последнем).
+  if (buttons && buttons.length > MAX_BUTTONS_PER_MESSAGE) {
+    let last = null;
+
+    for (let i = 0; i < buttons.length; i += MAX_BUTTONS_PER_MESSAGE) {
+      last = await sendProductionDirectMessage(
+        ctx,
+        directId,
+        i === 0 ? text : "Продолжение списка:",
+        buttons.slice(i, i + MAX_BUTTONS_PER_MESSAGE),
+        options
+      );
+    }
+
+    return last;
+  }
+
+  buttons = await humanizeTaggedButtons(ctx, directId, buttons);
 
   const url = `https://api.amo.tm/v1.3/direct/${directId}/sendMessage`;
 
@@ -178,10 +321,64 @@ async function sendProductionDirectMessage(ctx, directId, text, buttons, options
   }
 
   if (response.status >= 400) {
-    throw new Error(`amoMessenger (производство) DIRECT HTTP ${response.status}`);
+    throw new Error(
+      `amoMessenger (производство) DIRECT HTTP ${response.status}` +
+        ` (длина текста ${String(text).length}, кнопок ${buttons ? buttons.length : 0}): ` +
+        JSON.stringify(response.data).slice(0, 300)
+    );
   }
 
   return response;
+}
+
+// Имя пользователя по его user_id через API amoMessenger — для случаев, когда
+// вебхук не содержит имени (перенесено с сервера, правка по определению роли).
+async function getProductionAmoMessengerUserName(ctx, userId) {
+  if (!userId) {
+    return "";
+  }
+
+  const doRequest = () =>
+    axios.get("https://api.amo.tm/v1.3/users", {
+      params: { "user_id[]": userId },
+      headers: {
+        Authorization: `Bearer ${productionAccessToken}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 30000,
+      validateStatus: () => true
+    });
+
+  try {
+    let response = await doRequest();
+
+    if (response.status === 401 || response.status === 403) {
+      await refreshProductionMessengerToken(ctx);
+      response = await doRequest();
+    }
+
+    const items = response.data?._embedded?.items || [];
+
+    if (!Array.isArray(items) || items.length === 0) {
+      console.error(
+        "[Бот производства] API не вернул пользователя:",
+        response.status
+      );
+      return "";
+    }
+
+    const user = items.find(
+      (item) => String(item.id) === String(userId)
+    ) || items[0];
+
+    return String(user?.name || "").trim();
+  } catch (error) {
+    console.error(
+      "[Бот производства] Ошибка получения имени пользователя:",
+      error.response?.status || error.message
+    );
+    return "";
+  }
 }
 
 // ============================================================
@@ -243,7 +440,10 @@ function validateProductionWidgetSettings(settings) {
   // например "@nataliya_voronich"), а не по id пользователя amoCRM — это
   // разные системы, и живой список пользователей amoMessenger браузер
   // виджета получить не может.
-  const activeHandles = new Set();
+  // Один человек может быть одновременно директором и мастером (обоих
+  // цехов); остальные сочетания ролей, как и повтор внутри роли, запрещены.
+  const COMBINABLE_ROLE_KEYS = ["productionDirector", "metalShopForeman", "woodShopForeman"];
+  const activeHandles = new Map(); // имя → роли, в которых он активен
 
   for (const roleKey of KNOWN_ROLE_KEYS) {
     const entries = roles[roleKey];
@@ -272,15 +472,23 @@ function validateProductionWidgetSettings(settings) {
       }
 
       if (entry.active) {
-        if (activeHandles.has(handle)) {
+        const previousRoles = activeHandles.get(handle) || [];
+        const allRoles = [...previousRoles, roleKey];
+
+        if (
+          previousRoles.includes(roleKey) ||
+          (allRoles.length > 1 && allRoles.some((key) => !COMBINABLE_ROLE_KEYS.includes(key)))
+        ) {
           return {
             valid: false,
-            error: "Один пользователь не может одновременно состоять в двух активных ролях.",
+            error:
+              "Один пользователь может совмещать только роли директора и мастеров; " +
+              "в других сочетаниях (например, с ОТК) и дважды в одной роли — нельзя.",
             field: `roles.${roleKey}`
           };
         }
 
-        activeHandles.add(handle);
+        activeHandles.set(handle, allRoles);
       }
     }
   }
@@ -321,7 +529,8 @@ function validateProductionWidgetSettings(settings) {
       "planDateFieldId",
       "factDateFieldId",
       "priceFieldId",
-      "nextAmoStatusId"
+      "nextAmoStatusId",
+      "nextAmoPipelineId"
     ];
 
     for (const fieldName of optionalIdFields) {
@@ -530,27 +739,39 @@ const ROLE_LABELS = {
 // остальных пока плейсхолдер "в разработке" (ТЗ п.20 — поведение остальных
 // пунктов не описано, выдумывать его нельзя).
 const MAIN_MENU_BUTTONS = {
-  [PERFORMER_ROLE_KEY]: ["Распределение", "Исполнение", "ОТК", "Отчет", "Контроль сроков"],
-  otk: ["Промежуточный ОТК", "Финальный ОТК", "Не приняты работы"],
+  // Актуализация 2.1, п.2.1-2.4: порядок и названия кнопок.
+  [PERFORMER_ROLE_KEY]: [
+    "Распределение",
+    "Исполнение",
+    "В ОТК",
+    "Контроль сроков",
+    "Непринятые работы",
+    "Отчёт"
+  ],
+  // «ОТК перед монтажом» (T-21) — самостоятельная функция, ТЗ будет позже;
+  // пока обрабатывается заглушкой handleMenuPlaceholder.
+  otk: ["Промежуточный ОТК", "Финальный ОТК", "Непринятые работы", "ОТК перед монтажом"],
   metalShopForeman: [
     "Распределение",
     "Пересмотреть стоимость",
-    "Не приняты работы",
-    "Отчет",
+    "Непринятые работы",
+    "Отчёт",
     "Контроль сроков",
     "Вопрос от продаж",
-    "Не принято ОТК"
+    "Не принято ОТК",
+    "Ожидание решения"
   ],
   woodShopForeman: [
     "Распределение",
     "Пересмотреть стоимость",
-    "Не приняты работы",
-    "Отчет",
+    "Непринятые работы",
+    "Отчёт",
     "Контроль сроков",
     "Вопрос от продаж",
-    "Не принято ОТК"
+    "Не принято ОТК",
+    "Ожидание решения"
   ],
-  productionDirector: ["Контроль сроков", "Вопросы от продаж", "Отчет"]
+  productionDirector: ["Контроль сроков", "Вопросы от продаж", "Отчёт"]
 };
 
 // Роли, которым по ТЗ п.9 доступна "Распределение".
@@ -568,6 +789,27 @@ function normalizeHandleName(value) {
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
+}
+
+// Имя в amoMessenger («Иванов Иван») и значение поля «Исполнитель»
+// («Иванов иван @ivan_tg» — с ником Telegram) сравниваем по частичному
+// совпадению: ВСЕ слова имени пользователя должны входить в значение поля.
+// Обратное не работает: значение «Александр» не подходит пользователю
+// «Закаров Александр». Регистр, «ё» и знак «@» не важны.
+function nameTokens(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .split(/[\s,;]+/)
+    .map((token) => token.replace(/^@/, ""))
+    .filter(Boolean);
+}
+
+function namesMatch(fieldValue, userName) {
+  const field = nameTokens(fieldValue);
+  const user = nameTokens(userName);
+
+  return field.length > 0 && user.length > 0 && user.every((token) => field.includes(token));
 }
 
 // ТЗ п.7: ищем пользователя среди АКТИВНЫХ записей всех ролей по совпадению
@@ -591,7 +833,7 @@ function resolveUserRole(settings, userName) {
     }
 
     const match = entries.some(
-      (entry) => entry.active && normalizeHandleName(entry.handle) === normalizedUserName
+      (entry) => entry.active && namesMatch(entry.handle, userName)
     );
 
     if (match) {
@@ -602,29 +844,166 @@ function resolveUserRole(settings, userName) {
   return PERFORMER_ROLE_KEY;
 }
 
-async function sendMainMenu(ctx, directId, roleKey) {
+// Все роли пользователя (директор + мастера могут совпадать в одном человеке).
+function resolveUserRoles(settings, userName) {
+  const normalizedUserName = normalizeHandleName(userName);
+  const roles = [];
+
+  if (settings && settings.roles && normalizedUserName) {
+    for (const roleKey of KNOWN_ROLE_KEYS) {
+      const entries = settings.roles[roleKey];
+
+      if (
+        Array.isArray(entries) &&
+        entries.some((entry) => entry.active && namesMatch(entry.handle, userName))
+      ) {
+        roles.push(roleKey);
+      }
+    }
+  }
+
+  // Один человек — мастер обоих цехов (возможно, и директор): работает как
+  // мастер двух воронок, роль директора отдельно не нужна.
+  if (isCombinedForeman(roles)) {
+    return roles.filter((key) => key !== "productionDirector");
+  }
+
+  return roles.length > 0 ? roles : [PERFORMER_ROLE_KEY];
+}
+
+function isCombinedForeman(roleKeys) {
+  return Array.isArray(roleKeys) && FOREMAN_ROLE_KEYS.every((key) => roleKeys.includes(key));
+}
+
+// Роли, под которые выполняется нажатая кнопка: у «объединённого» мастера —
+// обе воронки по очереди (сначала металл, потом дерево), у остальных — текущая.
+// once — действие не зависит от воронки и выполняется один раз. Списки сделок
+// (listContext) от обоих запусков объединяются, чтобы выбор сделки работал.
+async function forEachMenuRole(state, once, task, { label = true, ctx = null, directId = null } = {}) {
+  const original = state.roleKey;
+  const combined = isCombinedForeman(state.roleKeys) && !once;
+  const roles = combined ? FOREMAN_ROLE_KEYS : [original];
+  let merged = null;
+
+  try {
+    for (const roleKey of roles) {
+      state.roleKey = roleKey;
+      delete state.listContext;
+
+      if (combined && label && ctx) {
+        await sendProductionDirectMessage(
+          ctx,
+          directId,
+          roleKey === "metalShopForeman" ? "Воронка: Металл" : "Воронка: Дерево"
+        );
+      }
+
+      await task(roleKey);
+
+      if (state.listContext) {
+        merged =
+          merged && merged.kind === state.listContext.kind
+            ? { kind: merged.kind, items: { ...merged.items, ...state.listContext.items } }
+            : state.listContext;
+      }
+    }
+  } finally {
+    state.roleKey = original;
+  }
+
+  if (merged) {
+    state.listContext = merged;
+  }
+}
+
+function buildUserState(settings, userName, directId) {
+  const roleKeys = resolveUserRoles(settings, userName);
+
+  rolesByDirectId.set(String(directId), roleKeys);
+
+  return { roleKey: roleKeys[0], roleKeys, userName };
+}
+
+// directId → роли пользователя: нужно меню (кнопка «Сменить роль»), которое
+// строится без доступа к состоянию пользователя.
+const rolesByDirectId = new Map();
+const SWITCH_ROLE_BUTTON = "Сменить роль";
+
+// У пользователя несколько ролей — действия по сделке выполняем от роли
+// мастера той воронки, в которой лежит сделка (а не только от выбранной).
+function roleForLead(state, lead) {
+  const needed = lead && MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+
+  return needed && state.roleKeys && state.roleKeys.includes(needed) && (FOREMAN_ROLE_KEYS.includes(state.roleKey) || state.roleKey === "productionDirector")
+    ? needed
+    : state.roleKey;
+}
+
+// ТЗ T-3.2.3.1: если активного ОТК нет, мастеру доступен «Финальный ОТК»
+// (после «Пересмотреть стоимость»). Проверяется на момент запроса меню.
+function getMenuButtons(roleKey, settings) {
   const buttons = MAIN_MENU_BUTTONS[roleKey] || [];
 
-  await sendProductionDirectMessage(ctx, directId, "Выберите тип задач", buttons);
+  if (!FOREMAN_ROLE_KEYS.includes(roleKey) || hasActiveOtk(settings)) {
+    return buttons;
+  }
+
+  const index = buttons.indexOf("Пересмотреть стоимость");
+
+  return [...buttons.slice(0, index + 1), "Финальный ОТК", ...buttons.slice(index + 1)];
+}
+
+async function sendMainMenu(ctx, directId, roleKey) {
+  const roleKeys = rolesByDirectId.get(String(directId)) || [];
+  const buttons = getMenuButtons(roleKey, productionWidgetSettingsCache);
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    isCombinedForeman(roleKeys)
+      ? "Мастер, выберите тип задач:"
+      : `${ROLE_LABELS[roleKey] ? `${ROLE_LABELS[roleKey]}, в` : "В"}ыберите тип задач:`,
+    roleKeys.length > 1 && !isCombinedForeman(roleKeys) ? [...buttons, SWITCH_ROLE_BUTTON] : buttons
+  );
+}
+
+async function showRoleChoice(ctx, directId, state) {
+  state.awaitingRoleChoice = true;
+  delete state.listContext;
+  delete state.designMenuStage;
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Выберите роль",
+    state.roleKeys.map((key) => ROLE_LABELS[key])
+  );
+}
+
+async function applyRoleChoice(ctx, directId, state, label) {
+  const roleKey = state.roleKeys.find((key) => ROLE_LABELS[key] === label);
+
+  delete state.awaitingRoleChoice;
+  delete state.pendingCard;
+  delete state.pendingTextInput;
+  delete state.awaitingReportPeriod;
+
+  if (roleKey) {
+    state.roleKey = roleKey;
+  }
+
+  await sendMainMenu(ctx, directId, state.roleKey);
 }
 
 // ТЗ п.7: полный поток авторизации по команде "старт".
 async function handleStartCommand(ctx, directId, userKey, userName) {
   await saveUserDirectId(ctx, userName, directId);
 
-  await sendProductionDirectMessage(ctx, directId, "Минуту, ищем вас в базе.");
+  const state = buildUserState(productionWidgetSettingsCache, userName, directId);
 
-  const roleKey = resolveUserRole(productionWidgetSettingsCache, userName);
+  productionUserState[userKey] = state;
 
-  productionUserState[userKey] = { roleKey, userName };
-
-  await sendProductionDirectMessage(
-    ctx,
-    directId,
-    `Вам присвоена роль: ${ROLE_LABELS[roleKey]}`
-  );
-
-  await sendMainMenu(ctx, directId, roleKey);
+  await sendMainMenu(ctx, directId, state.roleKey);
 }
 
 // Заглушка для пунктов меню, для которых ТЗ ещё не описывает поведение
@@ -708,6 +1087,16 @@ async function getPipelineIdByName(ctx, name) {
     }
   }
 
+  // Названия воронок в amoCRM могут отличаться от рабочих — для двух цехов
+  // надёжнее известные id воронок.
+  if (name === PIPELINE_NAME_METAL) {
+    return PIPELINE_ID_METAL;
+  }
+
+  if (name === PIPELINE_NAME_WOOD) {
+    return PIPELINE_ID_WOOD;
+  }
+
   return pipelinesCache[name] || null;
 }
 
@@ -788,7 +1177,11 @@ async function findFieldEnumForUserName(ctx, fieldId, userName) {
   const enums = (response.data && response.data.enums) || [];
   const normalizedUserName = normalizeHandleName(userName);
 
-  return enums.find((item) => normalizeHandleName(item.value) === normalizedUserName) || null;
+  return (
+    enums.find((item) => normalizeHandleName(item.value) === normalizedUserName) ||
+    enums.find((item) => namesMatch(item.value, userName)) ||
+    null
+  );
 }
 
 async function patchLead(ctx, leadId, body) {
@@ -806,6 +1199,18 @@ async function patchLead(ctx, leadId, body) {
 // двух значений — "Распределение" (сделка ждёт назначения исполнителя) и
 // "Исполнение" (уже назначена, в работе). Оба набора строк нужны отдельно
 // в разных местах сценария — не взаимозаменяемы.
+// Следующий статус из настроек. Системные статусы «Успешно реализовано» /
+// «Закрыто» имеют один id во всех воронках, поэтому воронку передаём явно.
+function nextStatusFields(row) {
+  const fields = { status_id: Number(row.nextAmoStatusId) };
+
+  if (row.nextAmoPipelineId) {
+    fields.pipeline_id = Number(row.nextAmoPipelineId);
+  }
+
+  return fields;
+}
+
 function findDistributionRows(settings) {
   return ((settings && settings.statusFieldMap) || []).filter((row) => row.botStatus === "distribution");
 }
@@ -843,6 +1248,16 @@ function getContractNumberDisplay(ctx, lead, { hyperlink = false } = {}) {
   const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
 
   return pdfLink ? `[${contractNumber}](${pdfLink})` : contractNumber;
+}
+
+// Номер договора для текстов сообщений: после номера в скобках ссылка на
+// «Проект в производство pdf» (если она есть). Для кнопок и сравнения номеров
+// используется getContractNumberText без ссылки.
+function getContractNumberWithLink(ctx, lead) {
+  const contractNumber = getContractNumberText(ctx, lead);
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+
+  return pdfLink ? `${contractNumber} (проект PDF: ${pdfLink})` : contractNumber;
 }
 
 // ТЗ T-2 — сортировка кнопок сделок в любом списке:
@@ -897,7 +1312,23 @@ async function loadUserDirectId(ctx, userName) {
   try {
     const response = await ctx.redisRequest(["GET", directIdRedisKey(userName)]);
 
-    return response.result || null;
+    if (response.result) {
+      return response.result;
+    }
+
+    // В поле «Исполнитель» имя может быть с ником Telegram — ищем ключ
+    // с частично совпадающим именем.
+    const keys = ((await ctx.redisRequest(["KEYS", "production_direct_id:*"])).result) || [];
+    const prefix = "production_direct_id:";
+    const matched = keys.filter((key) => namesMatch(userName, key.slice(prefix.length)));
+
+    if (matched.length === 1) {
+      const found = await ctx.redisRequest(["GET", matched[0]]);
+
+      return found.result || null;
+    }
+
+    return null;
   } catch (error) {
     console.error("[Бот производства] Не удалось загрузить direct_id:", error.message);
 
@@ -909,6 +1340,16 @@ async function loadUserDirectId(ctx, userName) {
 // известный direct_id (то есть кто хотя бы раз писал боту "старт" или любое
 // сообщение). Для тех, у кого direct_id не известен, сообщение не
 // отправляется — amoMessenger не даёт написать пользователю "в холодную".
+// Значения из amoCRM и от пользователей в сообщениях с разметкой (formatting_mode
+// md): экранируем спецсимволы (* _ ~ | `), чтобы они не ломали жирный шрифт.
+function mdSafe(ctx, value) {
+  if (ctx.sanitizeForMarkdown) {
+    return ctx.sanitizeForMarkdown(value);
+  }
+
+  return String(value === null || value === undefined ? "" : value);
+}
+
 async function notifyRoleUsers(ctx, settings, roleKey, text, buttons, options) {
   const entries = (settings && settings.roles && settings.roles[roleKey]) || [];
   let notified = 0;
@@ -1035,7 +1476,7 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
     return;
   }
 
-  let available = [];
+  const groups = []; // сделки, сгруппированные по статусам: { statusName, leads }
 
   for (const row of distributionRows) {
     if (!row.amoPipelineId || !row.amoStatusId || !row.executorFieldId) {
@@ -1045,36 +1486,89 @@ async function showDistributionListForPerformer(ctx, directId, userName, setting
     const enumOption = await findFieldEnumForUserName(ctx, row.executorFieldId, userName);
 
     if (!enumOption) {
+      console.log(
+        `[Бот производства] Распределение: «${userName}» не найден в списке значений поля ${row.executorFieldId} ` +
+          `(воронка ${row.amoPipelineId}, статус ${row.amoStatusId})`
+      );
       continue;
     }
 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId });
+    let assignedCount = 0;
+    const rowLeads = [];
 
     for (const lead of leads) {
       if (ctx.getFieldValues(lead, row.executorFieldId).length > 0) {
+        assignedCount++;
         continue; // уже назначено кому-то
       }
 
-      available.push(lead);
+      rowLeads.push(lead);
     }
+
+    if (rowLeads.length > 0) {
+      let statusName = "";
+
+      try {
+        statusName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+      } catch (error) {
+        console.error("[Бот производства] Распределение: не получено название статуса:", error.message);
+      }
+
+      groups.push({ statusName: statusName || "", leads: rowLeads });
+    }
+
+    console.log(
+      `[Бот производства] Распределение: «${userName}», воронка ${row.amoPipelineId}, статус ${row.amoStatusId}, ` +
+        `поле ${row.executorFieldId}: сделок в статусе ${leads.length}, уже с исполнителем ${assignedCount}`
+    );
   }
 
-  if (available.length === 0) {
+  if (groups.length === 0) {
     await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:\nНет доступных сделок.");
     return;
   }
 
-  available = sortDealsForButtons(ctx, available);
+  // Группировка по статусам: кнопка «<первая буква статуса>. №<договор>».
+  const buttons = [];
+  const legend = [];
 
-  const buttons = available.map((lead) => getContractNumberText(ctx, lead));
+  for (const group of groups) {
+    const letter = distributionStatusLetter(group.statusName);
 
-  await sendProductionDirectMessage(ctx, directId, "Сделки, доступные для распределения:", buttons);
+    for (const lead of sortDealsForButtons(ctx, group.leads)) {
+      buttons.push(`${letter}. №${getContractNumberText(ctx, lead)}`);
+    }
+
+    legend.push(`${letter}. — ${group.statusName || "—"} (${group.leads.length})`);
+  }
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `Сделки, доступные для распределения:\n${legend.join("\n")}`,
+    buttons
+  );
+}
+
+function distributionStatusLetter(statusName) {
+  const letter = String(statusName || "").trim().charAt(0).toLowerCase();
+
+  return letter || "—";
+}
+
+// «л. №ПД/77» → «ПД/77»; кнопка без префикса остаётся как есть.
+function stripDistributionButtonPrefix(text) {
+  const match = String(text || "").match(/^\S{1,2}\. №(.+)$/);
+
+  return match ? match[1].trim() : text;
 }
 
 // ТЗ T-4.3-4.5: нажатие на кнопку с номером договора из списка выше. Список
 // не храним между шагами (ТЗ — всегда живые данные) — ищем сделку заново
 // среди текущих доступных.
-async function tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText) {
+async function tryHandlePerformerDealSelection(ctx, directId, userName, settings, buttonText) {
+  const trimmedText = stripDistributionButtonPrefix(buttonText);
   const distributionRows = findDistributionRows(settings);
 
   for (const row of distributionRows) {
@@ -1090,7 +1584,7 @@ async function tryHandlePerformerDealSelection(ctx, directId, userName, settings
       continue;
     }
 
-    const contractNumber = getContractNumberText(ctx, lead);
+    const contractNumber = getContractNumberWithLink(ctx, lead);
 
     // T-4.4: сделка уже на согласовании у мастера — показать без кнопок.
     if (fieldIsTruthy(ctx, lead, DISTRIBUTION_FLAG_FIELD_ID)) {
@@ -1125,6 +1619,39 @@ function parseTaggedButtonCompat(ctx, text, label) {
   const match = String(text || "").match(new RegExp(`^${label} \\((.+)\\)$`));
 
   return match ? match[1] : null;
+}
+
+// Кнопки решения мастера по стоимости: на кнопке только действие и номер
+// договора («Подтвердить ПД/77»), без служебных id. Соответствие номера
+// договора и «сделка:этап» хранится в Redis.
+const COST_DECISION_LABELS = ["Подтвердить", "Отклонить", "Изменить"];
+
+function costDecisionRedisKey(contractNumber) {
+  return `production_cost_decision:${normalizeHandleName(contractNumber)}`;
+}
+
+async function buildCostDecisionButtons(ctx, lead, identifier) {
+  const contractNumber = getContractNumberText(ctx, lead);
+
+  await ctx.redisRequest(["SET", costDecisionRedisKey(contractNumber), String(identifier), "EX", 2592000]);
+
+  return COST_DECISION_LABELS.map((label) => `${label} ${contractNumber}`);
+}
+
+// Разбор кнопки «Подтвердить ПД/77»: { label, identifier } либо
+// { label, identifier: null }, если запись уже не найдена; null — это не
+// кнопка решения по стоимости (в том числе служебные «Отклонить (id)»).
+async function resolveCostDecisionButton(ctx, text) {
+  const match = String(text || "").match(/^(Подтвердить|Отклонить|Изменить) (.+)$/);
+
+  if (!match || /^\(.*\)$/.test(match[2])) {
+    return null;
+  }
+
+  const response = await ctx.redisRequest(["GET", costDecisionRedisKey(match[2])]);
+  const identifier = response && response.result ? String(response.result) : null;
+
+  return { label: match[1], identifier };
 }
 
 // ТЗ п.11.1/12/13: ответ "Да"/"Нет" на "Принять сделку [X]?" у исполнителя.
@@ -1171,7 +1698,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
   // ситуация могла измениться между показом списка и нажатием "Да".
   const hasOtkRejected = await performerHasOtkRejectedDeals(ctx, userName, settings);
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
 
   if (!hasOtkRejected) {
     // T-4.5.2.1
@@ -1190,7 +1717,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
         { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
         { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
       ],
-      status_id: Number(row.nextAmoStatusId)
+      ...nextStatusFields(row)
     });
 
     const product = getProductText(ctx, lead);
@@ -1215,7 +1742,7 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
   const pipelineName = (await getPipelineNameById(ctx, row.amoPipelineId)) || PIPELINE_NAME_METAL;
   const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
   const price = getPriceText(ctx, lead, row.priceFieldId);
-  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
+  const contractNumberLinked = getContractNumberWithLink(ctx, lead);
 
   // T-5, случай "Исполнитель берёт в работу новую сделку" — мастеру сразу
   // приходит сообщение 45 (т.к. сделка уже известна, промежуточный список не
@@ -1250,6 +1777,14 @@ async function handlePerformerDealConfirmReply(ctx, directId, userKey, userName,
 let pipelineNamesById = null;
 
 async function getPipelineNameById(ctx, pipelineId) {
+  if (Number(pipelineId) === PIPELINE_ID_METAL) {
+    return PIPELINE_NAME_METAL;
+  }
+
+  if (Number(pipelineId) === PIPELINE_ID_WOOD) {
+    return PIPELINE_NAME_WOOD;
+  }
+
   await getPipelineIdByName(ctx, PIPELINE_NAME_METAL); // прогреваем pipelinesCache при первом обращении
 
   if (!pipelineNamesById) {
@@ -1340,7 +1875,7 @@ async function tryHandleForemanDealSelection(ctx, directId, settings, pipelineNa
 
   const requesterUserName = ctx.getFieldValueJoined(lead, EXECUTOR_PENDING_FIELD_ID);
   const price = getPriceText(ctx, lead, row.priceFieldId);
-  const contractNumberLinked = getContractNumberDisplay(ctx, lead, { hyperlink: true });
+  const contractNumberLinked = getContractNumberWithLink(ctx, lead);
 
   await sendProductionDirectMessage(
     ctx,
@@ -1383,7 +1918,7 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
   const distributionRows = findDistributionRows(settings);
   const row = distributionRows.find((r) => Number(r.amoStatusId) === Number(lead.status_id));
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
 
   // T-5.3.2
   if (decision === "no") {
@@ -1435,7 +1970,7 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
       { field_id: DISTRIBUTION_FLAG_FIELD_ID, values: [{ value: false }] },
       { field_id: EXECUTOR_PENDING_FIELD_ID, values: [{ value: "" }] }
     ],
-    status_id: Number(row.nextAmoStatusId)
+    ...nextStatusFields(row)
   });
 
   const price = getPriceText(ctx, lead, row.priceFieldId);
@@ -1464,6 +1999,8 @@ async function handleApprovalReply(ctx, directId, leadId, decision, settings) {
 // --- Поля (см. "Таблица 2. Поля, используемые в боте" в ТЗ v2.0) ---
 const DEFECT_PHOTO_LINK_FIELD_ID = 555164; // "[Бот] Ссылка на фото", ссылка — фото дефекта (T-6.5.4/T-6.5.6); у фото готового изделия (T-6.5.1) своего поля-ссылки в ТЗ нет
 const NOT_ACCEPTED_TEXT_FIELD_ID = 555162; // "[Бот] Не принято", текстовая область
+const SCENARIO_FIELD_ID = 564075; // "[Бот] Сценарий производства", список
+const SCENARIO_RETURN_TO_DESIGN = "Вернуть в проектный отдел";
 const INTERMEDIATE_OTK_FLAG_FIELD_ID = 555172; // "[Бот] Промежуточный ОТК", флаг
 const COST_REVISION_FIELD_ID = 557156; // "[Бот] Согласование стоимости 1", текстовая область — JSON-массив {status_id, new_price, username}
 const DXF_LINK_FIELD_ID = 543270; // "Проект в производство dxf", ссылка
@@ -1651,6 +2188,11 @@ async function showExecutionListForPerformer(ctx, directId, userName, settings) 
     const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId, withTags: true });
 
     for (const lead of leads) {
+      // Только свои сделки: исполнитель этого этапа = пользователь.
+      if (!ctx.getFieldValues(lead, row.executorFieldId).includes(enumOption.value)) {
+        continue;
+      }
+
       // Актуализация п.2.1/§4.1: сделки, уже переданные на промежуточный
       // ОТК, показываются в отдельном пункте меню "В ОТК" (пока не
       // реализован) — здесь их пропускаем, чтобы не путать с активной
@@ -1684,7 +2226,7 @@ async function showExecutionListForPerformer(ctx, directId, userName, settings) 
     const price = getPriceText(ctx, lead, row.priceFieldId);
     const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
 
-    lines.push(`${i + 1}. № ${lead.__contractNumber}, Цена ${price}, руб. Срок изготовления ${planDate}`);
+    lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}, Цена ${price}, руб. Срок изготовления ${planDate}`);
   });
 
   const buttons = deals.map((lead) => lead.__contractNumber);
@@ -1706,7 +2248,7 @@ const EXECUTION_CARD_BUTTONS = [
 ];
 
 async function showExecutionDealCard(ctx, directId, userKey, lead, row) {
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const price = getPriceText(ctx, lead, row.priceFieldId);
   const planDate = ctx.formatDateFieldValue(lead, row.planDateFieldId) || "—";
 
@@ -1752,7 +2294,9 @@ async function tryHandleExecutionDealSelection(ctx, directId, userKey, userName,
 
     const lead = leads.find(
       (item) =>
-        getContractNumberText(ctx, item) === trimmedText && !fieldIsTruthy(ctx, item, INTERMEDIATE_OTK_FLAG_FIELD_ID)
+        getContractNumberText(ctx, item) === trimmedText &&
+        ctx.getFieldValues(item, row.executorFieldId).includes(enumOption.value) &&
+        !fieldIsTruthy(ctx, item, INTERMEDIATE_OTK_FLAG_FIELD_ID)
     );
 
     if (!lead) {
@@ -1780,11 +2324,14 @@ async function handleExecutionDealYes(ctx, directId, userKey) {
     return;
   }
 
+  // Актуализация п.1 («повторное нажатие не должно повторно менять
+  // статус/файл»): карточку забираем сразу, до первого await.
+  delete state.pendingCard;
+
   const lead = await ctx.getLead(pendingCard.leadId);
 
   if (!lead) {
     await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена. Возможно, она уже была изменена.");
-    delete state.pendingCard;
     return;
   }
 
@@ -1807,7 +2354,6 @@ async function handleExecutionDealYes(ctx, directId, userKey) {
   const baseName = `${statusName} ${ctx.todayMoscowDateText()}`;
 
   state.pendingUpload = { leadId: lead.id, row, kind: "done", baseName, uploadedPaths: [] };
-  delete state.pendingCard;
 
   await sendProductionDirectMessage(ctx, directId, "Прикрепите фото готового изделия");
 }
@@ -1834,6 +2380,10 @@ async function handleProductionUploadMessage(ctx, directId, userKey, imageUrls) 
   if (!pending || !imageUrls || imageUrls.length === 0) {
     return false;
   }
+
+  // Актуализация п.3.5: ход загрузки. «Успешно» — только после ответа
+  // Яндекс.Диска (ydUploadFromUrlAndWait ждёт завершения операции).
+  await sendProductionDirectMessage(ctx, directId, "Файлы получены, загружаю на Яндекс Диск");
 
   for (const fileUrl of imageUrls) {
     try {
@@ -1879,15 +2429,28 @@ async function handleFinishUpload(ctx, directId, userKey, userName, settings) {
     return;
   }
 
-  if (pending.kind === "done") {
-    await finishDoneUpload(ctx, directId, settings, pending);
-  } else if (pending.kind === "defect") {
-    await finishDefectUpload(ctx, directId, settings, pending);
-  } else if (pending.kind === "project_return_defect") {
-    await finishProjectReturnUpload(ctx, directId, pending);
-  }
-
+  // Забираем состояние до первого await: повторная доставка «Завершить
+  // загрузку» не должна повторно менять сделку и счётчики (актуализация
+  // п.1). Если шаг упал ДО записи в amoCRM — возвращаем состояние, чтобы
+  // пользователь мог повторить.
   delete state.pendingUpload;
+
+  try {
+    if (pending.kind === "done") {
+      await finishDoneUpload(ctx, directId, settings, pending);
+    } else if (pending.kind === "defect") {
+      await finishDefectUpload(ctx, directId, settings, pending);
+    } else if (pending.kind === "otk_defect") {
+      await finishOtkRejectUpload(ctx, directId, settings, pending);
+    } else if (pending.kind === "final_otk_defect") {
+      await finishFinalOtkRejectUpload(ctx, directId, settings, pending);
+    } else if (pending.kind === "project_return_defect") {
+      await finishProjectReturnUpload(ctx, directId, settings, userName, pending);
+    }
+  } catch (error) {
+    state.pendingUpload = pending;
+    throw error;
+  }
 }
 
 // T-6.5.1.4.1.2 → T-6.5.1.5: завершение загрузки фото готового изделия,
@@ -1896,31 +2459,47 @@ async function finishDoneUpload(ctx, directId, settings, pending) {
   const lead = await ctx.getLead(pending.leadId);
   const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
 
-  await sendProductionDirectMessage(ctx, directId, `Работа по сделке № ${contractNumber} завершена.`);
+  // Актуализация п.7.1: наличие активного ОТК проверяем на момент
+  // завершения, по свежим настройкам.
+  const currentSettings = productionWidgetSettingsCache || settings;
 
-  const otkEntries = (settings.roles && settings.roles.otk) || [];
-  const hasActiveOtk = otkEntries.some((entry) => entry.active && entry.handle);
+  if (hasActiveOtk(currentSettings)) {
+    const alreadyHandedOver = lead && fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID);
 
-  if (hasActiveOtk) {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: INTERMEDIATE_OTK_FLAG_FIELD_ID, values: [{ value: true }] }]
-    });
+    if (!alreadyHandedOver) {
+      await patchLead(ctx, pending.leadId, {
+        custom_fields_values: [{ field_id: INTERMEDIATE_OTK_FLAG_FIELD_ID, values: [{ value: true }] }]
+      });
 
-    // T-12 (Промежуточный ОТК) пока не реализован — заглушка: только
-    // уведомляем ОТК, собственного списка/UI сценария нет.
-    await notifyRoleUsers(
-      ctx,
-      settings,
-      "otk",
-      `Сделка № ${contractNumber} готова, ожидает промежуточного ОТК.`
-    );
+      // Актуализация п.3.5: ОТК получает «Принять изделие [№]», ссылку на
+      // PDF-проект и «Да»/«Нет». Решение — T-12 (handleOtkAcceptReply).
+      const pdfLink = lead ? ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) : "";
+
+      await notifyRoleUsers(
+        ctx,
+        currentSettings,
+        "otk",
+        `Принять изделие ${contractNumber}${pdfLink ? `\nПроект: ${pdfLink}` : ""}`,
+        [buildTaggedButtonCompat(ctx, "Да", pending.leadId), buildTaggedButtonCompat(ctx, "Нет", pending.leadId)]
+      );
+    }
   } else {
+    // Активного ОТК нет — по T-6.5.1.5.1 сделка идёт на следующий статус из
+    // настроек (ветка прямо описана в исходном ТЗ; см. вопрос №1 раздела 10
+    // актуализации — на согласовании у заказчика).
     const row = pending.row;
 
     if (row.nextAmoStatusId) {
-      await patchLead(ctx, pending.leadId, { status_id: Number(row.nextAmoStatusId) });
+      await patchLead(ctx, pending.leadId, { ...nextStatusFields(row) });
     }
   }
+
+  const handedTo = hasActiveOtk(currentSettings)
+    ? "Сделка передана ОТК"
+    : "Сделка передана на следующий этап производства";
+  const contractLabel = lead ? getContractNumberWithLink(ctx, lead) : contractNumber;
+
+  await sendProductionDirectMessage(ctx, directId, `Работа по сделке № ${contractLabel}. ${handedTo}`);
 }
 
 // ------------------------------------------------------------
@@ -2035,7 +2614,7 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
   await sendProductionDirectMessage(
     ctx,
     directId,
-    `Работа по сделке передана Мастеру (${activeManager ? activeManager.handle : "не назначен"}).`
+    `Запрос новой стоимости передан мастеру (${activeManager ? activeManager.handle : "не назначен"}).`
   );
 
   const contractNumber = getContractNumberText(ctx, lead);
@@ -2046,13 +2625,10 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
     ctx,
     settings,
     managerRoleKey,
-    `№ договора: ${contractNumber} Цена: ${currentPrice} рублей Проект: ${pdfLink} ` +
-      `Исполнитель: ${userName} предлагает следующую стоимость: ${price}.`,
-    [
-      buildTaggedButtonCompat(ctx, "Подтвердить", lead.id),
-      buildTaggedButtonCompat(ctx, "Отклонить", lead.id),
-      buildTaggedButtonCompat(ctx, "Изменить", lead.id)
-    ]
+    `№ договора: ${mdSafe(ctx, contractNumber)} Цена: ${mdSafe(ctx, currentPrice)} рублей Проект: ${pdfLink} ` +
+      `Исполнитель: ${mdSafe(ctx, userName)} предлагает следующую стоимость: **${mdSafe(ctx, price)}**.`,
+    await buildCostDecisionButtons(ctx, lead, `${lead.id}:${lead.status_id}`),
+    { markdown: true }
   );
 
   if (notified === 0) {
@@ -2067,7 +2643,18 @@ async function handleCostProposeInput(ctx, directId, userKey, userName, settings
 // прямой ответ мастера на push выше (Подтвердить/Отклонить/Изменить);
 // собственный пункт меню мастера "Пересмотреть стоимость" (T-8.1, список
 // всех ожидающих сделок) пока не реализован.
-async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, settings) {
+// Идентификатор в кнопках — «idСделки:idСтатуса» (в сделке может быть
+// несколько ожидающих решений, актуализация п.3.8.4). Старые сообщения с
+// одним id сделки обрабатываются по текущему статусу.
+function parseCostIdentifier(identifier) {
+  const [leadId, statusId] = String(identifier).split(":");
+
+  return { leadId, statusId: statusId ? Number(statusId) : null };
+}
+
+async function handleCostRevisionReply(ctx, directId, userKey, identifier, action, settings) {
+  const parsed = parseCostIdentifier(identifier);
+  const leadId = parsed.leadId;
   const lead = await ctx.getLead(leadId);
 
   if (!lead) {
@@ -2075,7 +2662,7 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
     return;
   }
 
-  const statusId = Number(lead.status_id);
+  const statusId = parsed.statusId || Number(lead.status_id);
   const entries = await getCostRevisionEntries(ctx, lead);
   const entry = getCostRevisionEntry(entries, statusId);
 
@@ -2090,7 +2677,7 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
 
   const executionRows = findExecutionRows(settings);
   const row = executionRows.find((r) => Number(r.amoStatusId) === statusId);
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const requesterDirectId = await loadUserDirectId(ctx, entry.username);
 
   if (action === "confirm") {
@@ -2103,20 +2690,16 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
       return;
     }
 
-    await patchLead(ctx, leadId, {
-      custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: entry.new_price }] }]
-    });
-    await removeCostRevisionEntry(ctx, lead, statusId);
+    // Актуализация п.3.8.1: сначала подтверждение «Да»/«Нет».
+    const stageName = await getStatusNameById(ctx, lead.pipeline_id, statusId);
+    const confirmId = `cost:${leadId}:${statusId}`;
 
-    if (requesterDirectId) {
-      await sendProductionDirectMessage(
-        ctx,
-        requesterDirectId,
-        `Согласована новая стоимость работ по сделке № ${contractNumber}, цена ${entry.new_price} рублей`
-      );
-    }
-
-    await sendProductionDirectMessage(ctx, directId, "Согласовано.");
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `Установить этапу ${stageName} стоимость работ ${entry.new_price}?`,
+      [buildTaggedButtonCompat(ctx, "Да", confirmId), buildTaggedButtonCompat(ctx, "Нет", confirmId)]
+    );
     return;
   }
 
@@ -2145,6 +2728,154 @@ async function handleCostRevisionReply(ctx, directId, userKey, leadId, action, s
 
     await sendProductionDirectMessage(ctx, directId, "Укажите стоимость работ");
   }
+}
+
+// Ответ «Да»/«Нет» на «Установить этапу … стоимость работ …?» (п.3.8.1).
+async function handleCostSetConfirm(ctx, directId, userKey, identifier, decision, settings) {
+  const { leadId, statusId } = parseCostIdentifier(identifier);
+
+  if (decision === "no") {
+    // «Нет» — возврат к предыдущему сообщению мастера.
+    await showCostEntryCard(ctx, directId, leadId, statusId, settings);
+    return;
+  }
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const entry = lead ? getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), statusId) : null;
+    const row = findExecutionRows(settings).find((r) => Number(r.amoStatusId) === Number(statusId));
+
+    if (!entry) {
+      await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+      return;
+    }
+
+    if (!row || !row.priceFieldId) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроено поле «Цена» для этого этапа. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    await patchLead(ctx, lead.id, {
+      custom_fields_values: [{ field_id: row.priceFieldId, values: [{ value: entry.new_price }] }]
+    });
+    await removeCostRevisionEntry(ctx, lead, statusId);
+
+    await sendProductionDirectMessage(ctx, directId, "Новая стоимость установлена.");
+    await notifyUserByName(
+      ctx,
+      entry.username,
+      `Согласована новая стоимость работ по сделке № ${getContractNumberWithLink(ctx, lead)}, цена ${entry.new_price} рублей`
+    );
+  });
+}
+
+// Карточка одного запроса (T-8.5 / п.3.8): текущая цена, проект, исполнитель и
+// предложенная им стоимость, кнопки решения.
+async function showCostEntryCard(ctx, directId, leadId, statusId, settings) {
+  const lead = await ctx.getLead(leadId);
+  const entry = lead ? getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), statusId) : null;
+
+  if (!entry) {
+    await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+    return;
+  }
+
+  const row = findExecutionRows(settings).find((r) => Number(r.amoStatusId) === Number(statusId));
+  const currentPrice = row ? getPriceText(ctx, lead, row.priceFieldId) : "—";
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID) || "(ссылка не найдена)";
+  const identifier = `${leadId}:${statusId}`;
+
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    `№ договора: ${mdSafe(ctx, getContractNumberText(ctx, lead))}\nЦена: ${mdSafe(ctx, currentPrice)} рублей\nПроект: ${pdfLink}\n` +
+      `Исполнитель: ${mdSafe(ctx, entry.username)} предлагает следующую стоимость: **${mdSafe(ctx, entry.new_price)}**.`,
+    await buildCostDecisionButtons(ctx, lead, identifier),
+    { markdown: true }
+  );
+}
+
+// «Пересмотреть стоимость» в меню мастера (T-8.1-8.3): список сделок его
+// воронки с ожидающими решениями, затем выбор этапа.
+async function showCostRevisionListForForeman(ctx, directId, userKey, roleKey, settings) {
+  const state = productionUserState[userKey];
+  const pipelineId = PIPELINE_ID_BY_FOREMAN_ROLE[roleKey];
+  const leads = [];
+  const seen = new Set();
+
+  for (const row of settings.statusFieldMap || []) {
+    if (!row.amoStatusId || Number(row.amoPipelineId) !== pipelineId) {
+      continue;
+    }
+
+    for (const lead of await getLeadsByPipeline(ctx, pipelineId, { statusId: row.amoStatusId, withTags: true })) {
+      if (seen.has(lead.id) || leadHasTag(lead, PM_DEAL_TAG_NAME)) {
+        continue;
+      }
+
+      seen.add(lead.id);
+
+      if ((await getCostRevisionEntries(ctx, lead)).length > 0) {
+        lead.__contractNumber = getContractNumberText(ctx, lead);
+        leads.push(lead);
+      }
+    }
+  }
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Пересмотреть стоимость работ:\nНет запросов.");
+    return;
+  }
+
+  const sorted = sortDealsForButtons(ctx, leads);
+  const lines = ["Пересмотреть стоимость работ:"];
+
+  sorted.forEach((lead, i) => lines.push(`${i + 1}. № договора ${getContractNumberWithLink(ctx, lead)}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "cost_lead", sorted));
+}
+
+// Выбрана сделка со списка: перечень этапов с запросами (в порядке строк
+// настроек), кнопки «1», «2»…
+async function showCostStageChoice(ctx, directId, userKey, lead, settings) {
+  const state = productionUserState[userKey];
+  const entries = await getCostRevisionEntries(ctx, lead);
+
+  const rows = (settings.statusFieldMap || []).filter((row) =>
+    entries.some((entry) => Number(entry.status_id) === Number(row.amoStatusId))
+  );
+
+  if (entries.length === 0 || rows.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан.");
+    return;
+  }
+
+  const lines = [`Пересмотреть стоимость работ в сделке № договора ${getContractNumberWithLink(ctx, lead)}:`];
+  const items = {};
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const entry = getCostRevisionEntry(entries, row.amoStatusId);
+    const stageName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+
+    lines.push(`\nСтатус сделки ${stageName}`);
+    lines.push(`${i + 1}. Исполнитель ${entry.username}, Цена ${getPriceText(ctx, lead, row.priceFieldId)}, руб.`);
+    items[String(i + 1)] = `${lead.id}:${row.amoStatusId}`;
+  }
+
+  if (rows.length === 1) {
+    delete state.listContext;
+    await showCostEntryCard(ctx, directId, lead.id, rows[0].amoStatusId, settings);
+    return;
+  }
+
+  state.listContext = { kind: "cost_stage", items };
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), Object.keys(items));
 }
 
 async function handleCostMasterChangeInput(ctx, directId, userKey, settings, trimmedText) {
@@ -2187,7 +2918,7 @@ async function handleCostMasterChangeInput(ctx, directId, userKey, settings, tri
   });
   await removeCostRevisionEntry(ctx, lead, pending.statusId);
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const requesterDirectId = entry ? await loadUserDirectId(ctx, entry.username) : null;
 
   if (requesterDirectId) {
@@ -2242,58 +2973,50 @@ async function handleReworkCommentInput(ctx, directId, userKey, trimmedText) {
 }
 
 async function finishDefectUpload(ctx, directId, settings, pending) {
-  const lead = await ctx.getLead(pending.leadId);
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const currentSettings = productionWidgetSettingsCache || settings;
+  const otkAvailable = hasActiveOtk(currentSettings);
 
-  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
-
-  const links = [];
-
-  for (const path of pending.uploadedPaths) {
-    try {
-      links.push(await ctx.ydGetFolderPublicUrl(path));
-    } catch (error) {
-      console.error("[Бот производства] Не удалось получить ссылку на фото дефекта:", error.message);
+  // T-6.5.4.6.1.3-4: ссылки на фото + флаг для ОТК (T-9) либо, если активного
+  // ОТК нет (актуализация п.7, ветка прямо описана в T-6.5.4.6.1.4.2), —
+  // флаг для Мастера (T-11). Одна запись в amoCRM, затем уведомления.
+  const fields = [
+    {
+      field_id: otkAvailable ? NOT_ACCEPTED_OTK_FLAG_FIELD_ID : NOT_ACCEPTED_MASTER_FLAG_FIELD_ID,
+      values: [{ value: true }]
     }
-  }
+  ];
 
   if (links.length > 0) {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] }]
-    });
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
   }
 
-  const contractNumber = lead ? getContractNumberText(ctx, lead) : `Сделка ${pending.leadId}`;
-  const otkEntries = (settings.roles && settings.roles.otk) || [];
-  const hasActiveOtk = otkEntries.some((entry) => entry.active && entry.handle);
+  await patchLead(ctx, pending.leadId, { custom_fields_values: fields });
 
-  if (hasActiveOtk) {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: NOT_ACCEPTED_OTK_FLAG_FIELD_ID, values: [{ value: true }] }]
-    });
+  await sendProductionDirectMessage(ctx, directId, "Ваше замечание принято");
 
-    // T-9 (решение ОТК по непринятой работе) пока не реализован — заглушка.
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead) {
+    return;
+  }
+
+  if (otkAvailable) {
+    const { comment, photos } = getRejectDetails(ctx, lead);
+
     await notifyRoleUsers(
       ctx,
-      settings,
+      currentSettings,
       "otk",
-      `Производство № ${contractNumber} не принято к исправлению. Примите решение о дальнейших работах.`
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
+        `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+      [
+        buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+        buildTaggedButtonCompat(ctx, "Отдать на доработку", lead.id)
+      ]
     );
   } else {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: NOT_ACCEPTED_MASTER_FLAG_FIELD_ID, values: [{ value: true }] }]
-    });
-
-    const pipelineName = (await getPipelineNameById(ctx, pending.row.amoPipelineId)) || PIPELINE_NAME_METAL;
-    const managerRoleKey = MANAGER_ROLE_BY_PIPELINE_NAME[pipelineName] || "metalShopForeman";
-
-    // T-11 (решение Мастера по непринятой работе) пока не реализован —
-    // заглушка.
-    await notifyRoleUsers(
-      ctx,
-      settings,
-      managerRoleKey,
-      `Производство № ${contractNumber} не принято к исправлению. Примите решение о дальнейших работах.`
-    );
+    await notifyMasterAboutDecision(ctx, currentSettings, lead);
   }
 }
 
@@ -2380,7 +3103,7 @@ async function handleMaterialsDecision(ctx, directId, leadId, decision, settings
     return;
   }
 
-  const contractNumber = getContractNumberText(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
   const reporterDirectId = await loadUserDirectId(ctx, reporterUserName);
 
   if (decision === "send") {
@@ -2492,11 +3215,7 @@ async function handleMaterialsCommentInput(ctx, directId, userKey, userName, set
 // ------------------------------------------------------------
 // 8.10 Карточка: "Вернуть в проектный отдел" (ТЗ T-6.5.6)
 // ------------------------------------------------------------
-// Последний шаг (флаг "[Бот] Передано в проектный отдел") заблокирован: в
-// ТЗ у этого поля указан тот же id (555172), что и у "Промежуточный ОТК"
-// (см. открытый вопрос №5 актуализации — "нужно сверить фактические id и
-// типы полей в amoCRM"). Угадывать id нельзя, поэтому комментарий и фото
-// сохраняются, а дальше сценарий останавливается с явным сообщением.
+// Вместо флага 555172 заполняется список 564075 «[Бот] Сценарий производства».
 
 async function handleExecutionReturnToDesign(ctx, directId, userKey) {
   const state = productionUserState[userKey];
@@ -2533,52 +3252,2313 @@ async function handleProjectReturnCommentInput(ctx, directId, userKey, trimmedTe
   await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
 }
 
-async function finishProjectReturnUpload(ctx, directId, pending) {
+async function finishProjectReturnUpload(ctx, directId, settings, userName, pending) {
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const fields = [];
+
+  if (links.length > 0) {
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
+  }
+
+  // T-6.5.6: вместо флага 555172 заполняем список «[Бот] Сценарий производства»
+  // значением «Вернуть в проектный отдел». Значение не найдено — ничего не пишем.
+  const scenarioOption = await findFieldEnumForUserName(ctx, SCENARIO_FIELD_ID, SCENARIO_RETURN_TO_DESIGN);
+
+  if (!scenarioOption) {
+    console.error(
+      `[Бот производства] В списке поля ${SCENARIO_FIELD_ID} нет значения «${SCENARIO_RETURN_TO_DESIGN}»: ` +
+        `сделка ${pending.leadId}, сценарий возврата в проектный отдел не записан.`
+    );
+
+    if (fields.length > 0) {
+      await patchLead(ctx, pending.leadId, { custom_fields_values: fields });
+    }
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      "Замечания и фото сохранены, но передать в проектный отдел не удалось: в amoCRM нет значения " +
+        `«${SCENARIO_RETURN_TO_DESIGN}» в поле «[Бот] Сценарий производства». Сообщите администратору.`
+    );
+    return;
+  }
+
+  fields.push({ field_id: SCENARIO_FIELD_ID, values: [{ value: scenarioOption.value, enum_id: scenarioOption.id }] });
+  await patchLead(ctx, pending.leadId, { custom_fields_values: fields });
+
   await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
 
+  const lead = await ctx.getLead(pending.leadId);
+  const foremanRole = lead && MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+  const currentSettings = productionWidgetSettingsCache || settings;
+
+  if (foremanRole) {
+    await notifyRoleUsers(
+      ctx,
+      currentSettings,
+      foremanRole,
+      `${userName} запросил ${getContractNumberWithLink(ctx, lead)} вернуть в проектный отдел.`
+    );
+  }
+}
+
+// ============================================================
+// 8b. ОТК И НЕПРИНЯТЫЕ РАБОТЫ
+// (ТЗ T-9…T-12a, T-19; актуализация 2.1 п.3.6-3.7, 4.1, 4.3, 5, 6.1, 7)
+// ============================================================
+// Списки строятся по живым данным amoCRM при каждом открытии пункта меню —
+// не зависят от push-уведомлений (актуализация п.1). Состояние «чьё сейчас
+// решение» хранится только в флагах сделки:
+//   555172 — ждёт промежуточного ОТК
+//   555166 — ждёт решения ОТК по замечанию исполнителя (T-9)
+//   555170 — ждёт решения исполнителя (T-10)
+//   555168 — ждёт решения мастера (T-11)
+// Каждое решение перед выполнением сверяется с этими флагами, поэтому
+// повторное нажатие кнопки из старого сообщения ничего не меняет.
+
+const NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID = 555170; // "[Бот] Не приняты работы: Исполнитель", флаг
+const INTERMEDIATE_OTK_REJECT_COUNTER_FIELD_ID = 560134; // "[Бот] Кол-во не принято промежуточн. ОТК", число
+const PM_DEAL_TAG_NAME = "РМ-сделка"; // ТЗ: не выводить в списках при любом запросе
+
+// Мастер определяется по воронке сделки (ТЗ «Ограничения и допущения»). По id,
+// а не по названию: названия воронок в amoCRM и в ТЗ расходятся.
+const PIPELINE_ID_METAL = 3285168;
+const PIPELINE_ID_WOOD = 3797814;
+
+const MANAGER_ROLE_BY_PIPELINE_ID = {
+  [PIPELINE_ID_METAL]: "metalShopForeman",
+  [PIPELINE_ID_WOOD]: "woodShopForeman"
+};
+
+const PIPELINE_ID_BY_FOREMAN_ROLE = {
+  metalShopForeman: PIPELINE_ID_METAL,
+  woodShopForeman: PIPELINE_ID_WOOD
+};
+
+const FOREMAN_ROLE_KEYS = Object.keys(PIPELINE_ID_BY_FOREMAN_ROLE);
+
+// Защита от одновременной обработки одной сделки (повторная доставка
+// события вебхука, двойное нажатие). Процесс один, поэтому достаточно памяти.
+const leadLocks = new Set();
+
+async function runExclusive(leadId, task) {
+  const key = String(leadId);
+
+  if (leadLocks.has(key)) {
+    console.log(`[Бот производства] Сделка ${key}: действие уже выполняется, повтор проигнорирован.`);
+    return false;
+  }
+
+  leadLocks.add(key);
+
+  try {
+    await task();
+    return true;
+  } finally {
+    leadLocks.delete(key);
+  }
+}
+
+function hasActiveOtk(settings) {
+  const entries = (settings && settings.roles && settings.roles.otk) || [];
+
+  return entries.some((entry) => entry.active && entry.handle);
+}
+
+async function notifyUserByName(ctx, userName, text, buttons) {
+  if (!userName) {
+    return false;
+  }
+
+  const directId = await loadUserDirectId(ctx, userName);
+
+  if (!directId) {
+    console.log(`[Бот производства] Не удалось уведомить «${userName}»: direct_id неизвестен.`);
+    return false;
+  }
+
+  try {
+    await sendProductionDirectMessage(ctx, directId, text, buttons);
+    return true;
+  } catch (error) {
+    console.error(`[Бот производства] Не удалось отправить уведомление «${userName}»:`, error.message);
+    return false;
+  }
+}
+
+async function collectPublicLinks(ctx, paths) {
   const links = [];
 
-  for (const path of pending.uploadedPaths) {
+  for (const path of paths) {
     try {
       links.push(await ctx.ydGetFolderPublicUrl(path));
     } catch (error) {
-      console.error("[Бот производства] Не удалось получить ссылку на фото дефекта:", error.message);
+      console.error("[Бот производства] Не удалось получить ссылку на фото:", error.message);
     }
   }
 
-  if (links.length > 0) {
-    await patchLead(ctx, pending.leadId, {
-      custom_fields_values: [{ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] }]
-    });
+  return links;
+}
+
+function findExecutionRowForLead(settings, lead) {
+  return (
+    findExecutionRows(settings).find(
+      (row) =>
+        Number(row.amoStatusId) === Number(lead.status_id) &&
+        (!row.amoPipelineId || Number(row.amoPipelineId) === Number(lead.pipeline_id))
+    ) || null
+  );
+}
+
+function getLeadExecutorName(ctx, lead, row) {
+  return row && row.executorFieldId ? ctx.getFieldValueJoined(lead, row.executorFieldId) : "";
+}
+
+function leadExecutorIs(ctx, lead, row, userName) {
+  if (!row || !row.executorFieldId) {
+    return false;
   }
 
-  console.error(
-    `[Бот производства] "Вернуть в проектный отдел": сделка ${pending.leadId} — остановлено перед записью ` +
-      "флага «Передано в проектный отдел» (конфликт id полей, см. открытый вопрос №5 в актуализации ТЗ)."
+  return ctx.getFieldValues(lead, row.executorFieldId).some((value) => namesMatch(value, userName));
+}
+
+function getLeadNumber(ctx, lead, fieldId) {
+  const value = Number(ctx.getFieldValues(lead, fieldId)[0]);
+
+  return Number.isFinite(value) ? value : 0;
+}
+
+function buildNotAcceptedHeadline(ctx, lead, comment) {
+  const row = productionWidgetSettingsCache ? findExecutionRowForLead(productionWidgetSettingsCache, lead) : null;
+  const executorName = getLeadExecutorName(ctx, lead, row);
+  const who = executorName ? `исполнителем (${executorName})` : "исполнителем";
+
+  return `НЕ ПРИНЯТО ${who} производство № ${getContractNumberWithLink(ctx, lead)} к исправлению: ${comment}`;
+}
+
+function getRejectDetails(ctx, lead) {
+  return {
+    comment: ctx.getFieldValueJoined(lead, NOT_ACCEPTED_TEXT_FIELD_ID) || "—",
+    photos: ctx.getFieldValueJoined(lead, DEFECT_PHOTO_LINK_FIELD_ID) || "—"
+  };
+}
+
+// Поля текущего цикла отказа (актуализация п.5.6). Счётчики отказов и записи
+// согласования стоимости не трогаем.
+function buildClearCycleFields(extraFlagIds = []) {
+  const flagIds = [
+    NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID,
+    NOT_ACCEPTED_MASTER_FLAG_FIELD_ID,
+    NOT_ACCEPTED_OTK_FLAG_FIELD_ID,
+    ...extraFlagIds
+  ];
+
+  return [
+    ...flagIds.map((fieldId) => ({ field_id: fieldId, values: [{ value: false }] })),
+    { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: "" }] },
+    { field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: null }
+  ];
+}
+
+// Сделки на статусах бота «Исполнение» (опционально — одной воронки), без
+// «РМ-сделок». Каждой сделке приписываем __row (строку настроек её этапа).
+async function loadExecutionLeads(ctx, settings, { pipelineId = null } = {}) {
+  const result = [];
+  const seen = new Set();
+
+  for (const row of findExecutionRows(settings)) {
+    if (!row.amoPipelineId || !row.amoStatusId) {
+      continue;
+    }
+
+    if (pipelineId && Number(row.amoPipelineId) !== Number(pipelineId)) {
+      continue;
+    }
+
+    const leads = await getLeadsByPipeline(ctx, row.amoPipelineId, { statusId: row.amoStatusId, withTags: true });
+
+    for (const lead of leads) {
+      if (seen.has(lead.id) || leadHasTag(lead, PM_DEAL_TAG_NAME)) {
+        continue;
+      }
+
+      seen.add(lead.id);
+      lead.__row = row;
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+      result.push(lead);
+    }
+  }
+
+  return result;
+}
+
+// Запоминаем, какая кнопка какой сделке соответствует, и в каком списке
+// пользователь сейчас находится — одинаковые номера договоров в разных
+// списках не должны путаться.
+function registerLeadList(state, kind, leads) {
+  const items = {};
+  const buttons = [];
+
+  for (const lead of leads) {
+    let label = lead.__contractNumber;
+
+    if (items[label]) {
+      label = `${label} #${lead.id}`;
+    }
+
+    items[label] = lead.id;
+    buttons.push(label);
+  }
+
+  state.listContext = { kind, items };
+
+  return buttons;
+}
+
+// Актуализация п.5.4: «ранее завершённый этап» — по дате «Факт готовности»,
+// а не по заполненному «Исполнителю». Текущий этап исключаем.
+function getCompletedStageRows(ctx, settings, lead) {
+  const rows = [];
+  const seen = new Set();
+
+  for (const row of findExecutionRows(settings)) {
+    if (!row.amoStatusId || !row.factDateFieldId) {
+      continue;
+    }
+
+    if (Number(row.amoPipelineId) !== Number(lead.pipeline_id)) {
+      continue;
+    }
+
+    if (Number(row.amoStatusId) === Number(lead.status_id) || seen.has(Number(row.amoStatusId))) {
+      continue;
+    }
+
+    if (ctx.getFieldValues(lead, row.factDateFieldId).length === 0) {
+      continue;
+    }
+
+    seen.add(Number(row.amoStatusId));
+    rows.push(row);
+  }
+
+  return rows;
+}
+
+async function buildMasterDecisionRequest(ctx, settings, lead) {
+  const { comment, photos } = getRejectDetails(ctx, lead);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
+  const stageButtons = [];
+
+  for (const row of getCompletedStageRows(ctx, settings, lead)) {
+    const stageName = await getStatusNameById(ctx, row.amoPipelineId, row.amoStatusId);
+
+    stageButtons.push(buildTaggedButtonCompat(ctx, `Вернуть на ${stageName}`, `${lead.id}:${row.amoStatusId}`));
+  }
+
+  // Финальный ОТК (T-13.4.2.7.2.1 / T-20.2.1): «Продолжить работу» нет —
+  // только выбор этапа возврата.
+  if (isAtFinalOtkStatus(lead) || isAtFinalOtkFailedStatus(lead)) {
+    stageButtons.push(buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`));
+
+    return {
+      text:
+        `Производство № ${contractNumber} НЕ принято.\nК исправлению: ${comment}. Фото дефекта: ${photos}\n` +
+        "Выберите этап, на который нужно вернуть сделку в работу:",
+      buttons: stageButtons
+    };
+  }
+
+  return {
+    text:
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
+      `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+    buttons: [
+      buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+      ...stageButtons,
+      buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`)
+    ]
+  };
+}
+
+async function notifyMasterAboutDecision(ctx, settings, lead) {
+  const roleKey = MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+
+  if (!roleKey) {
+    console.error(`[Бот производства] Сделка ${lead.id}: воронка ${lead.pipeline_id} не относится ни к одному мастеру.`);
+    return 0;
+  }
+
+  const { text, buttons } = await buildMasterDecisionRequest(ctx, settings, lead);
+
+  return notifyRoleUsers(ctx, settings, roleKey, text, buttons);
+}
+
+function parseStageReturnButton(text) {
+  const match = String(text || "").match(/^Вернуть на (.+) \((\d+):(\d+)\)$/);
+
+  return match ? { leadId: match[2], statusId: match[3] } : null;
+}
+
+// ------------------------------------------------------------
+// Списки (актуализация п.4.1, 4.3, 5.1, 6.1; T-9/T-10/T-11/T-12/T-12a/T-19)
+// ------------------------------------------------------------
+
+// 4.1 / T-12a: «В ОТК» у исполнителя — информационный список без кнопок.
+async function showInOtkListForPerformer(ctx, directId, userKey, userName, settings) {
+  delete productionUserState[userKey].listContext;
+
+  const leads = (await loadExecutionLeads(ctx, settings)).filter(
+    (lead) =>
+      fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID) && leadExecutorIs(ctx, lead, lead.__row, userName)
   );
+
+  if (leads.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Сделки, ожидающие прохождения контроля\nНет сделок.");
+    return;
+  }
+
+  const lines = ["Сделки, ожидающие прохождения контроля"];
+
+  sortDealsForButtons(ctx, leads).forEach((lead, i) => {
+    const price = getPriceText(ctx, lead, lead.__row.priceFieldId);
+    const planDate = ctx.formatDateFieldValue(lead, lead.__row.planDateFieldId) || "—";
+
+    lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}, Цена ${price} руб., Срок изготовления ${planDate}`);
+  });
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"));
+}
+
+// T-12.1: «Промежуточный ОТК», сделки сгруппированы по статусу сделки.
+async function showIntermediateOtkList(ctx, directId, userKey, settings) {
+  const state = productionUserState[userKey];
+  const leads = sortDealsForButtons(
+    ctx,
+    (await loadExecutionLeads(ctx, settings)).filter((lead) => fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID))
+  );
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Сделки, ожидающие прохождения контроля\nНет сделок.");
+    return;
+  }
+
+  const stageOrder = [];
+  const byStage = new Map();
+
+  for (const lead of leads) {
+    const stageName = await getStatusNameById(ctx, lead.pipeline_id, lead.status_id);
+
+    if (!byStage.has(stageName)) {
+      byStage.set(stageName, []);
+      stageOrder.push(stageName);
+    }
+
+    byStage.get(stageName).push(lead);
+  }
+
+  const ordered = [];
+  const lines = ["Сделки, ожидающие прохождения контроля"];
+
+  for (const stageName of stageOrder) {
+    lines.push(stageName);
+
+    for (const lead of byStage.get(stageName)) {
+      lines.push(`№ ${getContractNumberWithLink(ctx, lead)}.`);
+      ordered.push(lead);
+    }
+  }
+
+  const buttons = registerLeadList(state, "otk_intermediate", ordered);
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), buttons);
+}
+
+async function formatUnacceptedLine(ctx, lead, index) {
+  const { comment, photos } = getRejectDetails(ctx, lead);
+  const stageName = await getStatusNameById(ctx, lead.pipeline_id, lead.status_id);
+
+  return `${index}. № ${getContractNumberWithLink(ctx, lead)}, Этап: ${stageName}, К исправлению: ${comment}, Фото дефекта: ${photos}`;
+}
+
+async function showUnacceptedList(ctx, directId, userKey, title, kind, leads) {
+  const state = productionUserState[userKey];
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, `${title}\nНет сделок.`);
+    return;
+  }
+
+  const sorted = sortDealsForButtons(ctx, leads);
+  const lines = [title];
+
+  for (let i = 0; i < sorted.length; i++) {
+    lines.push(await formatUnacceptedLine(ctx, sorted[i], i + 1));
+  }
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, kind, sorted));
+}
+
+// 5.1 / T-9: решение ОТК по замечанию исполнителя.
+async function showUnacceptedListForOtk(ctx, directId, userKey, settings) {
+  const leads = (await loadExecutionLeads(ctx, settings)).filter((lead) =>
+    fieldIsTruthy(ctx, lead, NOT_ACCEPTED_OTK_FLAG_FIELD_ID)
+  );
+
+  await showUnacceptedList(ctx, directId, userKey, "Работы, непринятые исполнителем", "otk_unaccepted", leads);
+}
+
+// 4.3 / T-10: только то, что ждёт решения именно этого исполнителя.
+async function showUnacceptedListForPerformer(ctx, directId, userKey, userName, settings) {
+  const leads = (await loadExecutionLeads(ctx, settings)).filter(
+    (lead) =>
+      fieldIsTruthy(ctx, lead, NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID) && leadExecutorIs(ctx, lead, lead.__row, userName)
+  );
+
+  await showUnacceptedList(ctx, directId, userKey, "Работы, непринятые вами", "performer_unaccepted", leads);
+}
+
+// T-11: решение мастера (только его воронка).
+async function showUnacceptedListForForeman(ctx, directId, userKey, roleKey, settings) {
+  const leads = (await loadExecutionLeads(ctx, settings, { pipelineId: PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] })).filter(
+    (lead) => fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)
+  );
+
+  // Сделки, не принятые на финальном ОТК (статус «ОТК не пройдено», T-20.2.1),
+  // тоже ждут решения мастера. Объединение со списком T-11 — вопрос №4
+  // раздела 10 актуализации (точные фильтры «Непринятые работы»).
+  leads.push(...(await loadFinalFailedLeads(ctx, roleKey)));
+
+  await showUnacceptedList(ctx, directId, userKey, "Работы не приняты исполнителем:", "foreman_unaccepted", leads);
+}
+
+// ------------------------------------------------------------
+// T-20 «Ожидание решения» (мастер): подменю с направлениями.
+// Реализованы «Сделки, не принятые на Финальном ОТК» и «Сделки в закупку».
+// Направления с проектным отделом и «ОТК перед монтажом» зависят от
+// нерешённых вопросов ТЗ (ID 555172, процесс Sensei, T-21) — заглушки.
+// ------------------------------------------------------------
+const WAITING_DECISION_FINAL_FAILED = "Не приняты Финальным ОТК";
+const WAITING_DECISION_DESIGN = "Доработка проектным отделом";
+const WAITING_DECISION_BEFORE_MOUNT = "Не прошли ОТК перед монтажом";
+const WAITING_DECISION_PROCUREMENT = "Сделки в закупку";
+const WAITING_DECISION_BUTTONS = [
+  WAITING_DECISION_FINAL_FAILED,
+  WAITING_DECISION_DESIGN,
+  WAITING_DECISION_BEFORE_MOUNT,
+  WAITING_DECISION_PROCUREMENT
+];
+
+async function showWaitingDecisionMenu(ctx, directId) {
+  await sendProductionDirectMessage(
+    ctx,
+    directId,
+    "Выберите направление, где хотели бы принять решение по поводу сделки",
+    WAITING_DECISION_BUTTONS
+  );
+}
+
+async function showProcurementListForForeman(ctx, directId, userKey, roleKey) {
+  const state = productionUserState[userKey];
+  const leads = (await getLeadsByPipeline(ctx, PIPELINE_ID_BY_FOREMAN_ROLE[roleKey], { withTags: true })).filter(
+    (lead) => leadHasTag(lead, DOZAKUPKA_TAG_NAME)
+  );
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Сделки, у которых не хватает материала\nНет сделок.");
+    return;
+  }
+
+  leads.forEach((lead) => {
+    lead.__contractNumber = getContractNumberText(ctx, lead);
+  });
+
+  const sorted = sortDealsForButtons(ctx, leads);
+  const lines = ["Сделки, у которых не хватает материала"];
+
+  sorted.forEach((lead, i) => lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "materials_lead", sorted));
+}
+
+async function handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, choice) {
+  const state = productionUserState[userKey];
+
+  delete state.listContext;
+  delete state.designMenuStage;
+
+  if (choice === WAITING_DECISION_FINAL_FAILED) {
+    const leads = await loadFinalFailedLeads(ctx, roleKey);
+
+    await showUnacceptedList(ctx, directId, userKey, "Сделки, не прошедшие финальный контроль", "foreman_unaccepted", leads);
+  } else if (choice === WAITING_DECISION_DESIGN) {
+    await showDesignMenu(ctx, directId, userKey);
+  } else if (choice === WAITING_DECISION_PROCUREMENT) {
+    await showProcurementListForForeman(ctx, directId, userKey, roleKey);
+  } else {
+    // «Не прошли ОТК перед монтажом» (T-20.2.4 / T-21): этапы возврата и
+    // шаги не определены однозначно — ждём ТЗ.
+    await handleMenuPlaceholder(ctx, directId, choice);
+  }
+}
+
+// ------------------------------------------------------------
+// T-20.2.6 «Доработка проектным отделом» и возврат в проектный отдел
+// ------------------------------------------------------------
+// Состояние сделки хранится в списке «[Бот] Сценарий производства» (564075):
+// «Вернуть в проектный отдел» — исполнитель просит мастера передать сделку,
+// «Передано в проектный отдел» — мастер принял решение.
+const SCENARIO_TRANSFERRED_TO_DESIGN = "Передано в проектный отдел";
+const REWORK_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 62531197, // «На доработке», Производство
+  [PIPELINE_ID_WOOD]: 62531165 // «На доработке», Дерево Производство
+};
+// Этап «На доработке» ищем в воронке сделки по названию (id из ТЗ легко
+// перепутать между воронками); id из ТЗ — запасной вариант, и только если он
+// действительно относится к этой воронке.
+async function resolveReworkStatusId(ctx, pipelineId) {
+  await getStatusNameById(ctx, pipelineId, 0);
+
+  const names = statusNamesByPipelineId[pipelineId] || {};
+  const byName = Object.keys(names).find((id) => /доработк/i.test(names[id]));
+
+  if (byName) {
+    return Number(byName);
+  }
+
+  const configured = REWORK_STATUS_BY_PIPELINE[pipelineId];
+
+  return configured && (Object.keys(names).length === 0 || names[configured]) ? configured : null;
+}
+
+const DESIGN_SUBMENU_TRANSFER = "Передать на доработку";
+const DESIGN_SUBMENU_IN_WORK = "В работе";
+const DESIGN_SUBMENU_BACK = "Назад";
+const DESIGN_TAG_PREFIX = "design:";
+
+function leadScenarioIs(ctx, lead, value) {
+  const target = normalizeHandleName(value);
+
+  return ctx.getFieldValues(lead, SCENARIO_FIELD_ID).some((v) => normalizeHandleName(v) === target);
+}
+
+async function buildScenarioField(ctx, value) {
+  const option = await findFieldEnumForUserName(ctx, SCENARIO_FIELD_ID, value);
+
+  if (!option) {
+    throw new Error(`В поле ${SCENARIO_FIELD_ID} нет значения «${value}»`);
+  }
+
+  return { field_id: SCENARIO_FIELD_ID, values: [{ value: option.value, enum_id: option.id }] };
+}
+
+async function showDesignMenu(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+
+  state.designMenuStage = "menu";
+  await sendProductionDirectMessage(ctx, directId, "Выберите нужный статус", [
+    DESIGN_SUBMENU_TRANSFER,
+    DESIGN_SUBMENU_IN_WORK
+  ]);
+}
+
+function isDesignSubmenuInput(state, text) {
+  if (!state || !state.designMenuStage) {
+    return false;
+  }
+
+  return state.designMenuStage === "menu"
+    ? text === DESIGN_SUBMENU_TRANSFER || text === DESIGN_SUBMENU_IN_WORK
+    : text === DESIGN_SUBMENU_BACK;
+}
+
+async function handleDesignSubmenu(ctx, directId, userKey, roleKey, text) {
+  const state = productionUserState[userKey];
+  const pipelineId = PIPELINE_ID_BY_FOREMAN_ROLE[roleKey];
+
+  delete state.listContext;
+
+  if (text === DESIGN_SUBMENU_BACK) {
+    await showDesignMenu(ctx, directId, userKey);
+    return;
+  }
+
+  if (text === DESIGN_SUBMENU_TRANSFER) {
+    const leads = (await getLeadsByPipeline(ctx, pipelineId, { withTags: true })).filter(
+      (lead) => !leadHasTag(lead, PM_DEAL_TAG_NAME) && leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN)
+    );
+    const title = "Сделки, находящиеся на рассмотрение на передачу на доработку";
+
+    if (leads.length === 0) {
+      await sendProductionDirectMessage(ctx, directId, `${title}\nНет сделок.`);
+      return;
+    }
+
+    leads.forEach((lead) => {
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+    });
+
+    const sorted = sortDealsForButtons(ctx, leads);
+    const lines = [title];
+
+    sorted.forEach((lead, i) => lines.push(`${i + 1}.№ ${getContractNumberWithLink(ctx, lead)}.`));
+
+    await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "design_request", sorted));
+    return;
+  }
+
+  // «В работе»: сделки на этапе «На доработке» (T-20.2.2).
+  const leads = (
+    await getLeadsByPipeline(ctx, pipelineId, {
+      statusId: (await resolveReworkStatusId(ctx, pipelineId)) || REWORK_STATUS_BY_PIPELINE[pipelineId],
+      withTags: true
+    })
+  ).filter((lead) => !leadHasTag(lead, PM_DEAL_TAG_NAME));
+  const lines = ["Сделки, переданные в проектный отдел:"];
+
+  if (leads.length === 0) {
+    lines.push("Нет сделок.");
+  }
+
+  sortDealsForButtons(ctx, leads).forEach((lead, i) => lines.push(`${i + 1}.№ ${getContractNumberWithLink(ctx, lead)}.`));
+
+  state.designMenuStage = "inwork";
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), [DESIGN_SUBMENU_BACK]);
+}
+
+function isDesignDecisionValid(ctx, lead, roleKey, { allowFinalFailed, allowUnaccepted = false }) {
+  return (
+    lead &&
+    FOREMAN_ROLE_KEYS.includes(roleKey) &&
+    Number(lead.pipeline_id) === PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] &&
+    (leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN) ||
+      (allowFinalFailed && isAtFinalOtkFailedStatus(lead)) ||
+      // непринятая работа, решение по которой ждёт мастера
+      (allowUnaccepted && fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)))
+  );
+}
+
+// Мастер нажал «Вернуть в проектный отдел» (T-20.2.3.3.1.1): спрашиваем, что
+// не принято. Сам перевод делает handleDesignMasterCommentInput.
+async function handleDesignReturnButton(ctx, directId, userKey, leadId, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true, allowUnaccepted: true })) {
+      await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+      return;
+    }
+
+    state.pendingTextInput = { kind: "design_master_comment", leadId: lead.id };
+    await sendProductionDirectMessage(ctx, directId, "Укажите, что не принято");
+  });
+}
+
+async function handleDesignMasterCommentInput(ctx, directId, userKey, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  if (!trimmedText) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите, что не принято");
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  try {
+    await runExclusive(pending.leadId, async () => {
+      const lead = await ctx.getLead(pending.leadId);
+
+      if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: true, allowUnaccepted: true })) {
+        await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+        return;
+      }
+
+      const executorName = getLeadExecutorName(ctx, lead, findExecutionRowForLead(settings, lead));
+      const contractNumber = getContractNumberWithLink(ctx, lead);
+
+      const reworkStatusId = await resolveReworkStatusId(ctx, Number(lead.pipeline_id));
+
+      if (!reworkStatusId) {
+        state.pendingTextInput = pending;
+        await sendProductionDirectMessage(
+          ctx,
+          directId,
+          "❌ В воронке сделки не найден этап «На доработке». Обратитесь к администратору."
+        );
+        return;
+      }
+
+      await patchLead(ctx, lead.id, {
+        status_id: reworkStatusId,
+        pipeline_id: Number(lead.pipeline_id),
+        custom_fields_values: [
+          // решение по непринятой работе принято — флаги цикла снимаем
+          ...buildClearCycleFields().filter(
+            (field) => field.field_id !== NOT_ACCEPTED_TEXT_FIELD_ID && field.field_id !== DEFECT_PHOTO_LINK_FIELD_ID
+          ),
+          await buildScenarioField(ctx, SCENARIO_TRANSFERRED_TO_DESIGN),
+          { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: trimmedText }] }
+        ]
+      });
+
+      const text = `Решение руководителя по ${contractNumber}: вернуть в проектный отдел.`;
+
+      await sendProductionDirectMessage(ctx, directId, text);
+      await notifyRoleUsers(ctx, settings, "otk", text);
+      await notifyUserByName(ctx, executorName, text);
+    });
+  } catch (error) {
+    state.pendingTextInput = pending;
+    throw error;
+  }
+}
+
+async function handleDesignDecline(ctx, directId, userKey, leadId, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!isDesignDecisionValid(ctx, lead, roleForLead(state, lead), { allowFinalFailed: false })) {
+      await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+      return;
+    }
+
+    const executorName = getLeadExecutorName(ctx, lead, findExecutionRowForLead(settings, lead));
+    const text = `Решение руководителя по ${getContractNumberWithLink(ctx, lead)}: не передавать на доработку в проектный отдел.`;
+
+    await patchLead(ctx, lead.id, {
+      custom_fields_values: [
+        { field_id: SCENARIO_FIELD_ID, values: null },
+        { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: "" }] },
+        { field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: null }
+      ]
+    });
+
+    await sendProductionDirectMessage(ctx, directId, text);
+    await notifyUserByName(ctx, executorName, text);
+  });
+}
+
+// T-19: «Не принято ОТК» у мастера — информационный список без кнопок.
+async function showOtkRejectedInfoForForeman(ctx, directId, userKey, roleKey, settings) {
+  delete productionUserState[userKey].listContext;
+
+  const leads = (await loadExecutionLeads(ctx, settings, { pipelineId: PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] })).filter(
+    (lead) =>
+      fieldIsTruthy(ctx, lead, NOT_ACCEPTED_OTK_FLAG_FIELD_ID) || fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID)
+  );
+
+  if (leads.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Сделки не принятые ОТК:\nНет сделок.");
+    return;
+  }
+
+  const lines = ["Сделки не принятые ОТК:"];
+
+  for (const lead of sortDealsForButtons(ctx, leads)) {
+    const stageName = await getStatusNameById(ctx, lead.pipeline_id, lead.status_id);
+    const maker = getLeadExecutorName(ctx, lead, lead.__row) || "—";
+
+    lines.push(`№ ${getContractNumberWithLink(ctx, lead)}, Статус сделки: ${stageName}, Изготовитель: ${maker}`);
+  }
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"));
+}
+
+// ------------------------------------------------------------
+// Выбор сделки из списка → карточка с решением
+// ------------------------------------------------------------
+
+async function tryHandleOtkListSelection(ctx, directId, userKey, userName, settings, text) {
+  const state = productionUserState[userKey];
+  const listContext = state && state.listContext;
+
+  if (!listContext || !Object.prototype.hasOwnProperty.call(listContext.items, text)) {
+    return false;
+  }
+
+  // Пересмотр стоимости: выбор этапа внутри сделки хранит «idСделки:idСтатуса».
+  if (listContext.kind === "cost_stage") {
+    const { leadId, statusId } = parseCostIdentifier(listContext.items[text]);
+
+    await showCostEntryCard(ctx, directId, leadId, statusId, settings);
+    return true;
+  }
+
+  const lead = await ctx.getLead(listContext.items[text]);
+
+  if (!lead) {
+    await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена. Возможно, она уже была изменена.");
+    return true;
+  }
+
+  const contractNumber = getContractNumberText(ctx, lead);
+  const row = findExecutionRowForLead(settings, lead);
+  const stale = () =>
+    sendProductionDirectMessage(ctx, directId, `По сделке № ${getContractNumberWithLink(ctx, lead)} решение уже принято или не требуется.`);
+
+  if (listContext.kind === "cost_lead") {
+    await showCostStageChoice(ctx, directId, userKey, lead, settings);
+    return true;
+  }
+
+  if (listContext.kind === "otk_intermediate") {
+    if (!row || !fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID)) {
+      await stale();
+      return true;
+    }
+
+    const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `Принять изделие?\n№ ${contractNumber}${pdfLink ? `, ${pdfLink}` : ""}`,
+      [buildTaggedButtonCompat(ctx, "Да", lead.id), buildTaggedButtonCompat(ctx, "Нет", lead.id)]
+    );
+    return true;
+  }
+
+  if (listContext.kind === "otk_unaccepted") {
+    if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_OTK_FLAG_FIELD_ID)) {
+      await stale();
+      return true;
+    }
+
+    const { comment, photos } = getRejectDetails(ctx, lead);
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `${buildNotAcceptedHeadline(ctx, lead, comment)}\n` +
+        `Фото дефекта: ${photos}\nПримите решение о дальнейших работах.`,
+      [
+        buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+        buildTaggedButtonCompat(ctx, "Отдать на доработку", lead.id)
+      ]
+    );
+    return true;
+  }
+
+  if (listContext.kind === "performer_unaccepted") {
+    if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID) || !leadExecutorIs(ctx, lead, row, userName)) {
+      await stale();
+      return true;
+    }
+
+    await sendProductionDirectMessage(ctx, directId, buildPerformerDecisionText(ctx, lead), [
+      buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+      buildTaggedButtonCompat(ctx, "Не принять", lead.id)
+    ]);
+    return true;
+  }
+
+  if (listContext.kind === "materials_lead") {
+    if (!leadHasTag(lead, DOZAKUPKA_TAG_NAME)) {
+      await stale();
+      return true;
+    }
+
+    const comment = ctx.getFieldValueJoined(lead, NOT_ACCEPTED_TEXT_FIELD_ID) || "—";
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `№ договора: ${getContractNumberWithLink(ctx, lead)}. Не хватает деталей: ${comment}`,
+      [buildTaggedButtonCompat(ctx, "Отправить на закупку", lead.id), buildTaggedButtonCompat(ctx, "Отклонить", lead.id)]
+    );
+    return true;
+  }
+
+  if (listContext.kind === "design_request") {
+    if (!leadScenarioIs(ctx, lead, SCENARIO_RETURN_TO_DESIGN)) {
+      await stale();
+      return true;
+    }
+
+    const { comment, photos } = getRejectDetails(ctx, lead);
+    const executorName = getLeadExecutorName(ctx, lead, row) || "Исполнитель";
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `${executorName} указал, что № ${getContractNumberWithLink(ctx, lead)} необходимо отправить на доработку.\n${comment}\n${photos}`,
+      [
+        buildTaggedButtonCompat(ctx, "Вернуть в проектный отдел", `${DESIGN_TAG_PREFIX}${lead.id}`),
+        buildTaggedButtonCompat(ctx, "Отклонить", `${DESIGN_TAG_PREFIX}${lead.id}`)
+      ]
+    );
+    return true;
+  }
+
+  if (listContext.kind === "final_otk") {
+    await showFinalOtkCard(ctx, directId, lead, settings, roleForLead(state, lead));
+    return true;
+  }
+
+  if (listContext.kind === "foreman_unaccepted") {
+    if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID) && !isAtFinalOtkFailedStatus(lead)) {
+      await stale();
+      return true;
+    }
+
+    const request = await buildMasterDecisionRequest(ctx, settings, lead);
+
+    await sendProductionDirectMessage(ctx, directId, request.text, request.buttons);
+    return true;
+  }
+
+  return false;
+}
+
+// Актуализация п.5.2: сообщение исполнителю о решении ОТК.
+function buildPerformerDecisionText(ctx, lead) {
+  const { comment, photos } = getRejectDetails(ctx, lead);
+
+  return (
+    `№ ${getContractNumberWithLink(ctx, lead)}\nК исправлению: ${comment}\nФото дефекта: ${photos}\n` +
+    "Решение специалиста ОТК: продолжить работу.\nПринять сделку?"
+  );
+}
+
+// ------------------------------------------------------------
+// T-12.4: решение промежуточного ОТК «Да» / «Нет»
+// ------------------------------------------------------------
+
+async function handleOtkAcceptReply(ctx, directId, userKey, leadId, decision, settings) {
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const row = lead ? findExecutionRowForLead(settings, lead) : null;
+
+    if (!lead || !row || !fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID)) {
+      await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+      return;
+    }
+
+    const contractNumber = getContractNumberWithLink(ctx, lead);
+
+    if (decision === "no") {
+      productionUserState[userKey].pendingTextInput = { kind: "otk_reject_comment", leadId: lead.id, row };
+      await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+      return;
+    }
+
+    // T-12.4.1 / актуализация п.3.6.
+    if (!row.nextAmoStatusId) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроен следующий статус amoCRM для текущего этапа. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    const executorName = getLeadExecutorName(ctx, lead, row);
+
+    await patchLead(ctx, lead.id, {
+      ...nextStatusFields(row),
+      custom_fields_values: buildClearCycleFields([INTERMEDIATE_OTK_FLAG_FIELD_ID])
+    });
+
+    try {
+      await removeTagFromLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+    } catch (error) {
+      console.error(`[Бот производства] Сделка ${lead.id}: не удалось снять тег «${OTK_REJECTED_TAG_NAME}»:`, error.message);
+    }
+
+    await sendProductionDirectMessage(ctx, directId, `Изделие по сделке № ${contractNumber} принято.`);
+    await notifyUserByName(ctx, executorName, `Производство ${contractNumber} принято`);
+  });
+}
+
+// T-12.4.2.1-3: комментарий ОТК → фото дефекта.
+async function handleOtkRejectCommentInput(ctx, directId, userKey, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  if (!trimmedText) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  state.pendingUpload = {
+    leadId: pending.leadId,
+    row: pending.row,
+    kind: "otk_defect",
+    baseName: "Дефект изделия",
+    comment: trimmedText,
+    uploadedPaths: []
+  };
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
+}
+
+// T-12.4.2.6-9 и актуализация п.3.7/6.1: одна запись в amoCRM (комментарий,
+// ссылки, счётчик +1, флаг исполнителя, сброс флага ОТК), затем тег и
+// уведомления. Бросать исключение можно только ДО записи — иначе повторная
+// попытка увеличила бы счётчик второй раз (см. handleFinishUpload).
+async function finishOtkRejectUpload(ctx, directId, settings, pending) {
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead || !fieldIsTruthy(ctx, lead, INTERMEDIATE_OTK_FLAG_FIELD_ID)) {
+    await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+    return;
+  }
+
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const row = findExecutionRowForLead(settings, lead) || pending.row;
+  const executorName = getLeadExecutorName(ctx, lead, row);
+  const contractNumber = getContractNumberWithLink(ctx, lead);
+  const counter = getLeadNumber(ctx, lead, INTERMEDIATE_OTK_REJECT_COUNTER_FIELD_ID) + 1;
+
+  const fields = [
+    { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: pending.comment }] },
+    { field_id: INTERMEDIATE_OTK_REJECT_COUNTER_FIELD_ID, values: [{ value: counter }] },
+    { field_id: NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID, values: [{ value: true }] },
+    // Работа больше не ждёт контроля: сделка снова в списке «Исполнение»
+    // (группа «непринятые ОТК»), факт готовности не очищаем.
+    { field_id: INTERMEDIATE_OTK_FLAG_FIELD_ID, values: [{ value: false }] }
+  ];
+
+  if (links.length > 0) {
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
+  }
+
+  await patchLead(ctx, lead.id, { custom_fields_values: fields });
+
+  try {
+    await addTagToLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+  } catch (error) {
+    console.error(`[Бот производства] Сделка ${lead.id}: не удалось поставить тег «${OTK_REJECTED_TAG_NAME}»:`, error.message);
+  }
+
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const photos = links.length > 0 ? links.join(", ") : "—";
+  const base = `Производство № ${contractNumber} НЕ принято.\nК исправлению: ${pending.comment}. Фото дефекта: ${photos}`;
+  const foremanRoleKey = MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+
+  if (foremanRoleKey) {
+    await notifyRoleUsers(ctx, settings, foremanRoleKey, `${base}\nИзготовитель: ${executorName || "—"}`);
+  }
+
+  await notifyUserByName(ctx, executorName, base);
+}
+
+// ------------------------------------------------------------
+// Кнопки решений: «Продолжить работу» / «Отдать на доработку» / «Не принять»
+// / «Вернуть на [этап]» — смысл зависит от роли нажавшего (T-9.4, T-10.4,
+// T-11.4), актуальность проверяется по флагам сделки.
+// ------------------------------------------------------------
+
+async function handleUnacceptedDecision(ctx, directId, userKey, userName, leadId, action, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
+    const row = lead ? findExecutionRowForLead(settings, lead) : null;
+    const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+
+    if (!lead) {
+      await sendProductionDirectMessage(ctx, directId, "❌ Сделка не найдена. Возможно, она уже была изменена.");
+      return;
+    }
+
+    const contractNumber = getContractNumberWithLink(ctx, lead);
+
+    // --- ОТК (T-9.4) ---
+    if (roleKey === "otk") {
+      if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_OTK_FLAG_FIELD_ID)) {
+        await stale();
+        return;
+      }
+
+      if (action === "continue") {
+        await patchLead(ctx, lead.id, {
+          custom_fields_values: [
+            { field_id: NOT_ACCEPTED_OTK_FLAG_FIELD_ID, values: [{ value: false }] },
+            { field_id: NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID, values: [{ value: true }] }
+          ]
+        });
+
+        await sendProductionDirectMessage(ctx, directId, "Решение передано исполнителю.");
+        await notifyUserByName(ctx, getLeadExecutorName(ctx, lead, row), buildPerformerDecisionText(ctx, lead), [
+          buildTaggedButtonCompat(ctx, "Продолжить работу", lead.id),
+          buildTaggedButtonCompat(ctx, "Не принять", lead.id)
+        ]);
+        return;
+      }
+
+      if (action === "handover") {
+        await patchLead(ctx, lead.id, {
+          custom_fields_values: [
+            { field_id: NOT_ACCEPTED_OTK_FLAG_FIELD_ID, values: [{ value: false }] },
+            { field_id: NOT_ACCEPTED_MASTER_FLAG_FIELD_ID, values: [{ value: true }] }
+          ]
+        });
+
+        await sendProductionDirectMessage(ctx, directId, "Решение передано мастеру.");
+        await notifyMasterAboutDecision(ctx, settings, lead);
+        return;
+      }
+
+      await stale();
+      return;
+    }
+
+    // --- Исполнитель (T-10.4) ---
+    if (roleKey === PERFORMER_ROLE_KEY) {
+      if (!fieldIsTruthy(ctx, lead, NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID) || !leadExecutorIs(ctx, lead, row, userName)) {
+        await stale();
+        return;
+      }
+
+      if (action === "continue") {
+        await patchLead(ctx, lead.id, { custom_fields_values: buildClearCycleFields() });
+        await sendProductionDirectMessage(
+          ctx,
+          directId,
+          `Работа по сделке № ${contractNumber} продолжается. Сделка остаётся в «Исполнении».`
+        );
+        return;
+      }
+
+      if (action === "refuse") {
+        await patchLead(ctx, lead.id, {
+          custom_fields_values: [
+            { field_id: NOT_ACCEPTED_EXECUTOR_FLAG_FIELD_ID, values: [{ value: false }] },
+            { field_id: NOT_ACCEPTED_MASTER_FLAG_FIELD_ID, values: [{ value: true }] }
+          ]
+        });
+
+        await sendProductionDirectMessage(ctx, directId, "Решение передано мастеру.");
+        await notifyMasterAboutDecision(ctx, settings, lead);
+        return;
+      }
+
+      await stale();
+      return;
+    }
+
+    // --- Мастер (T-11.4 / актуализация п.5.5) ---
+    if (FOREMAN_ROLE_KEYS.includes(roleKey)) {
+      if (
+        action !== "continue" ||
+        !fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID) ||
+        Number(lead.pipeline_id) !== PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]
+      ) {
+        await stale();
+        return;
+      }
+
+      const decisionText = `Решение Мастера по № ${contractNumber}: продолжить работу`;
+      const executorName = getLeadExecutorName(ctx, lead, row);
+
+      // Сначала сообщения (им нужны данные цикла), затем очистка — п.5.6.
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        `Сделку вернули в работу, исполнитель (${executorName || "—"}) уведомлен.`
+      );
+      await notifyRoleUsers(ctx, settings, "otk", decisionText);
+      await notifyUserByName(ctx, executorName, decisionText);
+      await patchLead(ctx, lead.id, { custom_fields_values: buildClearCycleFields() });
+      return;
+    }
+
+    await stale();
+  });
+}
+
+// T-11.4.2 / актуализация п.5.6: мастер возвращает сделку на ранее
+// завершённый этап.
+async function handleForemanReturnToStage(ctx, directId, userKey, leadId, statusId, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
+    const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+
+    // Решение мастера: либо флаг «Не приняты работы: Мастер», либо финальный
+    // ОТК (сделка на «ОТК не пройдено» или — без активного ОТК — на самом
+    // этапе ОТК).
+    const isFinalCase =
+      lead && (isAtFinalOtkFailedStatus(lead) || (isAtFinalOtkStatus(lead) && !hasActiveOtk(settings)));
+
+    if (
+      !lead ||
+      !FOREMAN_ROLE_KEYS.includes(roleKey) ||
+      Number(lead.pipeline_id) !== PIPELINE_ID_BY_FOREMAN_ROLE[roleKey] ||
+      !(isFinalCase || fieldIsTruthy(ctx, lead, NOT_ACCEPTED_MASTER_FLAG_FIELD_ID))
+    ) {
+      await stale();
+      return;
+    }
+
+    const currentRow = findExecutionRowForLead(settings, lead);
+    const targetRow = getCompletedStageRows(ctx, settings, lead).find(
+      (row) => Number(row.amoStatusId) === Number(statusId)
+    );
+
+    if (!targetRow) {
+      await sendProductionDirectMessage(ctx, directId, "Этот этап недоступен для возврата. Откройте сделку заново.");
+      return;
+    }
+
+    const contractNumber = getContractNumberWithLink(ctx, lead);
+    const { comment, photos } = getRejectDetails(ctx, lead);
+    const stageName = await getStatusNameById(ctx, targetRow.amoPipelineId, targetRow.amoStatusId);
+    const newExecutorName = getLeadExecutorName(ctx, lead, targetRow);
+    const previousExecutorName = getLeadExecutorName(ctx, lead, currentRow);
+
+    await patchLead(ctx, lead.id, { status_id: Number(targetRow.amoStatusId) });
+
+    // Финальный ОТК: сделка возвращается «к исправлению» (T-13.4.2.7.2.2.1.2).
+    if (isFinalCase) {
+      try {
+        await addTagToLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+      } catch (error) {
+        console.error(`[Бот производства] Сделка ${lead.id}: не удалось поставить тег:`, error.message);
+      }
+    }
+
+    const decisionText = `Решение Мастера по № ${contractNumber}: вернуть на этап ${stageName}`;
+
+    await sendProductionDirectMessage(ctx, directId, decisionText);
+    await notifyRoleUsers(ctx, settings, "otk", decisionText);
+
+    if (normalizeHandleName(previousExecutorName) !== normalizeHandleName(newExecutorName)) {
+      await notifyUserByName(ctx, previousExecutorName, decisionText);
+    }
+
+    await notifyUserByName(
+      ctx,
+      newExecutorName,
+      `Производство № ${contractNumber} НЕ принято.\nК исправлению: ${comment}. Фото дефекта: ${photos}`
+    );
+
+    // Только после переходов и сообщений — п.5.6.
+    await patchLead(ctx, lead.id, { custom_fields_values: buildClearCycleFields() });
+  });
+}
+
+// ============================================================
+// 8b2. ФИНАЛЬНЫЙ ОТК (ТЗ T-13; актуализация 2.1 п.6.2, 7)
+// ============================================================
+// Сделка на статусе «ОТК Металл» / «ОТК дерево» без тега «Не принято ОТК».
+// Проверяет активный ОТК; если активного ОТК нет — тот же сценарий доступен
+// мастеру (T-3.2.3.1), а при отказе он сразу выбирает этап возврата
+// (T-13.4.2.7.2, единственная описанная ветка для отсутствия ОТК).
+
+const FINAL_OTK_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 41835627, // «ОТК Металл»
+  [PIPELINE_ID_WOOD]: 41835516 // «ОТК дерево»
+};
+
+const FINAL_OTK_FAILED_STATUS_BY_PIPELINE = {
+  [PIPELINE_ID_METAL]: 58274773, // «ОТК не пройдено», воронка Производство
+  [PIPELINE_ID_WOOD]: 58274701 // «ОТК не пройдено», воронка Дерево производство
+};
+
+const FINAL_OTK_REJECT_COUNTER_FIELD_ID = 560094; // "[Бот] Кол-во не принято ОТК", число
+
+function isAtFinalOtkStatus(lead) {
+  return Number(lead.status_id) === FINAL_OTK_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+}
+
+function isAtFinalOtkFailedStatus(lead) {
+  return Number(lead.status_id) === FINAL_OTK_FAILED_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+}
+
+// Кто может выполнять финальный ОТК: ОТК; мастер — только пока нет активного ОТК.
+function canDoFinalOtk(roleKey, settings, lead) {
+  if (roleKey === "otk") {
+    return true;
+  }
+
+  return (
+    FOREMAN_ROLE_KEYS.includes(roleKey) &&
+    !hasActiveOtk(settings) &&
+    Number(lead.pipeline_id) === PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]
+  );
+}
+
+async function loadFinalLeads(ctx, pipelineIds, statusMap, { withOtkTag }) {
+  const result = [];
+
+  for (const pipelineId of pipelineIds) {
+    const leads = await getLeadsByPipeline(ctx, pipelineId, { statusId: statusMap[pipelineId], withTags: true });
+
+    for (const lead of leads) {
+      if (leadHasTag(lead, PM_DEAL_TAG_NAME) || leadHasTag(lead, OTK_REJECTED_TAG_NAME) !== withOtkTag) {
+        continue;
+      }
+
+      lead.__contractNumber = getContractNumberText(ctx, lead);
+      result.push(lead);
+    }
+  }
+
+  return result;
+}
+
+function getFinalOtkPipelineIds(roleKey) {
+  return roleKey === "otk" ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD] : [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]];
+}
+
+// T-13.1: «Финальный ОТК» — список сделок.
+async function showFinalOtkList(ctx, directId, userKey, roleKey, settings) {
+  const state = productionUserState[userKey];
+
+  if (roleKey !== "otk" && hasActiveOtk(settings)) {
+    await sendProductionDirectMessage(ctx, directId, "Финальный ОТК сейчас выполняет специалист ОТК.");
+    return;
+  }
+
+  const leads = sortDealsForButtons(
+    ctx,
+    await loadFinalLeads(ctx, getFinalOtkPipelineIds(roleKey), FINAL_OTK_STATUS_BY_PIPELINE, { withOtkTag: false })
+  );
+
+  if (leads.length === 0) {
+    delete state.listContext;
+    await sendProductionDirectMessage(ctx, directId, "Сделки, ожидающие прохождения контроля\nНет сделок.");
+    return;
+  }
+
+  const lines = ["Сделки, ожидающие прохождения контроля"];
+
+  leads.forEach((lead, i) => lines.push(`${i + 1}. № ${getContractNumberWithLink(ctx, lead)}.`));
+
+  await sendProductionDirectMessage(ctx, directId, lines.join("\n"), registerLeadList(state, "final_otk", leads));
+}
+
+// Сделки «ОТК не пройдено» с тегом — ждут решения мастера (T-20.2.1).
+async function loadFinalFailedLeads(ctx, roleKey) {
+  return loadFinalLeads(ctx, getFinalOtkPipelineIds(roleKey), FINAL_OTK_FAILED_STATUS_BY_PIPELINE, {
+    withOtkTag: true
+  });
+}
+
+async function showFinalOtkCard(ctx, directId, lead, settings, roleKey) {
+  if (
+    !isAtFinalOtkStatus(lead) ||
+    !canDoFinalOtk(roleKey, settings, lead) ||
+    (await leadHasOtkRejectedTag(ctx, lead.id))
+  ) {
+    await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+    return;
+  }
+
+  const pdfLink = ctx.getFieldValueJoined(lead, PROJECT_PDF_FIELD_ID);
+  const id = `final:${lead.id}`;
 
   await sendProductionDirectMessage(
     ctx,
     directId,
-    "Замечания и фото сохранены. Передача в проектный отдел требует уточнения у администратора " +
-      "(в ТЗ конфликт id технических полей) — сообщите, пожалуйста, об этом администратору."
+    `Финальный контроль сделки. Изделие готово?\n№ ${getContractNumberText(ctx, lead)}${pdfLink ? `, ${pdfLink}` : ""}`,
+    [buildTaggedButtonCompat(ctx, "Да", id), buildTaggedButtonCompat(ctx, "Нет", id)]
+  );
+}
+
+// getLead не возвращает теги — проверяем их отдельным запросом.
+async function leadHasOtkRejectedTag(ctx, leadId) {
+  return (await getLeadTags(ctx, leadId)).some((tag) => tag.name === OTK_REJECTED_TAG_NAME);
+}
+
+// T-13.4: «Да» / «Нет» финального ОТК.
+async function handleFinalOtkReply(ctx, directId, userKey, leadId, decision, settings) {
+  const state = productionUserState[userKey];
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+    const roleKey = roleForLead(state, lead);
+    const stale = () => sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+
+    if (
+      !lead ||
+      !isAtFinalOtkStatus(lead) ||
+      !canDoFinalOtk(roleKey, settings, lead) ||
+      (await leadHasOtkRejectedTag(ctx, lead.id))
+    ) {
+      await stale();
+      return;
+    }
+
+    if (decision === "no") {
+      productionUserState[userKey].pendingTextInput = { kind: "final_otk_reject_comment", leadId: lead.id };
+      await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+      return;
+    }
+
+    // T-13.4.1: следующий статус — из строки настроек этого этапа.
+    const row = (settings.statusFieldMap || []).find(
+      (r) => Number(r.amoStatusId) === Number(lead.status_id) && r.nextAmoStatusId
+    );
+
+    if (!row) {
+      await sendProductionDirectMessage(
+        ctx,
+        directId,
+        "❌ Не настроен следующий статус amoCRM для этапа финального ОТК. Обратитесь к администратору."
+      );
+      return;
+    }
+
+    await patchLead(ctx, lead.id, { ...nextStatusFields(row) });
+
+    try {
+      await removeTagFromLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+    } catch (error) {
+      console.error(`[Бот производства] Сделка ${lead.id}: не удалось снять тег:`, error.message);
+    }
+
+    await sendProductionDirectMessage(ctx, directId, `Изделие по сделке № ${getContractNumberWithLink(ctx, lead)} принято.`);
+  });
+}
+
+async function handleFinalOtkRejectCommentInput(ctx, directId, userKey, trimmedText) {
+  const state = productionUserState[userKey];
+  const pending = state.pendingTextInput;
+
+  if (!trimmedText) {
+    await sendProductionDirectMessage(ctx, directId, "Укажите что не принято");
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  state.pendingUpload = {
+    leadId: pending.leadId,
+    kind: "final_otk_defect",
+    baseName: "Дефект изделия",
+    comment: trimmedText,
+    uploadedPaths: []
+  };
+
+  await sendProductionDirectMessage(ctx, directId, "Прикрепите фото дефекта");
+}
+
+// T-13.4.2.4-7: одна запись (комментарий, ссылки, счётчик +1), затем ветка по
+// активному ОТК. Исключения — только до записи (см. handleFinishUpload).
+async function finishFinalOtkRejectUpload(ctx, directId, settings, pending) {
+  const lead = await ctx.getLead(pending.leadId);
+
+  if (!lead || !isAtFinalOtkStatus(lead)) {
+    await sendProductionDirectMessage(ctx, directId, "По этой сделке решение уже принято или не требуется.");
+    return;
+  }
+
+  const links = await collectPublicLinks(ctx, pending.uploadedPaths);
+  const currentSettings = productionWidgetSettingsCache || settings;
+  const otkAvailable = hasActiveOtk(currentSettings);
+  const counter = getLeadNumber(ctx, lead, FINAL_OTK_REJECT_COUNTER_FIELD_ID) + 1;
+
+  const fields = [
+    { field_id: NOT_ACCEPTED_TEXT_FIELD_ID, values: [{ value: pending.comment }] },
+    { field_id: FINAL_OTK_REJECT_COUNTER_FIELD_ID, values: [{ value: counter }] }
+  ];
+
+  if (links.length > 0) {
+    fields.push({ field_id: DEFECT_PHOTO_LINK_FIELD_ID, values: [{ value: links.join(", ") }] });
+  }
+
+  const body = { custom_fields_values: fields };
+
+  // T-13.4.2.7.1.3: при активном ОТК сделка уходит на «ОТК не пройдено».
+  if (otkAvailable) {
+    body.status_id = FINAL_OTK_FAILED_STATUS_BY_PIPELINE[Number(lead.pipeline_id)];
+  }
+
+  await patchLead(ctx, lead.id, body);
+
+  const fresh = (await ctx.getLead(lead.id)) || lead;
+  const contractNumber = getContractNumberWithLink(ctx, fresh);
+
+  if (otkAvailable) {
+    try {
+      await addTagToLead(ctx, lead.id, OTK_REJECTED_TAG_NAME);
+    } catch (error) {
+      console.error(`[Бот производства] Сделка ${lead.id}: не удалось поставить тег:`, error.message);
+    }
+
+    const foremanRoleKey = MANAGER_ROLE_BY_PIPELINE_ID[Number(lead.pipeline_id)];
+    const foremanNames = (((currentSettings.roles || {})[foremanRoleKey]) || [])
+      .filter((entry) => entry.active && entry.handle)
+      .map((entry) => entry.handle)
+      .join(", ");
+
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      `Ваши замечания приняты, сделка передана Мастеру${foremanNames ? ` (${foremanNames})` : ""}.`
+    );
+
+    if (foremanRoleKey) {
+      await notifyRoleUsers(
+        ctx,
+        currentSettings,
+        foremanRoleKey,
+        `Вам необходимо принять решение по сделке № ${contractNumber}. Изделие НЕ принято ОТК на Финальном ОТК.`
+      );
+    }
+
+    return;
+  }
+
+  // Активного ОТК нет — T-13.4.2.7.2.1: выбор этапа возврата.
+  await sendProductionDirectMessage(ctx, directId, "Ваши замечания приняты.");
+
+  const request = await buildMasterDecisionRequest(ctx, currentSettings, fresh);
+
+  await sendProductionDirectMessage(ctx, directId, request.text, request.buttons);
+}
+
+// ============================================================
+// 8c. КОНТРОЛЬ СРОКОВ (ТЗ T-16; актуализация 2.1 п.4.2)
+// ============================================================
+
+const PRODUCT_PLAN_DATE_FIELD_ID = 550764; // "Плановая готовность изделия", дата
+const CLOSED_STATUS_IDS = [142, 143]; // «Успешно реализовано» / «Закрыто и не реализовано»
+
+const PIPELINE_TITLE_BY_ID = {
+  [PIPELINE_ID_METAL]: "Производство Металл",
+  [PIPELINE_ID_WOOD]: "Производство Дерево"
+};
+
+// Просрочка — плановая дата СТРОГО раньше сегодняшнего дня по Москве; дней
+// просрочки = сегодня минус плановая дата.
+function getOverdueDays(todayStart, rawValue) {
+  const unix = Number(rawValue);
+
+  if (!Number.isFinite(unix) || unix <= 0 || unix >= todayStart) {
+    return 0;
+  }
+
+  return Math.max(1, Math.round((todayStart - unix) / 86400));
+}
+
+// Этапы (строки «Связи этапов и полей» со статусом бота «Исполнение»),
+// у которых плановая дата этапа просрочена. userName — только его сделки
+// (исполнитель); без него — все (мастер/директор).
+async function collectOverdueStages(ctx, settings, { pipelineId = null, userName = null } = {}) {
+  const todayStart = ctx.todayMoscowStartUnix();
+  const result = [];
+
+  for (const lead of await loadExecutionLeads(ctx, settings, { pipelineId })) {
+    const row = lead.__row;
+
+    if (!row.planDateFieldId || (userName && !leadExecutorIs(ctx, lead, row, userName))) {
+      continue;
+    }
+
+    const days = getOverdueDays(todayStart, ctx.getFieldValues(lead, row.planDateFieldId)[0]);
+
+    if (days > 0) {
+      result.push({
+        lead,
+        days,
+        stageName: await getStatusNameById(ctx, lead.pipeline_id, lead.status_id),
+        maker: getLeadExecutorName(ctx, lead, row) || "—"
+      });
+    }
+  }
+
+  return result.sort((a, b) => b.days - a.days);
+}
+
+// Сделки воронки целиком: просрочена «Плановая готовность изделия».
+async function collectOverdueDeals(ctx, settings, pipelineId) {
+  const todayStart = ctx.todayMoscowStartUnix();
+  const result = [];
+
+  for (const lead of await getLeadsByPipeline(ctx, pipelineId, { withTags: true })) {
+    if (CLOSED_STATUS_IDS.includes(Number(lead.status_id)) || leadHasTag(lead, PM_DEAL_TAG_NAME)) {
+      continue;
+    }
+
+    const days = getOverdueDays(todayStart, ctx.getFieldValues(lead, PRODUCT_PLAN_DATE_FIELD_ID)[0]);
+
+    if (days > 0) {
+      const row = findExecutionRowForLead(settings, lead);
+
+      result.push({
+        lead,
+        days,
+        stageName: await getStatusNameById(ctx, lead.pipeline_id, lead.status_id),
+        maker: (row && getLeadExecutorName(ctx, lead, row)) || "—"
+      });
+    }
+  }
+
+  return result.sort((a, b) => b.days - a.days);
+}
+
+function formatOverdueLine(ctx, item, index) {
+  return (
+    `${index + 1}. № ${getContractNumberWithLink(ctx, item.lead)}. Статус сделки amoCRM: ${item.stageName}. ` +
+    `Изготовитель: ${item.maker}. Кол-во дней просрочки: ${item.days}`
+  );
+}
+
+// Тексты сообщений для пользователя по его роли; пустой массив — нарушений
+// нет (сделки без просрочки не выводим).
+async function buildDeadlineMessages(ctx, settings, roleKey, userName) {
+  const messages = [];
+
+  if (roleKey === PERFORMER_ROLE_KEY) {
+    const stages = await collectOverdueStages(ctx, settings, { userName });
+
+    if (stages.length > 0) {
+      messages.push(
+        ["Добрый день! Зафиксированы нарушения сроков у сделок:", ...stages.map((s, i) => formatOverdueLine(ctx, s, i))].join(
+          "\n"
+        )
+      );
+    }
+
+    return messages;
+  }
+
+  const pipelineIds =
+    roleKey === "productionDirector"
+      ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD]
+      : PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]
+        ? [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]]
+        : [];
+
+  for (const pipelineId of pipelineIds) {
+    const deals = await collectOverdueDeals(ctx, settings, pipelineId);
+    const stages = await collectOverdueStages(ctx, settings, { pipelineId });
+
+    if (deals.length === 0 && stages.length === 0) {
+      continue;
+    }
+
+    const lines = [`Воронка “${PIPELINE_TITLE_BY_ID[pipelineId]}”`];
+
+    if (deals.length > 0) {
+      lines.push("Нарушение сроков у сделок:", ...deals.map((d, i) => formatOverdueLine(ctx, d, i)));
+    }
+
+    if (stages.length > 0) {
+      lines.push("Нарушение сроков у этапов:", ...stages.map((s, i) => formatOverdueLine(ctx, s, i)));
+    }
+
+    messages.push(lines.join("\n"));
+  }
+
+  return messages;
+}
+
+// Кнопка «Контроль сроков» — информационный список без кнопок действий.
+async function showDeadlineControl(ctx, directId, userName, roleKey, settings) {
+  const messages = await buildDeadlineMessages(ctx, settings, roleKey, userName);
+
+  if (messages.length === 0) {
+    await sendProductionDirectMessage(ctx, directId, "Нарушений сроков нет.");
+    return;
+  }
+
+  for (const text of messages) {
+    await sendProductionDirectMessage(ctx, directId, text);
+  }
+}
+
+// Ежедневная рассылка в 10:30 по Москве (T-16). Дедупликация по дате в Redis
+// — перезапуск процесса или два запуска не дублируют рассылку; окно 10:30-10:34,
+// чтобы деплой днём не вызвал внеплановую отправку.
+const DEADLINE_BROADCAST_KEY_PREFIX = "production_deadline_broadcast:";
+
+async function runDailyDeadlineBroadcast(ctx) {
+  const settings = productionWidgetSettingsCache;
+
+  if (!settings) {
+    return;
+  }
+
+  const marker = await ctx.redisRequest([
+    "SET",
+    `${DEADLINE_BROADCAST_KEY_PREFIX}${ctx.todayMoscowDateText()}`,
+    "1",
+    "NX",
+    "EX",
+    172800
+  ]);
+
+  if (!marker || marker.result !== "OK") {
+    return;
+  }
+
+  const keysResponse = await ctx.redisRequest(["KEYS", "production_direct_id:*"]);
+  const keys = (keysResponse && keysResponse.result) || [];
+  const prefix = "production_direct_id:";
+
+  console.log(`[Бот производства] Рассылка «Контроль сроков»: получателей ${keys.length}.`);
+
+  for (const key of keys) {
+    try {
+      const userName = String(key).slice(prefix.length);
+      const directId = (await ctx.redisRequest(["GET", key])).result;
+
+      if (!directId) {
+        continue;
+      }
+
+      // Директор видит обе воронки сразу — отдельные сообщения мастеров не нужны.
+      const roleKeys = resolveUserRoles(settings, userName);
+      const roles = roleKeys.includes("productionDirector") ? ["productionDirector"] : roleKeys;
+
+      for (const roleKey of roles) {
+        for (const text of await buildDeadlineMessages(ctx, settings, roleKey, userName)) {
+          await sendProductionDirectMessage(ctx, directId, text);
+        }
+      }
+    } catch (error) {
+      console.error(`[Бот производства] Рассылка «Контроль сроков» ${key}:`, error.message);
+    }
+  }
+}
+
+// ============================================================
+// 8d. ОТЧЁТ (ТЗ T-14 исполнитель, T-15 мастер/директор)
+// ============================================================
+
+const PRODUCT_READY_DATE_FIELD_ID = 445999; // "Лестница изготовлена" (в ТЗ — «Изделие готово»), дата
+const SALES_PIPELINE_ID_METAL = 207259; // воронка «Металл»
+const SALES_PIPELINE_ID_WOOD = 585508; // воронка «Дерево»
+const PIPELINE_ID_RECLAMATION = 4689981; // воронка «Рекламация»
+
+// Воронки поиска выполненных операций (T-14: Производство Металл/Дерево,
+// Металл, Дерево, Рекламация) — сделка после производства уходит в
+// «продающие» воронки, а операция при этом остаётся выполненной.
+const REPORT_PIPELINE_IDS = [
+  PIPELINE_ID_METAL,
+  PIPELINE_ID_WOOD,
+  SALES_PIPELINE_ID_METAL,
+  SALES_PIPELINE_ID_WOOD,
+  PIPELINE_ID_RECLAMATION
+];
+
+const REPORT_BUTTON_FIRST_HALF = "1-15";
+const REPORT_BUTTON_SECOND_HALF = "16-конец месяца";
+const REPORT_BUTTON_CUSTOM = "Выбрать период";
+const REPORT_PERIOD_BUTTONS = [REPORT_BUTTON_FIRST_HALF, REPORT_BUTTON_SECOND_HALF, REPORT_BUTTON_CUSTOM];
+
+function pad2(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatReportDate(year, month, day) {
+  return `${pad2(day)}.${pad2(month + 1)}.${year}`;
+}
+
+// Границы дней — по Москве (UTC+3).
+function moscowDayStartUnix(year, month, day) {
+  return Date.UTC(year, month, day) / 1000 - 3 * 3600;
+}
+
+function buildReportPeriod(from, to) {
+  const label =
+    from.y === to.y && from.m === to.m && from.d === to.d
+      ? formatReportDate(from.y, from.m, from.d)
+      : `${formatReportDate(from.y, from.m, from.d)} - ${formatReportDate(to.y, to.m, to.d)}`;
+
+  return {
+    label,
+    fromUnix: moscowDayStartUnix(from.y, from.m, from.d),
+    toUnix: moscowDayStartUnix(to.y, to.m, to.d) + 86400 - 1
+  };
+}
+
+// «1-15» / «16-конец месяца» — в рамках текущего месяца.
+function buildMonthHalfPeriod(ctx, secondHalf) {
+  const now = ctx.getMoscowDate();
+  const y = now.getUTCFullYear();
+  const m = now.getUTCMonth();
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+
+  return secondHalf
+    ? buildReportPeriod({ y, m, d: 16 }, { y, m, d: lastDay })
+    : buildReportPeriod({ y, m, d: 1 }, { y, m, d: 15 });
+}
+
+// «ДД.ММ.ГГГГ - ДД.ММ.ГГГГ» или «ДД.ММ.ГГГГ»; null — не распознано.
+function parseReportPeriodText(text) {
+  const match = String(text || "")
+    .trim()
+    .match(/^(\d{2})\.(\d{2})\.(\d{4})(?:\s*-\s*(\d{2})\.(\d{2})\.(\d{4}))?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  const toPart = (d, m, y) => {
+    const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+    const valid =
+      date.getUTCFullYear() === Number(y) && date.getUTCMonth() === Number(m) - 1 && date.getUTCDate() === Number(d);
+
+    return valid ? { y: Number(y), m: Number(m) - 1, d: Number(d) } : null;
+  };
+
+  const from = toPart(match[1], match[2], match[3]);
+  const to = match[4] ? toPart(match[4], match[5], match[6]) : from;
+
+  if (!from || !to) {
+    return null;
+  }
+
+  const period = buildReportPeriod(from, to);
+
+  return period.toUnix >= period.fromUnix ? period : null;
+}
+
+function formatReportMoney(value) {
+  return (Math.round(Number(value) * 100) / 100).toLocaleString("ru-RU").replace(/\s/g, " ");
+}
+
+// Сделки из указанных воронок, у которых дата-поле попадает в период.
+// Фильтр по периоду отдаём amoCRM, но результат всё равно проверяем сами.
+// Фильтр amoCRM по пользовательскому полю-дате отвечает 400, поэтому
+// просматриваем сделки воронки с отбором по дате изменения (ограничено по
+// числу страниц и времени), а дату в поле проверяем сами. Выгрузка воронки
+// одна на все поля отчёта: раньше она повторялась на каждую строку настроек.
+const reportScanCache = new Map(); // ключ → { at, promise }
+const REPORT_SCAN_MAX_PAGES = 40;
+const REPORT_SCAN_MAX_MS = 90000;
+const REPORT_SCAN_TTL_MS = 120000;
+
+function filterLeadsByDateField(ctx, leads, fieldId, period) {
+  return leads.filter((lead) => {
+    const value = Number(ctx.getFieldValues(lead, fieldId)[0]);
+
+    return Number.isFinite(value) && value >= period.fromUnix && value <= period.toUnix;
+  });
+}
+
+async function fetchLeadPages(ctx, baseParams, { maxPages, deadline }) {
+  const url = `https://${ctx.AMOCRM_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
+  const all = [];
+
+  for (let page = 1; page <= maxPages; page++) {
+    if (Date.now() > deadline) {
+      console.error("[Бот производства] Отчёт: превышено время просмотра сделок, результат может быть неполным.");
+      break;
+    }
+
+    const response = await ctx.amoCrmGet(url, { ...baseParams, limit: 250, page });
+
+    if (response.status === 204) {
+      break;
+    }
+
+    if (response.status !== 200) {
+      throw new Error(
+        `amoCRM GET /leads (отчёт) HTTP ${response.status}: ${JSON.stringify(response.data).slice(0, 300)}`
+      );
+    }
+
+    const leads = (response.data && response.data._embedded && response.data._embedded.leads) || [];
+
+    all.push(...leads);
+
+    if (leads.length < 250) {
+      break;
+    }
+  }
+
+  return all;
+}
+
+function scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt) {
+  const key = `${pipelineId}|${byUpdatedAt ? period.fromUnix : "all"}`;
+  const cached = reportScanCache.get(key);
+
+  if (cached && Date.now() - cached.at < REPORT_SCAN_TTL_MS) {
+    return cached.promise;
+  }
+
+  const params = { "filter[pipeline_id]": pipelineId };
+
+  if (byUpdatedAt) {
+    params["filter[updated_at][from]"] = period.fromUnix;
+  }
+
+  const startedAt = Date.now();
+  const promise = fetchLeadPages(ctx, params, {
+    maxPages: REPORT_SCAN_MAX_PAGES,
+    deadline: startedAt + REPORT_SCAN_MAX_MS
+  }).then((leads) => {
+    console.log(
+      `[Бот производства] Отчёт: воронка ${pipelineId}, просмотрено сделок ${leads.length} ` +
+        `за ${Math.round((Date.now() - startedAt) / 100) / 10} с.`
+    );
+
+    return leads;
+  });
+
+  reportScanCache.set(key, { at: startedAt, promise });
+  promise.catch(() => reportScanCache.delete(key));
+
+  return promise;
+}
+
+async function getLeadsByFieldDateRange(ctx, pipelineIds, fieldId, period, { byUpdatedAt = true } = {}) {
+  // Воронки грузим параллельно (amoCRM допускает до ~7 запросов в секунду).
+  const scanned = await Promise.all(
+    pipelineIds.map((pipelineId) => scanPipelineForReport(ctx, pipelineId, period, byUpdatedAt))
+  );
+
+  return filterLeadsByDateField(ctx, scanned.flat(), fieldId, period);
+}
+
+// Выполненные операции: строки «Исполнение», у сделки в период заполнен
+// «Факт готовности» и сделка уже ушла с этого статуса. Возвращает
+// Map «исполнитель → { count, sum }».
+async function collectCompletedOperations(ctx, settings, period, { pipelineId = null, userName = null } = {}) {
+  const result = new Map();
+  const target = userName ? normalizeHandleName(userName) : null;
+
+  for (const row of findExecutionRows(settings)) {
+    if (pipelineId && Number(row.amoPipelineId) !== Number(pipelineId)) {
+      continue;
+    }
+
+    if (!row.factDateFieldId || !row.amoStatusId || !row.executorFieldId) {
+      console.log(
+        `[Бот производства] Отчёт: строка настроек «Исполнение» (воронка ${row.amoPipelineId}, статус ${row.amoStatusId}) ` +
+          "пропущена — не заполнены «Исполнитель» или «Факт готовности»."
+      );
+      continue;
+    }
+
+    const rowStats = { withFact: 0, leftStage: 0, withExecutor: 0 };
+
+    for (const lead of await getLeadsByFieldDateRange(ctx, REPORT_PIPELINE_IDS, row.factDateFieldId, period)) {
+      rowStats.withFact += 1;
+
+      if (Number(lead.status_id) === Number(row.amoStatusId)) {
+        continue;
+      }
+
+      rowStats.leftStage += 1;
+
+      const names = ctx.getFieldValues(lead, row.executorFieldId);
+
+      if (names.length === 0 || (target && !names.some((name) => namesMatch(name, userName)))) {
+        continue;
+      }
+
+      rowStats.withExecutor += 1;
+
+      const key = target ? userName : names.join(", ");
+      const price = row.priceFieldId ? Number(ctx.getFieldValues(lead, row.priceFieldId)[0]) || 0 : 0;
+      const entry = result.get(key) || { count: 0, sum: 0 };
+
+      entry.count += 1;
+      entry.sum += price;
+      result.set(key, entry);
+    }
+
+    console.log(
+      `[Бот производства] Отчёт: этап ${row.amoStatusId} (факт ${row.factDateFieldId}, исполнитель ${row.executorFieldId}): ` +
+        `с датой в периоде ${rowStats.withFact}, уже ушли с этапа ${rowStats.leftStage}, с исполнителем ${rowStats.withExecutor}.`
+    );
+  }
+
+  return result;
+}
+
+async function buildPerformerReport(ctx, settings, userName, period) {
+  const operations = (await collectCompletedOperations(ctx, settings, period, { userName })).get(userName) || {
+    count: 0,
+    sum: 0
+  };
+
+  return (
+    `Отчет за ${period.label}\nКол-во выполненных операций: ${operations.count}\n` +
+    `Стоимость выполненных операций: ${formatReportMoney(operations.sum)}, руб`
+  );
+}
+
+async function buildForemanReport(ctx, settings, pipelineId, period) {
+  const isMetal = pipelineId === PIPELINE_ID_METAL;
+  const [operations, deals] = await Promise.all([
+    collectCompletedOperations(ctx, settings, period, { pipelineId }),
+    getLeadsByFieldDateRange(
+      ctx,
+      [isMetal ? SALES_PIPELINE_ID_METAL : SALES_PIPELINE_ID_WOOD, PIPELINE_ID_RECLAMATION],
+      PRODUCT_READY_DATE_FIELD_ID,
+      period
+    )
+  ]);
+
+  const products = new Map();
+  let dealsSum = 0;
+
+  for (const lead of deals) {
+    dealsSum += Number(lead.price) || 0;
+
+    const product = getProductText(ctx, lead);
+
+    products.set(product, (products.get(product) || 0) + 1);
+  }
+
+  const lines = [`Отчет за ${period.label} по Производству (${isMetal ? "Металл" : "Дерево"})`];
+
+  for (const [name, entry] of operations) {
+    lines.push(
+      `${name}:`,
+      `Кол-во выполненных операций: ${entry.count}`,
+      `Стоимость выполненных операций: ${formatReportMoney(entry.sum)}, руб`
+    );
+  }
+
+  lines.push(
+    "",
+    `Кол-во выполненных сделок: ${deals.length}`,
+    `Стоимость выполненных сделок: ${formatReportMoney(dealsSum)}, руб`,
+    "",
+    "Кол-во выполненных продуктов"
+  );
+
+  for (const [product, count] of products) {
+    lines.push(`${product}: ${count}`);
+  }
+
+  return lines.join("\n");
+}
+
+// Директор — по воронкам металл и дерево последовательно; мастер — по своей.
+async function sendReportForRole(ctx, directId, userName, roleKey, settings, period) {
+  await sendProductionDirectMessage(ctx, directId, `Ожидайте, формируем отчет за период ${period.label}`);
+
+  if (roleKey === PERFORMER_ROLE_KEY) {
+    await sendProductionDirectMessage(ctx, directId, await buildPerformerReport(ctx, settings, userName, period));
+    return;
+  }
+
+  const pipelineIds =
+    roleKey === "productionDirector" ? [PIPELINE_ID_METAL, PIPELINE_ID_WOOD] : [PIPELINE_ID_BY_FOREMAN_ROLE[roleKey]];
+
+  for (const pipelineId of pipelineIds.filter(Boolean)) {
+    await sendProductionDirectMessage(ctx, directId, await buildForemanReport(ctx, settings, pipelineId, period));
+  }
+}
+
+async function startReport(ctx, directId, userKey) {
+  const state = productionUserState[userKey];
+
+  state.awaitingReportPeriod = true;
+  delete state.pendingTextInput;
+
+  await sendProductionDirectMessage(ctx, directId, "Выберите период отчета", REPORT_PERIOD_BUTTONS);
+}
+
+async function handleReportPeriodChoice(ctx, directId, userKey, userName, settings, choice) {
+  const state = productionUserState[userKey];
+
+  delete state.awaitingReportPeriod;
+
+  if (choice === REPORT_BUTTON_CUSTOM) {
+    state.pendingTextInput = { kind: "report_period" };
+    await sendProductionDirectMessage(ctx, directId, "Укажите период для отчета");
+    return;
+  }
+
+  const period = buildMonthHalfPeriod(ctx, choice === REPORT_BUTTON_SECOND_HALF);
+
+  await forEachMenuRole(state, false, (roleKey) =>
+    sendReportForRole(ctx, directId, userName, roleKey, settings, period)
+  );
+}
+
+async function handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText) {
+  const state = productionUserState[userKey];
+  const period = parseReportPeriodText(trimmedText);
+
+  if (!period) {
+    await sendProductionDirectMessage(
+      ctx,
+      directId,
+      state.roleKey === PERFORMER_ROLE_KEY
+        ? "Не удалось распознать указанную дату. Пожалуйста, введите период в формате:\n" +
+            "ХХ.ХХ.ХХХХ - ХХ.ХХ.ХХХХ\nили\nХХ.ХХ.ХХХХ."
+        : "Не удалось распознать указанную дату. Пожалуйста, введите дату в формате ХХ.ХХ.ХХХХ."
+    );
+    return;
+  }
+
+  delete state.pendingTextInput;
+
+  await forEachMenuRole(state, false, (roleKey) =>
+    sendReportForRole(ctx, directId, userName, roleKey, settings, period)
   );
 }
 
 // ============================================================
 // 9. ПЛАНИРОВЩИКИ
 // ============================================================
-// Фоновых задач пока нет (у этого бота нет сценариев с таймерами/опросом —
-// T-16 "Контроль сроков" выводится только по запросу пользователя).
-// Функция оставлена пустой ради симметрии вызова с
-// designerBot.startSchedulers(ctx) в server.js.
+// Ежедневная рассылка «Контроль сроков» (T-16) в 10:30 по Москве.
 function startSchedulers(ctx) {
-  console.log("[Бот производства] Планировщики: сценариев пока нет, ничего не запущено.");
+  setInterval(async () => {
+    try {
+      const moscow = ctx.getMoscowDate();
+
+      if (moscow.getUTCHours() === 10 && moscow.getUTCMinutes() >= 30 && moscow.getUTCMinutes() < 35) {
+        await runDailyDeadlineBroadcast(ctx);
+      }
+    } catch (error) {
+      console.error("[Бот производства] Ошибка планировщика «Контроль сроков»:", error.message);
+    }
+  }, 60 * 1000);
+
+  console.log("[Бот производства] Планировщик «Контроль сроков»: ежедневно в 10:30 (Москва).");
 }
 
 // ============================================================
 // 10. WEBHOOK И МАРШРУТЫ
 // ============================================================
+
+// ============================================================
+// F-4. ПЛАНОВЫЕ ДАТЫ ГОТОВНОСТИ (ТЗ F-3, F-4)
+// ============================================================
+// amoCRM шлёт вебхук о смене статуса сделки на тот же адрес, что и
+// amoMessenger (/webhook/production). Дата = округлённое вверх (кол-во
+// этажей × коэффициент продукта) дней от сегодняшнего дня; выходные не
+// учитываются. Уже заполненное поле не перезаписываем.
+
+const FLOORS_FIELD_ID = 415782; // "Количество этажей?", список с числами 1–10
+const PLANNED_READY_FIELD_ID = 550764; // "Плановая дата готовности"
+const PLANNED_READY_STATUS_IDS = [33139332, 36642552]; // ЛАЗЕР исполнение, РАСКРОЙ исполнение
+
+function extractStatusChangeEvents(body) {
+  const leads = (body && body.leads) || {};
+  const events = [];
+
+  for (const kind of ["status", "add"]) {
+    const items = leads[kind];
+    const list = Array.isArray(items) ? items : items && typeof items === "object" ? Object.values(items) : [];
+
+    for (const item of list) {
+      if (item && item.id && item.status_id) {
+        events.push({ leadId: Number(item.id), statusId: Number(item.status_id) });
+      }
+    }
+  }
+
+  return events;
+}
+
+// Возвращает список правил { fieldId, coefficient } либо { skip: причина }.
+// Для статусов ЛАЗЕР/РАСКРОЙ заполняются ДВА поля: общая плановая дата изделия
+// (коэффициент «Готовность изделия») и поле «План готовности» самого этапа
+// (коэффициент из столбца этого статуса). Для остальных статусов — только
+// поле этапа.
+function resolvePlannedDateRules(settings, lead, statusId) {
+  const matrix = (settings && settings.readinessMatrix) || {};
+  const productValue = ((lead.custom_fields_values || []).find(
+    (field) => Number(field.field_id) === Number(matrix.productFieldId || PRODUCT_FIELD_ID)
+  ) || { values: [] }).values[0];
+  const enumId = productValue && productValue.enum_id;
+  const product = (matrix.products || []).find((item) => Number(item.enumId) === Number(enumId));
+  const rules = [];
+
+  if (!product) {
+    return [{ skip: `продукт сделки (enum ${enumId || "—"}) не найден в таблице «Плановая готовность»` }];
+  }
+
+  if (PLANNED_READY_STATUS_IDS.includes(statusId)) {
+    rules.push({ fieldId: PLANNED_READY_FIELD_ID, coefficient: Number(product.readinessValue) });
+  }
+
+  if (PLANNED_READY_STATUS_IDS.includes(statusId) && !(matrix.statusIds || []).map(Number).includes(statusId)) {
+    rules.push({
+      skip:
+        `статуса ${statusId} нет среди столбцов таблицы «Плановая готовность» ` +
+        `(там: ${(matrix.statusIds || []).join(", ") || "пусто"}) — поле плана этапа не заполняем`
+    });
+  } else if ((matrix.statusIds || []).map(Number).includes(statusId)) {
+    const row = ((settings && settings.statusFieldMap) || []).find(
+      (item) => Number(item.amoStatusId) === statusId && item.planDateFieldId
+    );
+
+    if (!row) {
+      rules.push({ skip: `для статуса ${statusId} в «Связи этапов и полей» не указано поле «План готовности»` });
+    } else if (Number(row.planDateFieldId) !== PLANNED_READY_FIELD_ID || rules.length === 0) {
+      rules.push({
+        fieldId: Number(row.planDateFieldId),
+        coefficient: Number((matrix.cells || {})[`${enumId}:${statusId}`])
+      });
+    }
+  }
+
+  return rules;
+}
+
+async function fillPlannedReadyDate(ctx, leadId, statusId) {
+  const settings = productionWidgetSettingsCache;
+
+  if (!settings || !settings.readinessMatrix) {
+    return;
+  }
+
+  await runExclusive(leadId, async () => {
+    const lead = await ctx.getLead(leadId);
+
+    if (!lead) {
+      return;
+    }
+
+    const log = (reason) =>
+      console.log(`[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId} — пропуск: ${reason}`);
+    const floors = parseFloat(String(ctx.getFieldValueJoined(lead, FLOORS_FIELD_ID)).replace(",", "."));
+    const fields = [];
+    const done = [];
+
+    for (const rule of resolvePlannedDateRules(settings, lead, statusId)) {
+      if (rule.skip) {
+        log(rule.skip);
+        continue;
+      }
+
+      if (ctx.getFieldValues(lead, rule.fieldId).length > 0) {
+        log(`поле ${rule.fieldId} уже заполнено`);
+        continue;
+      }
+
+      if (!Number.isFinite(floors) || floors <= 0 || !Number.isFinite(rule.coefficient) || rule.coefficient <= 0) {
+        log(`поле ${rule.fieldId}: не хватает данных (этажей: ${floors}, коэффициент: ${rule.coefficient})`);
+        continue;
+      }
+
+      // round(…, 6) — чтобы 2 × 0,6 = 1,2000000000000002 не превращалось в лишний день.
+      const days = Math.ceil(Math.round(floors * rule.coefficient * 1e6) / 1e6);
+
+      fields.push({ field_id: rule.fieldId, values: [{ value: ctx.todayMoscowStartUnix() + days * 86400 }] });
+      done.push(`поле ${rule.fieldId}: ${floors} × ${rule.coefficient} → +${days} дн.`);
+    }
+
+    if (fields.length === 0) {
+      return;
+    }
+
+    await patchLead(ctx, leadId, { custom_fields_values: fields });
+
+    console.log(`[Бот производства] Плановая дата: сделка ${leadId}, статус ${statusId}: ${done.join("; ")}.`);
+  });
+}
 
 function init(app, ctx) {
   app.get("/oauth/amomessenger/production", (req, res) => {
@@ -2719,6 +5699,7 @@ function init(app, ctx) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
+    res.set("Cache-Control", "no-store");
     res.json(productionWidgetSettingsCache || null);
   });
 
@@ -2765,6 +5746,17 @@ function init(app, ctx) {
 
     res.status(200).json({ status: "OK" });
 
+    // Вебхук amoCRM о смене статуса сделки (F-4).
+    if (body.leads) {
+      for (const event of extractStatusChangeEvents(body)) {
+        fillPlannedReadyDate(ctx, event.leadId, event.statusId).catch((error) =>
+          console.error(`[Бот производства] Плановая дата, сделка ${event.leadId}:`, error.stack || error.message)
+        );
+      }
+
+      return;
+    }
+
     console.log("[Бот производства] Webhook получен, event_type:", body.event_type);
 
     try {
@@ -2780,8 +5772,26 @@ function init(app, ctx) {
       const directId = conversationIdentity.direct_id;
       const text = message.text || "";
       const userKey = context.user_id || (message.author && message.author.user_id);
-      const userName = ctx.extractAmoMessengerUserName(message.author, context, message);
+      let userName = ctx.extractAmoMessengerUserName(message.author, context, message);
+
+      // Если имя отсутствует в вебхуке, получаем его через API amoMessenger.
+      if (!userName && userKey) {
+        userName = await getProductionAmoMessengerUserName(ctx, userKey);
+      }
+
       const imageUrls = ctx.extractImageUrlsFromMessage(message);
+      console.log(
+  "[Бот производства] Диагностика пользователя:",
+  JSON.stringify({
+    contextKeys: Object.keys(context),
+    messageKeys: Object.keys(message),
+    authorKeys:
+      message.author && typeof message.author === "object"
+        ? Object.keys(message.author)
+        : [],
+    userName,
+  })
+);
 
       if (!directId || !userKey) {
         console.error("[Бот производства] Не удалось определить direct_id или user_id из вебхука.");
@@ -2793,14 +5803,22 @@ function init(app, ctx) {
         JSON.stringify({ userKey: String(userKey), userName, text })
       );
 
-      const trimmedText = String(text || "").trim();
+      const trimmedText = await restoreTaggedButtonText(ctx, directId, String(text || "").trim());
 
       if (ctx.isStartCommand(trimmedText)) {
         await handleStartCommand(ctx, directId, userKey, userName);
         return;
       }
 
-      const state = productionUserState[userKey];
+      let state = productionUserState[userKey];
+
+      // После перезапуска бота память очищается. Роль восстанавливаем молча по
+      // имени пользователя (как при «старт»), чтобы кнопки из прежних
+      // сообщений продолжали работать без повторного «старт».
+      if (!state && userName && productionWidgetSettingsCache) {
+        state = buildUserState(productionWidgetSettingsCache, userName, directId);
+        productionUserState[userKey] = state;
+      }
 
       if (!state) {
         await sendProductionDirectMessage(
@@ -2859,6 +5877,14 @@ function init(app, ctx) {
             await handleMaterialsCommentInput(ctx, directId, userKey, userName, settings, trimmedText);
           } else if (kind === "project_return_comment") {
             await handleProjectReturnCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "design_master_comment") {
+            await handleDesignMasterCommentInput(ctx, directId, userKey, settings, trimmedText);
+          } else if (kind === "otk_reject_comment") {
+            await handleOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "final_otk_reject_comment") {
+            await handleFinalOtkRejectCommentInput(ctx, directId, userKey, trimmedText);
+          } else if (kind === "report_period" && settings) {
+            await handleReportPeriodInput(ctx, directId, userKey, userName, settings, trimmedText);
           }
         } catch (error) {
           console.error("[Бот производства] Ошибка обработки ввода:", error.stack || error.message);
@@ -2884,10 +5910,18 @@ function init(app, ctx) {
         const decision = yesLeadId ? "yes" : "no";
 
         try {
-          if (state.roleKey === PERFORMER_ROLE_KEY) {
+          if (String(leadId).startsWith("final:")) {
+            // Финальный ОТК (T-13.4): «Да»/«Нет» ОТК или мастера без ОТК.
+            await handleFinalOtkReply(ctx, directId, userKey, String(leadId).slice(6), decision, settings);
+          } else if (String(leadId).startsWith("cost:")) {
+            // «Установить этапу … стоимость работ …?» (мастер, п.3.8.1)
+            await handleCostSetConfirm(ctx, directId, userKey, String(leadId).slice(5), decision, settings);
+          } else if (state.roleKey === PERFORMER_ROLE_KEY) {
             await handlePerformerDealConfirmReply(ctx, directId, userKey, userName, leadId, decision, settings);
           } else if (state.roleKey === "metalShopForeman" || state.roleKey === "woodShopForeman") {
             await handleApprovalReply(ctx, directId, leadId, decision, settings);
+          } else if (state.roleKey === "otk") {
+            await handleOtkAcceptReply(ctx, directId, userKey, leadId, decision, settings);
           } else {
             await handleUnknownCommand(ctx, directId, state.roleKey);
           }
@@ -2904,14 +5938,91 @@ function init(app, ctx) {
         return;
       }
 
+      // Решения по непринятым работам (T-9.4 / T-10.4 / T-11.4): кнопки с id
+      // сделки; роль нажавшего определяет смысл («Продолжить работу» у ОТК,
+      // исполнителя и мастера — разные шаги).
+      const continueLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Продолжить работу");
+      const handoverLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отдать на доработку");
+      const refuseLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Не принять");
+      const stageReturn = parseStageReturnButton(trimmedText);
+
+      if ((continueLeadId || handoverLeadId || refuseLeadId || stageReturn) && settings) {
+        try {
+          if (stageReturn) {
+            await handleForemanReturnToStage(ctx, directId, userKey, stageReturn.leadId, stageReturn.statusId, settings);
+          } else {
+            await handleUnacceptedDecision(
+              ctx,
+              directId,
+              userKey,
+              userName,
+              continueLeadId || handoverLeadId || refuseLeadId,
+              continueLeadId ? "continue" : handoverLeadId ? "handover" : "refuse",
+              settings
+            );
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка решения по непринятым работам:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать решение. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // Возврат в проектный отдел / отказ (T-20.2.6): id вида design:<сделка>.
+      const designReturnTag = parseTaggedButtonCompat(ctx, trimmedText, "Вернуть в проектный отдел");
+      const designDeclineTag = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+
+      if (
+        settings &&
+        ((designReturnTag && String(designReturnTag).startsWith(DESIGN_TAG_PREFIX)) ||
+          (designDeclineTag && String(designDeclineTag).startsWith(DESIGN_TAG_PREFIX)))
+      ) {
+        try {
+          if (designReturnTag) {
+            await handleDesignReturnButton(ctx, directId, userKey, String(designReturnTag).slice(DESIGN_TAG_PREFIX.length), settings);
+          } else {
+            await handleDesignDecline(ctx, directId, userKey, String(designDeclineTag).slice(DESIGN_TAG_PREFIX.length), settings);
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка решения по проектному отделу:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать решение. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
       // "Подтвердить (id)" / "Отклонить (id)" / "Изменить (id)" — ответ
       // мастера на пересмотр стоимости (ТЗ T-6.5.3/T-8, актуализация 3.5).
       // "Отклонить" также используется в решении по закупке материалов
       // (ниже) — при совпадении текста сначала проверяем, относится ли
       // кнопка к пересмотру стоимости, и только если нет — к закупке.
-      const confirmCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить");
-      const changeCostLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Изменить");
-      const declineLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отклонить");
+      const costButton = await resolveCostDecisionButton(ctx, trimmedText);
+
+      if (costButton && !costButton.identifier) {
+        await sendProductionDirectMessage(ctx, directId, "Запрос на пересмотр стоимости уже обработан или устарел.");
+        return;
+      }
+
+      const confirmCostLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Подтвердить") ||
+        (costButton && costButton.label === "Подтвердить" ? costButton.identifier : null);
+      const changeCostLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Изменить") ||
+        (costButton && costButton.label === "Изменить" ? costButton.identifier : null);
+      const declineLeadId =
+        parseTaggedButtonCompat(ctx, trimmedText, "Отклонить") ||
+        (costButton && costButton.label === "Отклонить" ? costButton.identifier : null);
       const sendToProcurementLeadId = parseTaggedButtonCompat(ctx, trimmedText, "Отправить на закупку");
 
       if ((confirmCostLeadId || changeCostLeadId) && settings) {
@@ -2935,9 +6046,13 @@ function init(app, ctx) {
 
       if (declineLeadId && settings) {
         try {
-          const lead = await ctx.getLead(declineLeadId);
+          const lead = await ctx.getLead(parseCostIdentifier(declineLeadId).leadId);
           const hasCostEntry =
-            lead && getCostRevisionEntry(await getCostRevisionEntries(ctx, lead), Number(lead.status_id));
+            lead &&
+            getCostRevisionEntry(
+              await getCostRevisionEntries(ctx, lead),
+              parseCostIdentifier(declineLeadId).statusId || Number(lead.status_id)
+            );
 
           if (hasCostEntry) {
             await handleCostRevisionReply(ctx, directId, userKey, declineLeadId, "reject", settings);
@@ -3003,17 +6118,124 @@ function init(app, ctx) {
         return;
       }
 
-      const roleButtons = MAIN_MENU_BUTTONS[state.roleKey] || [];
+      // Выбор периода отчёта (T-14.1 / T-15.1) — после нажатия «Отчёт».
+      if (state.awaitingReportPeriod && REPORT_PERIOD_BUTTONS.includes(trimmedText) && settings) {
+        try {
+          await handleReportPeriodChoice(ctx, directId, userKey, userName, settings, trimmedText);
+        } catch (error) {
+          console.error("[Бот производства] Ошибка формирования отчёта:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось сформировать отчёт. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      // Несколько ролей у одного человека: «Сменить роль» → выбор роли.
+      rolesByDirectId.set(String(directId), state.roleKeys || [state.roleKey]);
+
+      if (trimmedText === SWITCH_ROLE_BUTTON && state.roleKeys && state.roleKeys.length > 1 && !isCombinedForeman(state.roleKeys)) {
+        await showRoleChoice(ctx, directId, state);
+        return;
+      }
+
+      if (state.awaitingRoleChoice && state.roleKeys && state.roleKeys.some((key) => ROLE_LABELS[key] === trimmedText)) {
+        await applyRoleChoice(ctx, directId, state, trimmedText);
+        return;
+      }
+
+      if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && isDesignSubmenuInput(state, trimmedText)) {
+        try {
+          await forEachMenuRole(
+            state,
+            trimmedText === DESIGN_SUBMENU_BACK,
+            (roleKey) => handleDesignSubmenu(ctx, directId, userKey, roleKey, trimmedText),
+            { ctx, directId }
+          );
+        } catch (error) {
+          console.error("[Бот производства] Ошибка «Доработка проектным отделом»:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось получить список сделок. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      if (settings && FOREMAN_ROLE_KEYS.includes(state.roleKey) && WAITING_DECISION_BUTTONS.includes(trimmedText)) {
+        try {
+          await forEachMenuRole(
+            state,
+            trimmedText === WAITING_DECISION_DESIGN,
+            (roleKey) => handleWaitingDecisionChoice(ctx, directId, userKey, roleKey, settings, trimmedText),
+            { ctx, directId }
+          );
+        } catch (error) {
+          console.error("[Бот производства] Ошибка «Ожидание решения»:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось получить список сделок. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+        }
+
+        return;
+      }
+
+      const roleButtons = getMenuButtons(state.roleKey, settings);
 
       if (roleButtons.includes(trimmedText)) {
+        // Новый пункт меню — прежний список больше не актуален.
+        delete state.listContext;
+        delete state.awaitingReportPeriod;
+        delete state.designMenuStage;
+
         try {
-          if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
+          const once = ["Отчёт", "Ожидание решения", "Вопрос от продаж", "Вопросы от продаж"].includes(trimmedText);
+
+          await forEachMenuRole(state, once, async () => {
+          if (trimmedText === "Отчёт") {
+            await startReport(ctx, directId, userKey);
+          } else if (trimmedText === "Распределение" && DISTRIBUTION_ROLE_KEYS.includes(state.roleKey)) {
             await handleDistributionButton(ctx, directId, userKey, userName, state.roleKey);
           } else if (trimmedText === "Исполнение" && state.roleKey === PERFORMER_ROLE_KEY && settings) {
             await showExecutionListForPerformer(ctx, directId, userName, settings);
+          } else if (trimmedText === "В ОТК" && state.roleKey === PERFORMER_ROLE_KEY && settings) {
+            await showInOtkListForPerformer(ctx, directId, userKey, userName, settings);
+          } else if (trimmedText === "Промежуточный ОТК" && state.roleKey === "otk" && settings) {
+            await showIntermediateOtkList(ctx, directId, userKey, settings);
+          } else if (trimmedText === "Финальный ОТК" && settings && (state.roleKey === "otk" || FOREMAN_ROLE_KEYS.includes(state.roleKey))) {
+            await showFinalOtkList(ctx, directId, userKey, state.roleKey, settings);
+          } else if (trimmedText === "Непринятые работы" && settings) {
+            if (state.roleKey === "otk") {
+              await showUnacceptedListForOtk(ctx, directId, userKey, settings);
+            } else if (state.roleKey === PERFORMER_ROLE_KEY) {
+              await showUnacceptedListForPerformer(ctx, directId, userKey, userName, settings);
+            } else if (FOREMAN_ROLE_KEYS.includes(state.roleKey)) {
+              await showUnacceptedListForForeman(ctx, directId, userKey, state.roleKey, settings);
+            } else {
+              await handleMenuPlaceholder(ctx, directId, trimmedText);
+            }
+          } else if (trimmedText === "Пересмотреть стоимость" && FOREMAN_ROLE_KEYS.includes(state.roleKey) && settings) {
+            await showCostRevisionListForForeman(ctx, directId, userKey, state.roleKey, settings);
+          } else if (trimmedText === "Контроль сроков" && settings) {
+            await showDeadlineControl(ctx, directId, userName, state.roleKey, settings);
+          } else if (trimmedText === "Ожидание решения" && FOREMAN_ROLE_KEYS.includes(state.roleKey)) {
+            await showWaitingDecisionMenu(ctx, directId);
+          } else if (trimmedText === "Не принято ОТК" && FOREMAN_ROLE_KEYS.includes(state.roleKey) && settings) {
+            await showOtkRejectedInfoForForeman(ctx, directId, userKey, state.roleKey, settings);
           } else {
             await handleMenuPlaceholder(ctx, directId, trimmedText);
           }
+          }, { ctx, directId });
         } catch (error) {
           console.error("[Бот производства] Ошибка пункта меню:", error.stack || error.message);
 
@@ -3025,6 +6247,26 @@ function init(app, ctx) {
         }
 
         return;
+      }
+
+      // Номер договора из списка ОТК / непринятых работ — по запомненному
+      // списку (state.listContext), раньше «Распределения»/«Исполнения».
+      if (settings && state.listContext) {
+        try {
+          if (await tryHandleOtkListSelection(ctx, directId, userKey, userName, settings, trimmedText)) {
+            return;
+          }
+        } catch (error) {
+          console.error("[Бот производства] Ошибка выбора сделки из списка:", error.stack || error.message);
+
+          await sendProductionDirectMessage(
+            ctx,
+            directId,
+            "❌ Не удалось обработать выбор сделки. Попробуйте ещё раз позже или обратитесь к администратору."
+          );
+
+          return;
+        }
       }
 
       // Не пункт меню — проверяем, не нажатие ли это на номер договора из
@@ -3040,7 +6282,10 @@ function init(app, ctx) {
               (await tryHandlePerformerDealSelection(ctx, directId, userName, settings, trimmedText)) ||
               (await tryHandleExecutionDealSelection(ctx, directId, userKey, userName, settings, trimmedText));
           } else if (state.roleKey === "metalShopForeman") {
-            handled = await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_METAL, trimmedText);
+            handled =
+              (await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_METAL, trimmedText)) ||
+              (isCombinedForeman(state.roleKeys) &&
+                (await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_WOOD, trimmedText)));
           } else if (state.roleKey === "woodShopForeman") {
             handled = await tryHandleForemanDealSelection(ctx, directId, settings, PIPELINE_NAME_WOOD, trimmedText);
           }

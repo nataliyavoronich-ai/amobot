@@ -1952,7 +1952,51 @@ function selHmac(key, data) {
   return crypto.createHmac("sha256", key).update(data).digest();
 }
 
-function selSignRequest({ method, key, payload, contentType }) {
+// Selectel отдаёт файл с тем Content-Type, с которым он загружен. Если тип
+// неизвестен (text/plain, octet-stream), браузер показывает набор символов
+// вместо скачивания. Поэтому тип определяем по расширению, а для документов
+// добавляем Content-Disposition: attachment, чтобы файл скачивался.
+const SEL_CONTENT_TYPE_BY_EXT = {
+  pdf: "application/pdf",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  dwg: "application/acad",
+  dxf: "application/dxf",
+  zip: "application/zip",
+  rar: "application/vnd.rar",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  mp4: "video/mp4"
+};
+const SEL_INLINE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "gif", "mp4"]);
+
+function selResolveFileMeta(key, contentType) {
+  const fileName = String(key).split("/").pop() || "file";
+  const extMatch = fileName.match(/\.([A-Za-z0-9]+)$/);
+  const ext = extMatch ? extMatch[1].toLowerCase() : "";
+  const knownType = SEL_CONTENT_TYPE_BY_EXT[ext];
+  const isGenericType =
+    !contentType ||
+    /^(text\/plain|application\/octet-stream|binary\/octet-stream)/i.test(contentType);
+  const resolvedType =
+    knownType && isGenericType ? knownType : contentType || "application/octet-stream";
+  const encodedName = encodeURIComponent(fileName).replace(
+    /['()*]/g,
+    (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+  const disposition = SEL_INLINE_EXTENSIONS.has(ext)
+    ? ""
+    : `attachment; filename*=UTF-8''${encodedName}`;
+
+  return { contentType: resolvedType, disposition };
+}
+
+function selSignRequest({ method, key, payload, contentType, contentDisposition }) {
   const now = new Date();
   const amzDate = now
     .toISOString()
@@ -1963,12 +2007,15 @@ function selSignRequest({ method, key, payload, contentType }) {
   const payloadHash = selSha256Hex(payload);
 
   const canonicalHeaders =
+    (contentDisposition ? `content-disposition:${contentDisposition}\n` : "") +
     `content-type:${contentType}\n` +
     `host:${SELECTEL_S3_ENDPOINT}\n` +
     `x-amz-acl:public-read\n` +
     `x-amz-content-sha256:${payloadHash}\n` +
     `x-amz-date:${amzDate}\n`;
-  const signedHeaders = "content-type;host;x-amz-acl;x-amz-content-sha256;x-amz-date";
+  const signedHeaders =
+    (contentDisposition ? "content-disposition;" : "") +
+    "content-type;host;x-amz-acl;x-amz-content-sha256;x-amz-date";
 
   const canonicalRequest = [
     method,
@@ -2000,6 +2047,7 @@ function selSignRequest({ method, key, payload, contentType }) {
   return {
     url: `https://${SELECTEL_S3_ENDPOINT}${canonicalPath}`,
     headers: {
+      ...(contentDisposition ? { "Content-Disposition": contentDisposition } : {}),
       "Content-Type": contentType,
       "x-amz-acl": "public-read",
       "x-amz-content-sha256": payloadHash,
@@ -2029,11 +2077,13 @@ async function selUploadBuffer(key, buffer, contentType) {
     );
   }
 
+  const meta = selResolveFileMeta(key, contentType);
   const { url, headers } = selSignRequest({
     method: "PUT",
     key,
     payload: buffer,
-    contentType: contentType || "application/octet-stream"
+    contentType: meta.contentType,
+    contentDisposition: meta.disposition
   });
 
   const doRequest = () =>
