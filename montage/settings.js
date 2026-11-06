@@ -97,8 +97,8 @@ function validate(settings) {
       return { valid: false, error: "«Пользователи бота»: не выбран бригадир (поле в amoCRM)." };
     }
 
-    if (!String(row.managerHandle || "").trim() || !String(row.foremanHandle || "").trim()) {
-      return { valid: false, error: `«Пользователи бота» (${row.foremanName}): заполните ники руководителя и бригадира.` };
+    if (!String(row.managerHandle || "").trim()) {
+      return { valid: false, error: `«Пользователи бота» (${row.foremanName}): заполните руководителя (имя и/или telegram).` };
     }
 
     const key = calc.normalizeName(row.foremanName);

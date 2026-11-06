@@ -361,7 +361,7 @@ async function main() {
 
   const settings = {
     motivations: [{ name: "Стандарт", transportTariff: 20, deliveryTariff: 10, personalBonus: 0.01, mentoring: 0.02 }],
-    users: [{ managerHandle: "@boss", foremanName: "Иванов Иван", foremanHandle: "@ivanov_ivan2023", motivation: "Стандарт" }],
+    users: [{ managerHandle: "@boss", foremanName: "Иванов Иван", motivation: "Стандарт" }],
     pricing: [
       { enumId: 1, productName: "Закрытый каркас", X1: 7000, Y1: 1000, Y2: 2000, Y3: 1000, B: 20 },
       { enumId: 3, productName: "Деревянная лестница", A: 1.5, Y3: 1000 }
