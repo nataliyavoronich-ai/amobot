@@ -83,7 +83,7 @@ function folderPaths(ctx, leadId) {
   return { leadPath, reportsPath, montagePath: `${reportsPath}/${MONTAGE_FOLDER_NAME}` };
 }
 
-// T-5.1–5.3: папка сделки, папка «Монтаж», ссылка на неё в поле 557522.
+// T-5.1–5.2: папка сделки и папка «Монтаж».
 async function ensureMontageFolder(ctx, leadId) {
   const { reportsPath, montagePath } = folderPaths(ctx, leadId);
 
@@ -93,15 +93,34 @@ async function ensureMontageFolder(ctx, leadId) {
   return montagePath;
 }
 
-async function ensureFolderLink(ctx, lead) {
-  const montagePath = await ensureMontageFolder(ctx, lead.id);
-  const url = await ctx.ydGetFolderPublicUrl(montagePath);
+// Ссылка на папку «Монтаж» сделки генерируется самим ботом (структура папок
+// у всех сделок одинаковая); поле «Ссылка на папку Монтаж» (557522) бот НЕ
+// заполняет. Если папки ещё нет (файлов не загружали) — возвращает "".
+const folderLinkCache = new Map();
 
-  if (amo.fieldText(ctx, lead, FIELD.MONTAGE_FOLDER) !== url) {
-    await amo.patchLead(ctx, lead.id, { custom_fields_values: [amo.setValue(FIELD.MONTAGE_FOLDER, url)] });
+async function folderLink(ctx, leadId) {
+  const cached = folderLinkCache.get(String(leadId));
+
+  if (cached && Date.now() - cached.at < 3600000) {
+    return cached.url;
   }
 
-  return url;
+  try {
+    const url = await ctx.ydGetFolderPublicUrl(folderPaths(ctx, leadId).montagePath);
+
+    folderLinkCache.set(String(leadId), { url, at: Date.now() });
+
+    return url;
+  } catch (error) {
+    return "";
+  }
+}
+
+// То же, но папку при необходимости создаём (перед завершением отчёта).
+async function ensureFolderLink(ctx, lead) {
+  await ensureMontageFolder(ctx, lead.id);
+
+  return folderLink(ctx, lead.id);
 }
 
 async function nextFileNumber(ctx, folderPath, baseName, extension) {
@@ -163,6 +182,7 @@ module.exports = {
   extractAttachments,
   attachmentFits,
   ensureFolderLink,
+  folderLink,
   uploadFile,
   publicLinks
 };

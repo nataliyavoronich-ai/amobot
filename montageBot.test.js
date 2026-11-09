@@ -139,6 +139,21 @@ function field(id, value, enumId) {
 }
 
 const leads = {
+  102: {
+    id: 102,
+    pipeline_id: F.PIPELINE.METAL,
+    price: 50000,
+    _embedded: { contacts: [{ id: 5, is_main: true }] },
+    custom_fields_values: [
+      field(F.FIELD.MONTAGER, "Иванов Иван", 11),
+      field(F.FIELD.PRODUCT, "Навес", 5),
+      field(F.FIELD.CONTRACT_NUMBER, "555"),
+      field(F.FIELD.FLOORS, "1"),
+      field(F.FIELD.ADDRESS, "ул. Садовая, 1"),
+      field(F.FIELD.TERMS, NOW),
+      field(F.SLOT_FIELDS[0].master, "Иванов Иван", 11)
+    ]
+  },
   101: {
     id: 101,
     pipeline_id: F.PIPELINE.WOOD_PRODUCTION,
@@ -493,9 +508,11 @@ async function main() {
     await uploadAndContinue(foreman);
     assert.match(await say(foreman, "Доп. работы"), /часов/);
     await say(foreman, "3");
-    await uploadAndContinue(foreman);
-    assert.deepStrictEqual(sent[0].buttons, ["Далее"]);
-    assert.match(await say(foreman, "Далее"), /общий комментарий/);
+    // выбраны все доп. работы — кнопку «Далее» не показываем, сразу просим комментарий
+    const afterLast = await uploadAndContinue(foreman);
+
+    assert.match(afterLast, /общий комментарий/);
+    assert.strictEqual(sent[sent.length - 1].buttons.length, 0);
     assert.match(await say(foreman, "Монтаж полок"), /фото\/видео установленной лестницы/);
     assert.match(await say(foreman, "", photo), /Дополните фотоотчёт/);
     assert.deepStrictEqual(sent[sent.length - 1].buttons, ["Завершить отчёт"]);
@@ -517,9 +534,8 @@ async function main() {
     assert.strictEqual(readSlotValue("tempSteps"), 1);
     assert.strictEqual(readSlotValue("fence"), 10);
     assert.ok(leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.ACT));
-    const folderLink = leads[100].custom_fields_values.find((f) => f.field_id === F.FIELD.MONTAGE_FOLDER).values[0].value;
-
-    assert.ok(decodeURIComponent(folderLink).endsWith("Сделка (id 100)/Отчеты и проекты/Монтаж"), folderLink);
+    // поле «Ссылка на папку Монтаж» бот не заполняет
+    assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.MONTAGE_FOLDER));
     assert.ok(!leads[100].custom_fields_values.some((f) => f.field_id === F.FIELD.PHOTO_LINK));
     assert.strictEqual(tasks.find((t) => t.id === 900).result, "Монтаж завершен");
     assert.strictEqual(createdTasks.length, 0); // бот сам задач в amoCRM не создаёт
@@ -839,6 +855,34 @@ async function main() {
     assert.ok(link && decodeURIComponent(link.values[0].value).includes("Нужны детали"), "ссылки «Нужны детали» должны заменить старую");
     assert.strictEqual(tasks.find((t) => t.id === 908).result, "Промежуточный отчет нужны детали");
     assert.match(await say(manager, "Уведомления"), /Монтаж по договору № 1234 не завершен\. Нужны детали\. Монтажник Иванов Иван/);
+  });
+
+  await check("ссылка на папку в сообщениях генерируется ботом (Сделка/Отчеты и проекты/Монтаж)", async () => {
+    tasks.push({ id: 940, task_type_id: F.TASK_TYPE.ACCEPT_REPORT, is_completed: false, entity_id: 100, updated_at: NOW });
+    await say(manager, "Принять отчет");
+
+    assert.ok(decodeURIComponent(sent[0].text).includes("Сделка (id 100)/Отчеты и проекты/Монтаж"), sent[0].text);
+  });
+
+  await check("ограждения/терраса/навес: «Укажите объем проделанной работы (м/п или м2)», затем доп. работы", async () => {
+    tasks.push({ id: 930, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 102, complete_till: NOW, updated_at: NOW });
+
+    await say(foreman, "Загрузить отчет");
+    await say(foreman, "🔧 555");
+    await say(foreman, "Монтаж завершён");
+    await say(foreman, "Заказчик отсутствует");
+    await say(foreman, "Пропустить"); // пробег доставки
+    await say(foreman, "10");
+    await uploadAndContinue(foreman);
+
+    const kt = await say(foreman, "Пропустить"); // блок КТУ
+
+    assert.ok(kt.split("\n").includes("Укажите объем проделанной работы (м/п или м2)"), kt);
+
+    const menu = await say(foreman, "12,5");
+
+    assert.match(menu, /Укажите доп\. работы\./);
+    assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "Доп. работы"]);
   });
 
   await check("повторное «Завершить» не плодит задачи и записи", async () => {

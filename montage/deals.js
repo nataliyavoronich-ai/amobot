@@ -5,6 +5,7 @@
 const amo = require("./amo");
 const calc = require("./calc");
 const messenger = require("./messenger");
+const files = require("./files");
 const { FIELD, PIPELINE, SALES_PIPELINE_IDS, TASK_TYPE, UPCOMING_STATUS } = require("./constants");
 
 const { mdSafe, mdLink } = messenger;
@@ -173,8 +174,9 @@ function contractLabel(ctx, lead) {
   return mdLink(text, amo.fieldText(ctx, lead, FIELD.CONTRACT_LINK));
 }
 
-function folderLink(ctx, lead, text = "Папка на Яндекс Диске") {
-  return mdLink(text, amo.fieldText(ctx, lead, FIELD.MONTAGE_FOLDER));
+// Ссылка на папку «Монтаж» генерируется ботом (поле 557522 не используется).
+async function folderLink(ctx, lead, text = "Папка на Яндекс Диске") {
+  return mdLink(text, await files.folderLink(ctx, lead.id));
 }
 
 // Дата для сортировки/показа: у «Дерево производство» — дата снятия лекал
@@ -217,7 +219,7 @@ async function dealLine(ctx, lead, mode) {
   }
 
   if (mode === "accept") {
-    return `${date}, ${address}; ${product}, ${mdSafe(contact.name)}, ${mdSafe(contact.phones[0] || "")}, ${contract}. ${folderLink(ctx, lead, "Папка на яндекс-диске")}`;
+    return `${date}, ${address}; ${product}, ${mdSafe(contact.name)}, ${mdSafe(contact.phones[0] || "")}, ${contract}. ${await folderLink(ctx, lead, "Папка на яндекс-диске")}`;
   }
 
   if (mode === "fixes") {

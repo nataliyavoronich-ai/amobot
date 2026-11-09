@@ -94,7 +94,7 @@ async function showCard(env, state, lead) {
     "Отчет принят?",
     `- Монтажник ${mdSafe(flow.foremanName)}`,
     `- ${deals.contractLabel(ctx, lead)}`,
-    `- ${deals.folderLink(ctx, lead, "Папка на яндекс-диске")}`,
+    `- ${await deals.folderLink(ctx, lead, "Папка на яндекс-диске")}`,
     `- ${mdSafe(deals.productText(ctx, lead))}`,
     `- Кол-во этажей: ${mdSafe(deals.floorsText(ctx, lead))}`,
     `- Числовое значение пробега: ${calc.fmt(slot.kmFact)}`,

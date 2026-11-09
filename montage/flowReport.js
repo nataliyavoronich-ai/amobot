@@ -268,7 +268,7 @@ const STEPS = {
       env,
       state,
       `Лекала сняты\n` +
-        `Монтаж каркаса: ${deals.folderLink(ctx, lead, "Папка на Яндекс Диске")}\n` +
+        `Монтаж каркаса: ${await deals.folderLink(ctx, lead, "Папка на Яндекс Диске")}\n` +
         `Адрес объекта: ${mdSafe(amo.fieldText(ctx, lead, FIELD.ADDRESS) || "—")}\n` +
         `${deals.contractLabel(ctx, lead)}\n` +
         `Продукт: ${mdSafe(deals.productText(ctx, lead))}\n` +
@@ -533,7 +533,7 @@ const STEPS = {
     if (!group) {
       await STEPS.extras_done(env, state);
     } else if (group === "g4") {
-      await number(env, state, "Укажите объём проделанной работы.", "extras_amount");
+      await number(env, state, "Укажите объем проделанной работы (м/п или м2)", "extras_amount");
     } else {
       await STEPS.extras_menu(env, state);
     }
@@ -547,6 +547,13 @@ const STEPS = {
   async extras_menu(env, state) {
     const d = data(state);
     const options = (EXTRA_OPTIONS[state.flow.extrasGroup] || []).filter((item) => !d.usedExtras.includes(item.id));
+
+    // Всё уже выбрано и осталась бы одна кнопка «Далее» — не показываем её,
+    // сразу запрашиваем общий комментарий.
+    if (options.length === 0 && d.usedExtras.length > 0) {
+      await text(env, state, "Укажите общий комментарий к дополнительным работам.", "extras_comment");
+      return;
+    }
 
     await choice(
       env,
@@ -1072,7 +1079,7 @@ async function finalize(env, state, result) {
   // 6) уведомления руководителю
   if (!done.notify) {
     const who = mdSafe(foremanName);
-    const folderText = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : deals.folderLink(ctx, lead);
+    const folderText = d.folderUrl ? `[Папка на Яндекс Диске](${d.folderUrl})` : await deals.folderLink(ctx, lead);
 
     if (result === RESULT.INTERMEDIATE) {
       await messenger.notify(ctx, managerNames, `Монтаж по договору № ${mdSafe(number)} не завершен. Монтажник ${who}. ${folderText}`, { markdown: true });

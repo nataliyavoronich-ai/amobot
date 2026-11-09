@@ -186,7 +186,7 @@ async function finishForeman(env, state) {
       row ? [row.managerHandle] : [],
       `Монтажник ${mdSafe(state.foremanName)} просит пересмотреть стоимость работ.\n\n` +
         `${deals.contractLabel(ctx, lead)}\n\n` +
-        `${deals.folderLink(ctx, lead)}\n\n` +
+        `${await deals.folderLink(ctx, lead)}\n\n` +
         `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
         `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
         `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n\n` +
@@ -313,7 +313,7 @@ async function showManagerCard(env, state, lead) {
     env,
     `Монтажник ${mdSafe(flow.foremanName)} просит пересмотреть стоимость работ.\n\n` +
       `${deals.contractLabel(ctx, lead)}\n\n` +
-      `${deals.folderLink(ctx, lead)}\n\n` +
+      `${await deals.folderLink(ctx, lead)}\n\n` +
       `Стоимость работ: ${calc.fmt(slot.price)}\n\n` +
       `Баллы КТУ: ${calc.fmt(amo.ktuTotal(slot))}\n\n` +
       `${calc.fmt(slot.kmFact)} км * ${calc.fmt(rates.transport)} тариф = ${calc.fmt(slot.kmFactTotal)}\n\n` +
