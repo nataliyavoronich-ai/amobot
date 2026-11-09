@@ -283,11 +283,13 @@ function calcMontagePrice(group, row, v, motivation) {
       `${fmt(v.tempSteps)}(монтаж/демонтаж врем. ступеней) × ${fmt(floors)}(этажей) × ${fmt(R.Y2)}`
     );
     extraHoursTerm();
-    // B — процент: «Чистовая отделка» = B% от P.
+    // B — доля от P: 0,2 = 20 % (значение больше 1 читаем как проценты: 20 = 20 %).
+    const finishShare = num(R.B) > 1 ? num(R.B) / 100 : num(R.B);
+
     add(
       terms,
-      (num(R.B) / 100) * num(v.finish) * P,
-      `${fmt(R.B)}%(чистовая) × ${fmt(v.finish)}(чистовая отделка) × ${fmt(P)}(P)`
+      finishShare * num(v.finish) * P,
+      `${fmt(finishShare * 100)}%(чистовая) × ${fmt(v.finish)}(чистовая отделка) × ${fmt(P)}(P)`
     );
     add(terms, num(v.platform) * num(R.Y4), `${fmt(v.platform)}(площадка м2) × ${fmt(R.Y4)}`);
     add(terms, num(v.canopy) * num(R.Y5), `${fmt(v.canopy)}(навес м2) × ${fmt(R.Y5)}`);
@@ -329,10 +331,10 @@ function calcMontagePrice(group, row, v, motivation) {
 
   const base = terms.reduce((sum, item) => sum + item.value, 0);
   const bonus = num(motivation && motivation.personalBonus);
-  // «Наставничество» в настройках — доля надбавки (0,02 = +2%), поэтому
-  // множитель 1 + значение; не заполнено — множитель 1 (ТЗ T-8.2).
+  // «Наставничество» — сам множитель (1 = без изменений, 1,12 = +12 %);
+  // не заполнено — множитель 1 (ТЗ T-8.2: не используем).
   const mentoring = num(motivation && motivation.mentoring);
-  const multiplier = 1 + mentoring;
+  const multiplier = mentoring > 0 ? mentoring : 1;
   const price = Math.round((base + P * bonus) * multiplier);
 
   return {
@@ -351,7 +353,7 @@ function calcMontagePrice(group, row, v, motivation) {
 function describePriceCalc(result) {
   const lines = [];
   const bonusPart = result.bonus ? ` + (${fmt(result.P)}(P) × ${fmt(result.bonus)}(Персональная надбавка))` : "";
-  const mentoringPart = result.mentoring ? ` × (1 + ${fmt(result.mentoring)}(Наставничество))` : "";
+  const mentoringPart = result.mentoring > 0 ? ` × ${fmt(result.mentoring)}(Наставничество)` : "";
 
   lines.push(
     `Стоимость работ = (${fmt(result.base)}(Базовый тариф)${bonusPart})${mentoringPart} = ${fmt(result.price)}`

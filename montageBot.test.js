@@ -309,6 +309,16 @@ async function main() {
     assert.strictEqual(result.P, 5000);
   });
 
+  await check("сделка 35497620: наставничество 1 = множитель 1, B = 0,2 → 17000", () => {
+    const row = { X1: 9000, Y1: 1000, Y2: 2000, Y3: 1000, B: 0.2 };
+    const values = { floors: 1, fence: 1, tempSteps: 1, extraHours: 5, finish: 1 };
+    const result = calc.calcMontagePrice("floors", row, values, { personalBonus: null, mentoring: 1, deliveryTariff: 50 });
+
+    assert.strictEqual(result.price, 17000);
+    assert.strictEqual(calc.calcMontagePrice("floors", { ...row, B: 20 }, values, { mentoring: 1 }).price, 17000); // «20» = 20 %
+    assert.strictEqual(calc.calcMontagePrice("floors", row, values, { mentoring: 1.12, personalBonus: 0.13 }).price, Math.round((15000 + 2000 + 10000 * 0.13) * 1.12));
+  });
+
   await check("доп. работы: 2 часа = 0, ≤1 час не считаем, 1.5 ч не уходит в минус", () => {
     const price = (hours) => calc.calcMontagePrice("meter", { X2: 100, Y3: 1000 }, { amount: 1, extraHours: hours }, null).price;
 
@@ -361,7 +371,7 @@ async function main() {
   const settingsStore = require("./montage/settings");
 
   const settings = {
-    motivations: [{ name: "Стандарт", transportTariff: 20, deliveryTariff: 10, personalBonus: 0.01, mentoring: 0.02 }],
+    motivations: [{ name: "Стандарт", transportTariff: 20, deliveryTariff: 10, personalBonus: 0.01, mentoring: 1.02 }],
     users: [{ managerHandle: "@boss", foremanName: "Иванов Иван", motivation: "Стандарт" }],
     pricing: [
       { enumId: 1, productName: "Закрытый каркас", X1: 7000, Y1: 1000, Y2: 2000, Y3: 1000, B: 20 },
