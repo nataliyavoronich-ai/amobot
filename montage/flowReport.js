@@ -1095,10 +1095,10 @@ async function finalize(env, state, result) {
         );
         await channel.publishReport(ctx, {
           text:
-            `**Договор / замерный лист:** ${messenger.mdLink(number, amo.fieldText(ctx, lead, FIELD.CONTRACT_LINK))}\n` +
-            `**Монтажник:** ${mdSafe(foremanName)}\n` +
-            `**Бюджет:** ${mdSafe(calc.fmt(Number(lead.price) || 0))}\n` +
-            `**Продукт:** ${mdSafe(d.productName)}`,
+            `${messenger.mdLink(number, amo.fieldText(ctx, lead, FIELD.CONTRACT_LINK))}\n` +
+            `Монтажник: ${mdSafe(foremanName)}\n` +
+            `Бюджет: ${mdSafe(calc.fmt(Number(lead.price) || 0))}\n` +
+            `Продукт: ${mdSafe(d.productName)}`,
           paths,
           done: d.channelDone
         });
