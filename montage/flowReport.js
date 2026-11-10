@@ -208,15 +208,34 @@ async function start(env, state, lead, task) {
   const pipelineId = Number(lead.pipeline_id);
   const draft = state.drafts && state.drafts[lead.id];
 
-  // Незавершённый отчёт по этой сделке — продолжаем с того же места.
+  // Незавершённый отчёт по этой сделке — спрашиваем: продолжить или начать заново.
+  // Черновик остаётся в state.drafts, пока пользователь не выберет.
   if (draft && draft.cur) {
-    state.flow = draft;
-    delete state.drafts[lead.id];
-    await say(env, `Продолжаем незавершённый отчёт по договору № ${mdSafe(amo.contractNumber(ctx, lead))}.`);
+    state.flow = {
+      name: "report",
+      mode: "report",
+      leadId: lead.id,
+      taskId: task ? task.id : null,
+      data: { done: {} },
+      cur: {
+        type: "choice",
+        prompt:
+          `Найден незавершенный отчет по договору № ${mdSafe(amo.contractNumber(ctx, lead))}. ` +
+          "Хотите продолжить загрузку или начать заново?",
+        buttons: ["Продолжить", "Начать заново"],
+        next: "resume_choice"
+      }
+    };
     await present(env, state);
     return;
   }
 
+  await beginNew(env, state, lead, task);
+}
+
+async function beginNew(env, state, lead, task) {
+  const { ctx } = env;
+  const pipelineId = Number(lead.pipeline_id);
   const productName = deals.productText(ctx, lead);
 
   state.flow = {
@@ -258,6 +277,28 @@ async function contactLines(env, lead) {
 // ------------------------------------------------------------
 
 const STEPS = {
+  // ---------- Незавершённый отчёт: продолжить или начать заново ----------
+  async resume_choice(env, state, value) {
+    const flow = state.flow;
+    const draft = state.drafts && state.drafts[flow.leadId];
+
+    if (value === "Продолжить" && draft) {
+      state.flow = draft;
+      delete state.drafts[flow.leadId];
+      await present(env, state);
+      return;
+    }
+
+    // «Начать заново»: черновик удаляем (загруженные на Диск файлы остаются).
+    if (state.drafts) {
+      delete state.drafts[flow.leadId];
+    }
+
+    const lead = (await amo.getLeadsByIds(env.ctx, [flow.leadId]))[0];
+
+    await beginNew(env, state, lead, { id: flow.taskId });
+  },
+
   // ---------- Дерево производства: снятие лекал ----------
   async lekal_card(env, state) {
     const { ctx } = env;
@@ -1054,7 +1095,8 @@ async function finalize(env, state, result) {
         );
         await channel.publishReport(ctx, {
           text:
-            `**Договор / замерный лист:** ${mdSafe(number)}\n` +
+            `**Договор / замерный лист:** ${messenger.mdLink(number, amo.fieldText(ctx, lead, FIELD.CONTRACT_LINK))}\n` +
+            `**Монтажник:** ${mdSafe(foremanName)}\n` +
             `**Бюджет:** ${mdSafe(calc.fmt(Number(lead.price) || 0))}\n` +
             `**Продукт:** ${mdSafe(d.productName)}`,
           paths,

@@ -542,7 +542,15 @@ async function main() {
 
     // канал: текст по шаблону + фото лестницы + видео КТУ (по одному вложению в сообщении)
     assert.strictEqual(channelPosts.length, 3);
-    assert.match(channelPosts[0].text, /\*\*Договор \/ замерный лист:\*\* 1234[\s\S]*\*\*Бюджет:\*\* 100000[\s\S]*Закрытый каркас$/);
+    assert.strictEqual(
+      channelPosts[0].text,
+      [
+        "**Договор / замерный лист:** [1234](https://pdf.test/1234.pdf)",
+        "**Монтажник:** Иванов Иван",
+        "**Бюджет:** 100000",
+        "**Продукт:** Закрытый каркас"
+      ].join("\n")
+    );
     assert.ok(!/Фотоотчет|Папка на Яндекс/.test(channelPosts[0].text), "в канале не должно быть ссылки на папку");
     assert.deepStrictEqual(channelPosts[1].attachments, [{ file_id: "file-1" }]);
   });
@@ -683,7 +691,7 @@ async function main() {
     const out = await say(foreman, day);
 
     assert.match(out, /Кол-во выполненных монтажей: 1/);
-    assert.match(out, /Договор № 1234/);
+    assert.match(out, /\[Договор № 1234\]\(https:\/\/pdf\.test\/1234\.pdf\):/);
 
     await say(manager, "Отчет");
     await say(manager, "Выбрать период");
@@ -883,6 +891,37 @@ async function main() {
 
     assert.match(menu, /Укажите доп\. работы\./);
     assert.deepStrictEqual(sent[0].buttons, ["Пропустить", "Доп. работы"]);
+  });
+
+  await check("незавершённый отчёт: «Продолжить» и «Начать заново»", async () => {
+    tasks.push({ id: 950, task_type_id: F.TASK_TYPE.MONTAGE_REPORT, is_completed: false, entity_id: 102, complete_till: NOW, updated_at: NOW });
+
+    // от предыдущего теста по этой сделке остался черновик — бот спрашивает, что делать
+    await say(foreman, "Загрузить отчет");
+    assert.match(await say(foreman, "🔧 555"), /Найден незавершенный отчет по договору № 555/);
+    assert.match(await say(foreman, "Начать заново"), /Монтаж проведён\./);
+    assert.match(await say(foreman, "Монтаж завершён"), /Акт клиентом подписан\?/);
+
+    // уходим в меню — отчёт сохраняется как черновик
+    await say(foreman, "Загрузить отчет");
+
+    const ask = await say(foreman, "🔧 555");
+
+    assert.ok(ask.includes("Найден незавершенный отчет по договору № 555. Хотите продолжить загрузку или начать заново?"), ask);
+    assert.deepStrictEqual(sent[0].buttons, ["Продолжить", "Начать заново"]);
+
+    // «Продолжить» — возвращаемся на тот же шаг
+    assert.match(await say(foreman, "Продолжить"), /Акт клиентом подписан\?/);
+
+    // снова уходим и выбираем «Начать заново» — отчёт с самого начала
+    await say(foreman, "Загрузить отчет");
+    assert.match(await say(foreman, "🔧 555"), /Найден незавершенный отчет/);
+    assert.match(await say(foreman, "Начать заново"), /Монтаж проведён\./);
+    assert.deepStrictEqual(sent[0].buttons, ["Перенос монтажа", "Промежуточный отчёт", "Монтаж завершён", "Доп хотелки"]);
+
+    // черновика больше нет: повторный вход сразу показывает карточку
+    await say(foreman, "Загрузить отчет");
+    assert.match(await say(foreman, "🔧 555"), /Монтаж проведён\./);
   });
 
   await check("повторное «Завершить» не плодит задачи и записи", async () => {

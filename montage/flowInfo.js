@@ -178,7 +178,7 @@ function foremanReportText(ctx, period, entries) {
   for (const entry of entries) {
     lines.push(
       "",
-      `Договор № ${amo.contractNumber(ctx, entry.lead)}:`,
+      `${deals.contractLabel(ctx, entry.lead)}:`,
       `Стоимость работ: ${calc.fmt(entry.slot.price)}`,
       `Баллов КТУ: ${calc.fmt(amo.ktuTotal(entry.slot))}`,
       `${calc.fmt(entry.slot.kmFact)} км * ${calc.fmt(entry.slot.tariff)} тариф = ${calc.fmt(entry.slot.kmFactTotal)}`,
@@ -235,15 +235,15 @@ function managerReportText(period, entries, foremanNames) {
 
 // До 31 дня включительно — весь текст (с разбиением на сообщения); дольше —
 // только первое сообщение и предупреждение.
-async function sendLongText(env, period, text, buttons) {
+async function sendLongText(env, period, text, buttons, markdown) {
   if (period.days <= 31) {
-    await say(env, text, buttons);
+    await say(env, text, buttons, markdown);
     return;
   }
 
   const first = calc.splitText(text, 3500)[0];
 
-  await say(env, first);
+  await say(env, first, undefined, markdown);
   await say(env, "Текст отчета слишком длинный, показана только его часть. Выберите период не больше 31 дня.", buttons);
 }
 
@@ -266,7 +266,7 @@ async function buildAndSend(env, state, period) {
   const entries = await collectEntries(ctx, [state.foremanName], period);
 
   state.flow = null;
-  await sendLongText(env, period, foremanReportText(ctx, period, entries));
+  await sendLongText(env, period, foremanReportText(ctx, period, entries), undefined, true);
 }
 
 async function handleReport(env, state, input) {
@@ -313,7 +313,7 @@ async function handleReport(env, state, input) {
     const entries = await collectEntries(ctx, [name], flow.period);
 
     flow.step = "manager_foreman";
-    await sendLongText(env, flow.period, foremanReportText(ctx, flow.period, entries.filter((e) => calc.sameName(e.foreman, name))), [B_BACK]);
+    await sendLongText(env, flow.period, foremanReportText(ctx, flow.period, entries.filter((e) => calc.sameName(e.foreman, name))), [B_BACK], true);
     return true;
   }
 
