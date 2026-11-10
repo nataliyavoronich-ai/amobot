@@ -137,7 +137,10 @@ async function findUpcomingLeads(ctx, { includeLekal }) {
       continue;
     }
 
-    leads.push(...(await amo.getLeadsAtStatus(ctx, pipelineId, UPCOMING_STATUS[pipelineId])));
+    // В воронке может быть несколько подходящих статусов.
+    for (const statusId of [].concat(UPCOMING_STATUS[pipelineId])) {
+      leads.push(...(await amo.getLeadsAtStatus(ctx, pipelineId, statusId)));
+    }
   }
 
   return leads;

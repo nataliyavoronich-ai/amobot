@@ -139,6 +139,20 @@ function field(id, value, enumId) {
 }
 
 const leads = {
+  103: {
+    id: 103,
+    pipeline_id: F.PIPELINE.RECLAMATION,
+    status_id: 67026929,
+    price: 10000,
+    _embedded: { contacts: [{ id: 5, is_main: true }] },
+    custom_fields_values: [
+      field(F.FIELD.MONTAGER, "Иванов Иван", 11),
+      field(F.FIELD.PRODUCT, "Навес", 5),
+      field(F.FIELD.CONTRACT_NUMBER, "Рекл-1"),
+      field(F.FIELD.FLOORS, "1"),
+      field(F.FIELD.TERMS, NOW)
+    ]
+  },
   102: {
     id: 102,
     pipeline_id: F.PIPELINE.METAL,
@@ -706,6 +720,8 @@ async function main() {
     // договор — текст со ссылкой на PDF проекта (если ссылка есть)
     assert.ok(out.includes("15.12.2026, [Договор № 1234](https://pdf.test/1234.pdf), Закрытый каркас, Кол-во этажей: 2."), out);
     assert.ok(out.includes("15.12.2026, Договор № 777, Деревянная лестница"), out); // ссылки нет — просто текст
+    // воронка «Рекламации»: статус «Договорились о монтаже» (67026929)
+    assert.ok(out.includes("Договор № Рекл-1, Навес"), out);
     assert.match(await say(manager, "Предстоящие монтажи"), /Иванов Иван\n1\. [^\n]*1234/);
   });
 
